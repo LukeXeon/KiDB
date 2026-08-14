@@ -54,6 +54,7 @@ type Result struct {
 
 // indexOp 是单个索引的撤销/重建描述符（对应 Lua ARGV 协议）。
 type indexOp struct {
+	kind       byte // 'E' 等值 / 'R' 范围 / 'L' 字典序副本 / 'A' 异步日志
 	undoKey    string
 	undoMember string
 	redoKey    string
@@ -202,6 +203,8 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	switch fmt.Sprint(arr[0]) {
 	case "stale":
 		return true, nil
+	case "log_full":
+		return false, fmt.Errorf("%w: %s（异步索引日志背压，docs/05 §5.2）", kidb.ErrIndexLogFull, rowkey)
 	case "ok":
 		res.OldVer = parseUint64(fmt.Sprint(arr[1]))
 		if len(arr) > 2 {
@@ -369,6 +372,7 @@ func (g *Guard) rollbackReservations(ctx context.Context, keys []string) {
 
 // buildIndexOps 按旧行/新字段展开索引撤销与重建（ACTIVE 单桶形态；
 // 分裂状态机的 SPLITTING/DRAINING 双写由控制器落地后扩展，docs/05 §5.1 第 4 步）。
+// 异步索引（docs/05 §5.2）：不碰桶，追加变更日志（条目 pk\x1f旧\x1f新，ver 由 Lua 补）。
 func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields map[string]string) []indexOp {
 	var ops []indexOp
 	for _, idx := range t.Indexes {
@@ -376,9 +380,24 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 		oldVal, hadOld := oldRow[col]
 		newVal, hasNew := newFields[col]
 
+		// 异步分支：值有变化才记日志（墓碑 = 新值空串）
+		if idx.Async {
+			if hadOld == hasNew && (!hadOld || oldVal == newVal) {
+				continue
+			}
+			entry := pk + "\x1f" + oldVal + "\x1f" + newVal
+			ops = append(ops, indexOp{
+				kind:       'A',
+				redoKey:    keycodec.AsyncLogKey(t.Name, idx.ID, slot),
+				redoMember: entry,
+				hasRedo:    true,
+			})
+			continue
+		}
+
 		// 等值/唯一：桶按值寻址；范围：单 ACTIVE 桶；字典序副本随行
 		if idx.Kind == meta.IndexRange {
-			op := indexOp{}
+			op := indexOp{kind: 'R'}
 			if hadOld {
 				op.undoKey = keycodec.RangeBucketKey(t.Name, idx.ID, slot, 0)
 				op.undoMember = pk
@@ -397,7 +416,7 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 		}
 
 		// IndexEq / IndexUnique
-		op := indexOp{}
+		op := indexOp{kind: 'E'}
 		if hadOld && (!hasNew || oldVal != newVal) {
 			op.undoKey = keycodec.EqBucketKey(t.Name, idx.ID, oldVal, slot, 0)
 			op.undoMember = pk
@@ -412,7 +431,7 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 
 		// 字典序副本（前缀搜索，docs/04 §4.5）
 		if idx.PrefixCopy {
-			lop := indexOp{}
+			lop := indexOp{kind: 'L'}
 			if hadOld && (!hasNew || oldVal != newVal) {
 				lop.undoKey = keycodec.LexBucketKey(t.Name, idx.ID, slot, 0)
 				lop.undoMember = lexMember(oldVal, pk)
@@ -490,8 +509,12 @@ func assembleIndexArgs(ops []indexOp) (bucketKeys []string, argvTail []any) {
 		if d.hasRedo {
 			score = strconv.FormatFloat(d.redoScore, 'g', -1, 64)
 		}
+		kind := d.kind
+		if kind == 0 {
+			kind = 'E'
+		}
 		argvTail = append(argvTail,
-			"E", // kind 自描述（v1 Lua 分支不区分，见脚本注释）
+			string(kind),
 			strconv.Itoa(ref(d.undoKey)), d.undoMember,
 			strconv.Itoa(ref(d.redoKey)), d.redoMember, score,
 		)

@@ -1,5 +1,5 @@
 -- @name write_row
--- @version 1
+-- @version 2
 -- @keys_desc KEYS[1]=row_key(router); KEYS[2..n-3]=bucket_keys; KEYS[n-2]=exp; KEYS[n-1]=cnt; KEYS[n]=rcpt
 -- @idempotent true
 --
@@ -14,10 +14,12 @@
 --   [5] expected_old_ver（"-1"=不校验；与行内 _ver 不符返回 stale）
 --   [6] M = 索引描述符个数
 --   每个索引 6 字段（顺序消费）：
---     kind("E"=等值/"R"=范围/"L"=字典序副本)  —— v1 三分支撤销/重建同为 ZREM/ZADD，
---                                              kind 仅作协议自描述与调试可读性
+--     kind("E"=等值/"R"=范围/"L"=字典序副本/"A"=异步日志)  —— v1 同步分支同为
+--                                              ZREM/ZADD，kind 区分同步与异步
 --     undo_key_idx, undo_member,
 --     redo_key_idx, redo_member, redo_score（范围桶用；其余为 "0"）
+--     异步（A）：无 undo；redo_key 为日志 key，redo_member = pk\x1f旧值\x1f新值，
+--              Lua 追加 newVer 后 RPUSH；日志容量超硬上限返回 {"log_full"} 背压
 --   W 追加：F = 字段数，F×(field, value)
 --   W 追加：U = 唯一预约数，U×(index_id, reservation_key)（记入回执 __uniq: 字段）
 --
@@ -60,6 +62,7 @@ local p = 7
 local descs = {}
 for i = 1, M do
   descs[i] = {
+    kind       = ARGV[p],
     undoKey    = tonumber(ARGV[p+1]),
     undoMember = ARGV[p+2],
     redoKey    = tonumber(ARGV[p+3]),
@@ -69,6 +72,17 @@ for i = 1, M do
   p = p + 6
 end
 
+-- 异步日志容量预检（必须在任何写操作之前——Lua 无回滚，中途返回即部分提交）：
+-- 日志超硬上限 → log_full 背压（docs/05 §5.2），配置化挂点 async_log_capacity。
+for i = 1, M do
+  local d = descs[i]
+  if d.kind == 'A' and d.redoKey > 0 then
+    if redis.call('LLEN', KEYS[1 + d.redoKey]) >= 100000 then
+      return {'log_full', tostring(oldVer)}
+    end
+  end
+end
+
 if op == 'D' then
   -- 命中已过期行（old 空）→ 0 rows affected：索引残留给 sweeper，不动回执
   if oldExists then
@@ -76,6 +90,13 @@ if op == 'D' then
       local d = descs[i]
       if d.undoKey > 0 then
         redis.call('ZREM', KEYS[1 + d.undoKey], d.undoMember)
+      end
+    end
+    -- 异步索引：删除也走日志（墓碑条目，新值为空；容量已预检）
+    for i = 1, M do
+      local d = descs[i]
+      if d.kind == 'A' and d.redoKey > 0 then
+        redis.call('RPUSH', KEYS[1 + d.redoKey], d.redoMember .. string.char(31) .. tostring(oldVer))
       end
     end
     redis.call('DEL', rowkey)
@@ -88,7 +109,7 @@ end
 
 -- ============ op == 'W' ============
 
--- 撤旧索引（含主键复活：撤销条目由调用方按旧行/旧回执展开进描述符）
+-- 撤旧索引（含主键复活：撤销条目由调用方按旧行/旧回执展开进描述符；异步无撤销——日志追加即覆盖语义）
 for i = 1, M do
   local d = descs[i]
   if d.undoKey > 0 then
@@ -103,15 +124,23 @@ for i = 1, F do
   p = p + 2
 end
 
--- 建新索引
+-- 建新索引（同步分支）
 for i = 1, M do
   local d = descs[i]
-  if d.redoKey > 0 then
+  if d.redoKey > 0 and d.kind ~= 'A' then
     redis.call('ZADD', KEYS[1 + d.redoKey], d.redoScore, d.redoMember)
   end
 end
 
 local newVer = redis.call('HINCRBY', rowkey, '_ver', 1)
+
+-- 异步索引：追加变更日志（条目 = pk\x1f旧值\x1f新值\x1fver；Indexer 消费 docs/05 §5.2）
+for i = 1, M do
+  local d = descs[i]
+  if d.kind == 'A' and d.redoKey > 0 then
+    redis.call('RPUSH', KEYS[1 + d.redoKey], d.redoMember .. string.char(31) .. tostring(newVer))
+  end
+end
 
 -- 计数：仅"全新插入"（旧行空且无回执）INCR；复活不 INCR（见头部不变式）
 local rcptExists = redis.call('EXISTS', rcptkey) == 1

@@ -144,6 +144,16 @@ func TestGatewaySmoke(t *testing.T) {
 		t.Fatalf("age = %d", age)
 	}
 
+	// 配置管理面（docs/10 §10.2：SET GLOBAL → cfg:global；SHOW LIKE 读回）
+	execSQL("SET GLOBAL bucket_split_members = 60000")
+	var varName, varValue string
+	if err := db.QueryRowContext(ctx, "SHOW GLOBAL VARIABLES LIKE 'bucket\\_split\\_members'").Scan(&varName, &varValue); err != nil {
+		t.Fatalf("SHOW VARIABLES: %v", err)
+	}
+	if varName != "bucket_split_members" || varValue != "60000" {
+		t.Fatalf("SHOW = %s=%s", varName, varValue)
+	}
+
 	// 事务语句拒绝（docs/02 §2.1）
 	if _, err := db.ExecContext(ctx, "BEGIN"); err == nil {
 		t.Fatal("BEGIN 必须报错 1235")

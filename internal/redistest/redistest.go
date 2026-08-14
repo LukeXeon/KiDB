@@ -4,7 +4,10 @@ package redistest
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -36,4 +39,25 @@ func New(t *testing.T) (kidb.Client, *script.Registry, *miniredis.Miniredis) {
 		t.Fatalf("script.Load: %v", err)
 	}
 	return cli, reg, m
+}
+
+// ServerClock 返回跟随 miniredis 服务端时间的时钟（FastForward 同步生效）。
+// 写入/清扫两侧在 TTL 测试中必须共用同一时钟——miniredis 的 FastForward 只移动
+// 服务端时间，客户端本地时钟不走（生产侧由 TIME 校准，docs/11 §11.1 时钟偏移行）。
+func ServerClock(cli kidb.Client) func() time.Time {
+	return func() time.Time {
+		res, err := cli.Do(context.Background(), "TIME")
+		if err != nil {
+			return time.Now()
+		}
+		ss, ok := res.([]any)
+		if !ok || len(ss) == 0 {
+			return time.Now()
+		}
+		n, err := strconv.ParseInt(fmt.Sprint(ss[0]), 10, 64)
+		if err != nil {
+			return time.Now()
+		}
+		return time.Unix(n, 0)
+	}
 }

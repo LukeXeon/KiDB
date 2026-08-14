@@ -7,6 +7,7 @@ require (
 	github.com/dolthub/go-mysql-server v0.20.0
 	github.com/dolthub/vitess v0.0.0-20250512224608-8fb9c6ea092c
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/hashicorp/golang-lru/arc/v2 v2.0.7
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20260814130643-17c0dd0fe42b
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1
@@ -26,6 +27,7 @@ require (
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/lestrrat-go/strftime v1.0.4 // indirect
 	github.com/pingcap/errors v0.11.5-0.20250523034308-74f78ae071ee // indirect
 	github.com/pingcap/failpoint v0.0.0-20240528011301-b51a646c7c86 // indirect

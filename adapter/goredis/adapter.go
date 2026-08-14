@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,8 +69,10 @@ func (a *Adapter) Close() error { return a.cli.Close() }
 
 // Do 执行单条命令（契约 R2：命令必须携带 key；适配器做防御性校验）。
 // redis.Nil 统一翻译为 (nil, nil)——"不存在"不是错误。
+// 例外：TIME 是运维带外命令（docs/09 §9.2 白名单），无 key 放行
+// （go-redis 将其路由到任一节点，时钟读取语义成立）。
 func (a *Adapter) Do(ctx context.Context, cmd string, args ...any) (any, error) {
-	if len(args) == 0 {
+	if len(args) == 0 && !strings.EqualFold(cmd, "TIME") {
 		return nil, fmt.Errorf("%w: Do(%s) without key", kidb.ErrContractViolation, cmd)
 	}
 	res, err := a.cli.Do(ctx, append([]any{cmd}, args...)...).Result()

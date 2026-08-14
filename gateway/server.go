@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 
 	"github.com/dolthub/go-mysql-server/server"
@@ -13,6 +12,7 @@ import (
 	"github.com/dolthub/vitess/go/sqltypes"
 
 	"kidb"
+	"kidb/config"
 	"kidb/ddl"
 	"kidb/engine"
 )
@@ -22,6 +22,7 @@ import (
 type Server struct {
 	srv  *server.Server
 	deps engine.Deps
+	cfg  *config.Store // 配置管理面（docs/10 §10.2）
 
 	mu       sync.Mutex
 	sessions map[uint32]*sessRec // connID → 会话状态
@@ -56,7 +57,11 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 		ed.Close()
 	}
 
-	s := &Server{deps: deps, sessions: map[uint32]*sessRec{}}
+	s := &Server{
+		deps:     deps,
+		sessions: map[uint32]*sessRec{},
+		cfg:      config.New(deps.Client, deps.Reg, "kidb-server"),
+	}
 
 	// 会话构造：BaseSession + 角色登记
 	roleOf := map[string]string{}
@@ -139,6 +144,11 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 		return mysql.NewSQLError(1290, "HY000", "只读账号禁止写操作（ERR_READ_ONLY）")
 	}
 
+	// 配置管理面（SET GLOBAL / SHOW VARIABLES LIKE，docs/10 §10.2）
+	if handled, err := h.handleConfigStmt(ctx, c, query, callback); handled {
+		return err
+	}
+
 	if Classify(query) != RouteDDL {
 		return h.Handler.ComQuery(ctx, c, query, callback)
 	}
@@ -207,5 +217,4 @@ func isWriteStmt(query string) bool {
 	return false
 }
 
-// 静态检查：leadingWords/stripComments 在 classify.go。
-var _ = strings.TrimSpace
+// leadingWords/stripComments 见 classify.go。
