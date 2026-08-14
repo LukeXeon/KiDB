@@ -67,7 +67,7 @@ func TestFullScanAndPointGet(t *testing.T) {
 	g := txguard.New(cli, reg)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 100)
-	e := New(cli)
+	e := New(cli, reg)
 	ctx := context.Background()
 
 	// 全表遍历（exp 登记册驱动）
@@ -90,7 +90,7 @@ func TestEqLookupWithValidation(t *testing.T) {
 	g := txguard.New(cli, reg)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 50)
-	e := New(cli)
+	e := New(cli, reg)
 	ctx := context.Background()
 
 	idx := tbl.Index("idx_city")
@@ -128,7 +128,7 @@ func TestRangeLookup(t *testing.T) {
 	g := txguard.New(cli, reg)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 50) // age = 20..69
-	e := New(cli)
+	e := New(cli, reg)
 	ctx := context.Background()
 
 	idx := tbl.Index("idx_age")

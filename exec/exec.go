@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -18,6 +19,7 @@ import (
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
+	"kidb/script"
 )
 
 // 常量默认值（docs/10 §10.2 变量表；config 包落地后改读全局变量）。
@@ -150,20 +152,34 @@ type Request struct {
 	Values []string       // EqLookup：编码后值列表
 	Ranges []RangeBound   // RangeLookup：score 区间列表（OR，不重迭）
 
-	Pred *Predicate // 回表校验（nil = 不校验）
+	Pred     *Predicate // 回表校验（nil = 不校验）
+	Pushdown bool       // 谓词下推到服务端 Lua（docs/04 §4.2，白名单形态）
 }
 
 // Executor 执行 Request，产出流式行。
 type Executor struct {
 	cli           kidb.Client
+	reg           *script.Registry // 谓词下推脚本（nil = 不下推）
+	nc            L1Cache          // L1 近缓存（nil = 关闭，docs/08 §8.4）
 	batch         int
 	slotsPerRound int
 }
 
-// New 构造执行器。
-func New(cli kidb.Client) *Executor {
-	return &Executor{cli: cli, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound}
+// L1Cache 是谓词指纹→pk 列表的近缓存接口（nearcache.Cache[string, []string] 满足）。
+// 正确性纪律：缓存只存 pk 列表，回表 + 谓词校验照常执行——陈旧列表至多
+// 漏掉 TTL 窗口内的新行（3s，文档化语义），绝不会出错行。
+type L1Cache interface {
+	Get(key string) ([]string, bool)
+	Add(key string, val []string)
 }
+
+// New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
+func New(cli kidb.Client, reg *script.Registry) *Executor {
+	return &Executor{cli: cli, reg: reg, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound}
+}
+
+// SetNearCache 接入 L1（nearcache_ttl 变量热更新的挂点）。
+func (e *Executor) SetNearCache(c L1Cache) { e.nc = c }
 
 // RowStream 是流式行游标（io.EOF 结束）。调用方负责 Close。
 type RowStream struct {
@@ -179,6 +195,12 @@ type RowStream struct {
 	err      error
 	closed   bool
 	rowCount int64
+
+	// L1 近缓存（仅 EqLookup；全扫指纹不入缓存，docs/08 §8.4）
+	ncFP      string   // 谓词指纹
+	ncCached  []string // 缓存命中的 pk 列表（ncCachedOff 分页消费）
+	ncOff     int
+	ncCollect []string // 散取路径收集的 pk（完全排空后才写缓存）
 }
 
 type bucketScan struct {
@@ -188,7 +210,22 @@ type bucketScan struct {
 
 // Run 启动流式执行。
 func (e *Executor) Run(ctx context.Context, req *Request) *RowStream {
-	return &RowStream{req: req, exec: e, ctx: ctx}
+	s := &RowStream{req: req, exec: e, ctx: ctx}
+	// L1：等值查询查指纹缓存（命中 → 跳过散取直接回表；陈旧由校验兜底）
+	if req.Kind == EqLookup && e.nc != nil && req.Index != nil {
+		s.ncFP = l1Fingerprint(req)
+		if pks, ok := e.nc.Get(s.ncFP); ok {
+			s.ncCached = pks
+		}
+	}
+	return s
+}
+
+// l1Fingerprint 谓词指纹（table|idx|values 排序后拼接）。
+func l1Fingerprint(req *Request) string {
+	vs := append([]string(nil), req.Values...)
+	sort.Strings(vs)
+	return req.Table.Name + "|" + req.Index.ID + "|" + strings.Join(vs, ",")
 }
 
 // Next 产出下一行（已解码、已过校验）；结束返回 io.EOF。
@@ -208,6 +245,10 @@ func (s *RowStream) Next() ([]any, error) {
 		}
 		if err := s.fill(); err != nil {
 			if err == io.EOF {
+				// 完全排空才把散取结果写进 L1（部分消费/提前终止不入缓存）
+				if s.ncFP != "" && s.ncCached == nil && s.exec.nc != nil {
+					s.exec.nc.Add(s.ncFP, s.ncCollect)
+				}
 				s.err = io.EOF
 			}
 			return nil, err
@@ -224,6 +265,16 @@ func (s *RowStream) Close() error {
 
 // fill 拉取下一批行；无更多数据返回 io.EOF。
 func (s *RowStream) fill() error {
+	// L1 缓存命中：pk 列表分页回表（校验照常在 fetchRows 内）
+	if s.ncCached != nil {
+		if s.ncOff >= len(s.ncCached) {
+			return io.EOF
+		}
+		end := min(s.ncOff+s.exec.batch, len(s.ncCached))
+		err := s.fetchRows(s.ncCached[s.ncOff:end])
+		s.ncOff = end
+		return err
+	}
 	switch s.req.Kind {
 	case PointGet:
 		return s.fillPointGet()
@@ -288,6 +339,9 @@ func (s *RowStream) fillScatter() error {
 		if len(pks) == 0 {
 			continue
 		}
+		if s.ncFP != "" {
+			s.ncCollect = append(s.ncCollect, pks...)
+		}
 		if err := s.fetchRows(pks); err != nil {
 			return err
 		}
@@ -345,7 +399,11 @@ func rangeBound(v float64, open bool) string {
 
 // fetchRows 批量回表（pipeline HGETALL，512 批）→ 空行跳过 → 谓词校验 → 解码入队。
 // 这是"回表校验"纪律的落实点（docs/04 §4.3）：一切索引路径的输出都经此过滤。
+// 谓词为白名单形态且开启 Pushdown 时，校验在服务端 Lua 完成（网络只传命中行）。
 func (s *RowStream) fetchRows(pks []string) error {
+	if s.req.Pushdown && s.req.Pred != nil && s.req.Pred.pushdownable() && s.exec.reg != nil {
+		return s.fetchRowsPushdown(s.ctx, pks)
+	}
 	t := s.req.Table
 	for i := 0; i < len(pks); i += s.exec.batch {
 		batch := pks[i:min(i+s.exec.batch, len(pks))]

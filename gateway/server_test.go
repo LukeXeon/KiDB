@@ -29,7 +29,7 @@ func newTestServer(t *testing.T) (string, func()) {
 		Reg:    reg,
 		Store:  store,
 		Cache:  meta.NewCatalogCache(store),
-		Exec:   exec.New(cli),
+		Exec:   exec.New(cli, reg),
 		Guard:  txguard.New(cli, reg),
 	}
 
@@ -175,7 +175,7 @@ func TestGatewayRO(t *testing.T) {
 	store := meta.NewCatalogStore(cli)
 	deps := engine.Deps{
 		Client: cli, Reg: reg, Store: store,
-		Cache: meta.NewCatalogCache(store), Exec: exec.New(cli), Guard: txguard.New(cli, reg),
+		Cache: meta.NewCatalogCache(store), Exec: exec.New(cli, reg), Guard: txguard.New(cli, reg),
 	}
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	srv, err := newServerWithListener(deps, kidb.Bootstrap{

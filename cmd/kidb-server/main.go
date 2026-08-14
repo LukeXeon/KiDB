@@ -70,7 +70,7 @@ func main() {
 		Reg:    k.Scripts(),
 		Store:  store,
 		Cache:  meta.NewCatalogCache(store),
-		Exec:   exec.New(cli),
+		Exec:   exec.New(cli, k.Scripts()),
 		Guard:  txguard.New(cli, k.Scripts()),
 	}
 	srv, err := gateway.NewServer(deps, boot)

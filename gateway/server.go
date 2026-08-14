@@ -13,6 +13,7 @@ import (
 
 	"kidb"
 	"kidb/config"
+	"kidb/controller"
 	"kidb/ddl"
 	"kidb/engine"
 )
@@ -26,6 +27,10 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[uint32]*sessRec // connID → 会话状态
+
+	// 后台角色（docs/08 §8.5；ReadWriteOnly 豁免）
+	roleCancel context.CancelFunc
+	elector    *controller.Elector
 }
 
 type sessRec struct {
@@ -100,14 +105,23 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 		return nil, fmt.Errorf("gateway: new server: %w", err)
 	}
 	s.srv = srv
+	// 后台角色自动选举（docs/08 §8.5：默认参与，ReadWriteOnly 显式豁免）
+	if !boot.ReadWriteOnly {
+		s.startRoles(context.Background())
+	}
 	return s, nil
 }
 
 // Start 启动监听（阻塞）。
 func (s *Server) Start() error { return s.srv.Start() }
 
-// Close 停服。
-func (s *Server) Close() error { return s.srv.Close() }
+// Close 停服：先停后台角色再关协议层。
+func (s *Server) Close() error {
+	if s.roleCancel != nil {
+		s.roleCancel()
+	}
+	return s.srv.Close()
+}
 
 // kidbHandler 包装 gms Handler：前置分类（docs/02 §2.2）+ 事务拒绝 + ro 执法。
 type kidbHandler struct {
