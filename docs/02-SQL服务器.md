@@ -76,13 +76,13 @@ CREATE TABLE sessions (
   token VARCHAR(64) NOT NULL,
   profile JSON,
   PRIMARY KEY (uid)
-) COMMENT='kidb:{"default_ttl":86400,"max_row_bytes":1048576,"expected_rows":"1e8","exp_shards":16}';
+) COMMENT 'kidb:{"default_ttl":86400,"max_row_bytes":1048576,"expected_rows":"1e8","exp_shards":16}';
 
 CREATE INDEX idx_token ON sessions (token)
-  COMMENT='kidb:{"prefix_copy":true}';            -- 前缀搜索字典序副本
+  COMMENT 'kidb:{"prefix_copy":true}';            -- 前缀搜索字典序副本
 
 CREATE INDEX idx_profile ON sessions (uid)
-  COMMENT='kidb:{"covering":["token"],"async":false}';  -- 覆盖索引；异步索引不允许 covering
+  COMMENT 'kidb:{"covering":["token"],"async":false}';  -- 覆盖索引；异步索引不允许 covering
 ```
 
 payload 字段全集与默认值在 [06](06-元数据与Schema演进.md) §6.1；DDL 校验规则（索引数 ≤16、列数 ≤256、`_` 前缀列拒绝、覆盖索引必须同步、async+unique 互斥等）在执行器内 fail-fast。COMMENT 里非 `kidb:` 前缀的内容视为普通注释，两不干扰。
