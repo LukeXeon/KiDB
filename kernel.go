@@ -11,35 +11,19 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
+
 	"kidb/script"
 )
 
-// Querier 是内核对外暴露的唯一接口（docs/01 §1.6）。
+// Querier 是内核对外暴露的唯一接口（docs/01 §1.6），签名对齐
+// go-mysql-server 引擎（docs/02 §2.5 DML 路径）。
 // 产品形态只有网关一种；Querier 同时作为测试与带外工具的程序化入口
 // （工程接缝，非第二产品形态）。
-//
-// TODO(impl): RowIter/OkResult 当前为骨架定义，实现期接入
-// go-mysql-server 后对齐 sql.RowIter / sql.OkResult（docs/02 §2.1）。
 type Querier interface {
-	Query(ctx context.Context, query string) (RowIter, error)
-	Exec(ctx context.Context, query string) (OkResult, error)
-}
-
-// Row 是一行结果的骨架表示（列序由 Schema 给出）。
-type Row []any
-
-// RowIter 全链路流式游标：任何查询不物化全量结果（docs/01 §1.7）。
-// Next 返回 io.EOF 表示结束。
-type RowIter interface {
-	Next(ctx context.Context) (Row, error)
-	Schema() []string
-	Close() error
-}
-
-// OkResult 对应 MySQL OK 包语义。
-type OkResult struct {
-	RowsAffected uint64
-	LastInsertID uint64
+	Query(ctx context.Context, query string) (sql.Schema, sql.RowIter, error)
+	Exec(ctx context.Context, query string) (types.OkResult, error)
 }
 
 // Kernel 是内核组装体。构造见 NewKernel。
