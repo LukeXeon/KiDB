@@ -29,6 +29,23 @@ func ExpShardKey(table string, slot uint16, shard int) string {
 	return fmt.Sprintf("%s#%d", ExpKey(table, slot), shard)
 }
 
+// ExpKeyN 登记册规范形态的唯一入口：shards≤1 时无后缀（与 ExpKey 一致），
+// 否则带 `#shard` 后缀。写/扫/清扫三方必须都经此函数（docs/03 §3.1）。
+func ExpKeyN(table string, slot uint16, shard, shards int) string {
+	if shards <= 1 {
+		return ExpKey(table, slot)
+	}
+	return ExpShardKey(table, slot, shard)
+}
+
+// ExpShardFor 按 pk 散列选登记册分片（docs/07 §7.2：按 pk 散列细分）。
+func ExpShardFor(pk string, shards int) int {
+	if shards <= 1 {
+		return 0
+	}
+	return int(CRC16(pk)) % shards
+}
+
 // EqBucketKey 等值索引桶：`i:{table}:{idx}={value}:{stag}#b{n}`。
 // value 经 EscapeValue 转义/摘要。
 func EqBucketKey(table, idx, value string, slot uint16, n int) string {
@@ -83,6 +100,10 @@ func BucketMapKey(table, idx string) string { return "bm:" + table + ":" + idx }
 
 // CatalogKey 表元数据：`c:table:{table}`。
 func CatalogKey(table string) string { return "c:table:" + table }
+
+// TableRegistryKey 表注册表：`c:tables` Hash（field=表名，value=1）。
+// SHOW TABLES / INFORMATION_SCHEMA 由此生成（docs/02 §2.10）。
+func TableRegistryKey() string { return "c:tables" }
 
 // SchemaVerKey 全局 schema 版本：`ver:schema`（docs/06 §6.1）。
 func SchemaVerKey() string { return "ver:schema" }

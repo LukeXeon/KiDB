@@ -90,6 +90,36 @@ func (s *CatalogStore) SchemaVersion(ctx context.Context) (uint64, error) {
 	return strconv.ParseUint(fmt.Sprint(res), 10, 64)
 }
 
+// ListTables 返回表注册表（c:tables Hash，field=表名）。
+func (s *CatalogStore) ListTables(ctx context.Context) ([]string, error) {
+	res, err := s.cli.Do(ctx, "HKEYS", keycodec.TableRegistryKey())
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	switch v := res.(type) {
+	case []string:
+		names = v
+	case []any:
+		for _, e := range v {
+			names = append(names, fmt.Sprint(e))
+		}
+	}
+	return names, nil
+}
+
+// RegisterTable / UnregisterTable 维护表注册表（DDL 路径调用）。
+func (s *CatalogStore) RegisterTable(ctx context.Context, table string) error {
+	_, err := s.cli.Do(ctx, "HSET", keycodec.TableRegistryKey(), table, 1)
+	return err
+}
+
+// UnregisterTable 从注册表移除。
+func (s *CatalogStore) UnregisterTable(ctx context.Context, table string) error {
+	_, err := s.cli.Do(ctx, "HDEL", keycodec.TableRegistryKey(), table)
+	return err
+}
+
 // asStringMap 把 HGETALL 的两种返回形态（map 或扁平数组）归一为 map。
 func asStringMap(res any) (map[string]string, error) {
 	switch v := res.(type) {

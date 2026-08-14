@@ -83,16 +83,17 @@ type IndexDef struct {
 
 // TableDef 是表定义（Catalog 的核心载荷）。
 type TableDef struct {
-	Name         string      `json:"name"`
-	Columns      []ColumnDef `json:"columns"`
-	PK           string      `json:"pk"` // 单列主键（DDL 校验）
-	Indexes      []IndexDef  `json:"indexes,omitempty"`
-	DefaultTTL   int64       `json:"default_ttl,omitempty"`   // 秒；0=无默认
-	MaxRowBytes  int         `json:"max_row_bytes,omitempty"` // 默认 1MB，硬上限 4MB
-	ExpectedRows string      `json:"expected_rows,omitempty"`
-	ExpShards    int         `json:"exp_shards,omitempty"` // exp 登记册细分（docs/07 §7.2），默认 1
-	Dimension    bool        `json:"dimension,omitempty"`  // 维表标记（docs/04 §4.4 档 2）
-	Ver          uint64      `json:"-"`                    // 表级 _ver（来自 Catalog，不随 def 编码）
+	Name           string      `json:"name"`
+	Columns        []ColumnDef `json:"columns"`
+	PK             string      `json:"pk"` // 单列主键（DDL 校验）
+	Indexes        []IndexDef  `json:"indexes,omitempty"`
+	DefaultTTL     int64       `json:"default_ttl,omitempty"`   // 秒；0=无默认
+	MaxRowBytes    int         `json:"max_row_bytes,omitempty"` // 默认 1MB，硬上限 4MB
+	ExpectedRows   string      `json:"expected_rows,omitempty"`
+	ExpShards      int         `json:"exp_shards,omitempty"` // exp 登记册细分（docs/07 §7.2），默认 1
+	Dimension      bool        `json:"dimension,omitempty"`  // 维表标记（docs/04 §4.4 档 2）
+	AutoIncrColumn string      `json:"auto_incr,omitempty"`  // AUTO_INCREMENT 列（限主键、INT，DDL 校验）
+	Ver            uint64      `json:"-"`                    // 表级 _ver（来自 Catalog，不随 def 编码）
 }
 
 // Column 按名取列。

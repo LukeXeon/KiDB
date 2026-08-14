@@ -152,8 +152,9 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	keys := make([]string, 0, 4+len(bucketKeys))
 	keys = append(keys, rowkey)
 	keys = append(keys, bucketKeys...)
+	expShards := t.EffectiveExpShards()
 	keys = append(keys,
-		keycodec.ExpKey(t.Name, slot), // TODO(impl): exp_shards 细分随 sweeper 落地
+		keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(req.PK, expShards), expShards),
 		keycodec.CntKey(t.Name, slot),
 		rcptkey,
 	)
@@ -246,8 +247,9 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		ops := buildIndexOps(t, slot, pk, oldRow, nil)
 		bucketKeys, argvTail := assembleIndexArgs(ops)
 		keys := append([]string{rowkey}, bucketKeys...)
+		expShards := t.EffectiveExpShards()
 		keys = append(keys,
-			keycodec.ExpKey(t.Name, slot),
+			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(pk, expShards), expShards),
 			keycodec.CntKey(t.Name, slot),
 			keycodec.ReceiptKey(t.Name, pk),
 		)
@@ -281,6 +283,20 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		return false, nil
 	}
 	return false, fmt.Errorf("%w: delete %s after %d attempts", kidb.ErrStaleMetadata, rowkey, maxStaleRetries)
+}
+
+// NextAutoID 取 AUTO_INCREMENT 序列值（docs/05 §5.4：
+// seq:{table} 与行异 slot，必须先于写入 Lua 单独 INCR；空洞语义与 MySQL 一致）。
+func (g *Guard) NextAutoID(ctx context.Context, table string) (uint64, error) {
+	res, err := g.cli.Do(ctx, "INCR", keycodec.SeqKey(table))
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseUint(fmt.Sprint(res), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("txguard: seq %s: %v", table, res)
+	}
+	return n, nil
 }
 
 // reserveUnique 执行唯一预约两阶段（docs/05 §5.3）：

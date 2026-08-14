@@ -148,6 +148,8 @@ func buildCreateTable(s *ast.CreateTableStmt) (*Op, error) {
 					return nil, fmt.Errorf("%w: 复合/多主键", kidb.ErrUnsupported)
 				}
 				def.PK = cn
+			case ast.ColumnOptionAutoIncrement:
+				def.AutoIncrColumn = cn
 			case ast.ColumnOptionDefaultValue, ast.ColumnOptionNull:
 				// 默认值 v1 不取（docs/02 §2.4 未声明）；NULL 语义由行缺失字段表达
 			default:
@@ -313,6 +315,9 @@ func validateTable(t *meta.TableDef) error {
 	}
 	if pkCol.Type != meta.ColInt && pkCol.Type != meta.ColString {
 		return fmt.Errorf("%w: 主键类型限 INT/STRING", kidb.ErrUnsupported)
+	}
+	if t.AutoIncrColumn != "" && (t.AutoIncrColumn != t.PK || pkCol.Type != meta.ColInt) {
+		return fmt.Errorf("%w: AUTO_INCREMENT 限 INT 主键列（docs/05 §5.4）", kidb.ErrUnsupported)
 	}
 	if len(t.Indexes) > 16 {
 		return fmt.Errorf("%w: 单表索引数 %d > 16", kidb.ErrUnsupported, len(t.Indexes))
