@@ -98,7 +98,7 @@ func (c *ShardedCache[V]) sweepOnce() {
 	}
 }
 
-// === 基准：v1（ARC+PQ+janitor）vs v2（分片 map）===
+// === 基准 ===
 
 var benchKeys []string
 
@@ -108,7 +108,7 @@ func init() {
 	}
 }
 
-func BenchmarkV2Mixed(b *testing.B) {
+func BenchmarkShardedMixed(b *testing.B) {
 	c := NewSharded[[]string](10000, 3*time.Second)
 	defer c.Close()
 	pks := []string{"1", "2", "3"}

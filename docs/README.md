@@ -12,7 +12,7 @@
 4. **元数据引入 schema lease 纪律**（[06](06-元数据与Schema演进.md)），plan cache 随 schema 版本失效——对齐 TiDB `domain`/`plan_cache`；
 5. **契约增补错误分类与退避矩阵**（[09](09-后端契约与适配器.md) §9.6）——对齐 client-go `Backoffer`；
 6. **部署形态收敛为网关单形态**（v4.3 决策延续，[11](11-部署与运维.md) §11.2）；
-7. 三方库策略不变：**能用库的用库**（go-mysql-server / ARC / singleflight / conc / msgp …），能搬 TiDB 的搬 TiDB，都不存在才自研薄层。
+7. 三方库策略不变：**能用库的用库**（go-mysql-server / TiDB parser / singleflight / conc / msgp …），能搬 TiDB 的搬 TiDB，都不存在才自研薄层。
 
 ## 文档索引
 

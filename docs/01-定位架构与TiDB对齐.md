@@ -93,7 +93,7 @@ KiDB 与 TiDB 在架构形状上同构——**无状态 SQL 计算层 + 共享 K
 │  meta      Catalog/BucketMap 缓存 + schema lease       │
 │  config    cfg:global 配置存储（SET GLOBAL）           │
 │  controller/sweeper/indexer/telemetry  后台角色        │
-│  nearcache 进程内近缓存（ARC + janitor）               │
+│  nearcache 进程内近缓存（分片 map + 周期清扫）         │
 └─────────────── kidb（根包：Kernel/Querier/Client/Bootstrap）┘
         │
         ▼
