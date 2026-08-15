@@ -20,8 +20,7 @@ func TestL1NearCache(t *testing.T) {
 	tbl := seedTable()
 	seedRows(t, g, tbl, 20) // 10 shanghai / 10 beijing
 
-	nc, err := nearcache.New[string, []string](1000, 3*time.Second)
-	require.NoError(t, err)
+	nc := nearcache.NewSharded[[]string](1000, 3*time.Second)
 	defer nc.Close()
 
 	e := New(cli, reg)
@@ -37,7 +36,7 @@ func TestL1NearCache(t *testing.T) {
 	require.True(t, ok, "完全排空后指纹应入缓存")
 
 	// 缓存窗口内的变更：行 1 换值（缓存列表陈旧仍含它，校验必须拦）
-	_, err = g.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: "1", Fields: map[string]string{"city": "shenzhen", "age": "99"}})
+	_, err := g.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: "1", Fields: map[string]string{"city": "shenzhen", "age": "99"}})
 	require.NoError(t, err)
 
 	rows = drain(t, e.Run(ctx, &Request{Table: tbl, Kind: EqLookup, Index: idx, Values: []string{"shanghai"}, Pred: pred}))
