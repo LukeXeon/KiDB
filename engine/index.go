@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"fmt"
+
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb/meta"
@@ -75,23 +77,70 @@ func (i *Index) ColumnExpressionTypes() []sql.ColumnExpressionType {
 	return out
 }
 
-// CanSupport 范围过滤支持（单列索引：等值/范围均可）。
-func (i *Index) CanSupport(ctx *sql.Context, ranges ...sql.Range) bool { return true }
+// CanSupport 范围过滤支持（gms 索引选路咨询）。
+//
+// 收紧纪律（gms replace_sort.go 契约的防御面）：gms 在 ORDER BY 列与索引前缀
+// 匹配时直接删除 Sort 节点（ASC 不咨询任何接口）——无序路径一旦被选为排序载体
+// 就会静默产出乱序。因此只有 score 有序流（topk.go k 路归并）的范围索引
+// 接受任意区间；等值/唯一/主键只接受点范围（点集内序由 translate 排序保证），
+// 非点范围退回全扫 + 引擎层 sort（正确性优先，代价与既有 fullScanFallback 相同）。
+func (i *Index) CanSupport(ctx *sql.Context, ranges ...sql.Range) bool {
+	if !i.primary {
+		if idx := i.def.Index(i.id); idx != nil && idx.Kind == meta.IndexRange {
+			return true
+		}
+	}
+	for _, r := range ranges {
+		if !isPointRange(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isPointRange 判定单点范围（闭下界 == 闭上界）。
+func isPointRange(r sql.Range) bool {
+	mr, ok := r.(sql.MySQLRange)
+	if !ok || len(mr) != 1 {
+		return false
+	}
+	lo, lok := belowKey(mr[0].LowerBound)
+	hi, hok := aboveKey(mr[0].UpperBound)
+	if !lok || !hok {
+		return false
+	}
+	return fmt.Sprint(lo) == fmt.Sprint(hi)
+}
+
+// Order 索引扫描产出序（sql.OrderedIndex，gms replace_sort.go Case B 的裁决面）：
+// 范围索引 = Asc（exec topk.go 全局 score 有序流）；其余 = None
+// （None 阻止 gms 把全表扫描改写成无序索引访问后删 Sort——
+// 等值桶/主键无有序结构，删 Sort 即静默乱序）。
+func (i *Index) Order() sql.IndexOrder {
+	if !i.primary {
+		if idx := i.def.Index(i.id); idx != nil && idx.Kind == meta.IndexRange {
+			return sql.IndexOrderAsc
+		}
+	}
+	return sql.IndexOrderNone
+}
+
+// Reversible 范围索引可反向迭代（ZREVRANGEBYSCORE）；其余不可
+// （gms Case A DESC 对不可逆索引保留 Sort——正确性由引擎层 sort 承载）。
+func (i *Index) Reversible() bool {
+	return i.Order() == sql.IndexOrderAsc
+}
 
 // CanSupportOrderBy 范围索引支持 ORDER BY（score 有序）；
-// 等值/主键不支持（v1：排序由引擎层完成，docs/04 §4.5 端点归并随后续批次接入）。
+// 等值/主键不支持（nearest-neighbor 类查询的 gms 咨询面）。
 func (i *Index) CanSupportOrderBy(expr sql.Expression) bool {
-	if i.primary {
-		return false
-	}
-	idx := i.def.Index(i.id)
-	if idx == nil {
-		return false
-	}
-	return idx.Kind == meta.IndexRange
+	return i.Order() == sql.IndexOrderAsc
 }
 
 // PrefixLengths 无前缀长度（docs/02 §2.4：前缀长度索引不支持，走 prefix_copy）。
 func (i *Index) PrefixLengths() []uint16 { return nil }
 
-var _ sql.Index = (*Index)(nil)
+var (
+	_ sql.Index        = (*Index)(nil)
+	_ sql.OrderedIndex = (*Index)(nil)
+)

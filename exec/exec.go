@@ -159,6 +159,10 @@ type Request struct {
 	Pred     *Predicate // 回表校验（nil = 不校验）
 	Pushdown bool       // 谓词下推到服务端 Lua（docs/04 §4.2，白名单形态）
 
+	// Desc：RangeLookup 的归并方向（gms lookup.IsReverse → ORDER BY ... DESC）。
+	// RangeLookup 始终产出全局 score 有序流（topk.go 头注：gms 删 Sort 契约）。
+	Desc bool
+
 	// SlotLo/SlotHi：FullScan 的 slot 区间限定（DDL 回填分批游标用；
 	// 0 值 = 全量 [0, 16384)）。
 	SlotLo, SlotHi int
@@ -238,12 +242,15 @@ type RowStream struct {
 	ncOff     int
 	ncCollect []string // 散取路径收集的 pk（完全排空后才写缓存）
 
-	// 分裂窗口双读去重（SPLITTING 父子桶同 member 各一份）
+	// 分裂窗口双读去重（SPLITTING 父子桶同 member 各一份）；
+	// RangeLookup 多区间时跨区间去重（重叠区间谓词的防御，gms 理论上已合并）
 	seen map[string]struct{}
 
 	// bm 路由判定（Run 期解析）：等值值是否热分裂 / 范围索引是否有分裂
 	bmHotEq    bool
 	bmHotRange bool
+
+	om *orderedMerger // RangeLookup 当前区间的归并器（topk.go）
 
 	startedAt time.Time // 首个 Next 时间（query_duration_seconds 挂点）
 }
@@ -287,6 +294,10 @@ func (e *Executor) Run(ctx context.Context, req *Request) *RowStream {
 				s.bmHotRange = true
 			}
 		}
+	}
+	// RangeLookup 多区间：跨区间去重（与分裂双读共用 seen；单区间零开销）
+	if req.Kind == RangeLookup && len(req.Ranges) > 1 && s.seen == nil {
+		s.seen = map[string]struct{}{}
 	}
 	return s
 }
@@ -369,6 +380,8 @@ func (s *RowStream) fill() error {
 	switch s.req.Kind {
 	case PointGet:
 		return s.fillPointGet()
+	case RangeLookup:
+		return s.fillOrderedRange() // 全局 score 有序流（topk.go：gms 删 Sort 契约）
 	default:
 		return s.fillScatter()
 	}
@@ -384,24 +397,21 @@ func (s *RowStream) fillPointGet() error {
 }
 
 // fillScatter 桶/登记册散取：slot 组 → 桶游标分页 → 回表 → 校验。
+// （RangeLookup 不走这里——全局有序归但见 topk.go；本路径服务 EqLookup/FullScan。）
 func (s *RowStream) fillScatter() error {
 	e := s.exec
 	for {
 		if err := s.ctx.Err(); err != nil {
 			return err
 		}
-		// 本组桶游标耗尽 → 推进到下一 slot 组；RangeLookup 逐区间推进
+		// 本组桶游标耗尽 → 推进到下一 slot 组
 		if len(s.pending) == 0 {
 			slotHi := keycodec.NumSlots
 			if s.req.SlotHi > 0 {
 				slotHi = s.req.SlotHi
 			}
 			if s.nextSlot >= slotHi {
-				s.rangeIdx++
-				s.nextSlot = 0
-				if s.req.Kind != RangeLookup || s.rangeIdx >= len(s.req.Ranges) {
-					return io.EOF
-				}
+				return io.EOF
 			}
 			if s.nextSlot == 0 && s.req.SlotLo > 0 {
 				s.nextSlot = s.req.SlotLo
@@ -478,10 +488,6 @@ func (s *RowStream) buildGroup(from, to int) []bucketScan {
 					out = append(out, bucketScan{key: bk})
 				}
 			}
-		case RangeLookup:
-			for _, b := range s.rangeBucketsAt(s16) {
-				out = append(out, bucketScan{key: keycodec.RangeBucketKey(t.Name, s.req.Index.ID, s16, b)})
-			}
 		case FullScan:
 			for shard := 0; shard < t.EffectiveExpShards(); shard++ {
 				out = append(out, bucketScan{key: keycodec.ExpKeyN(t.Name, s16, shard, t.EffectiveExpShards())})
@@ -503,35 +509,10 @@ func (s *RowStream) eqBucketsAt(slot uint16, encVal string) []int {
 	return sh.ReadBucketsEq(keycodec.EscapeValue(encVal))
 }
 
-// rangeBucketsAt 该 slot 范围谓词覆盖的桶集合。
-func (s *RowStream) rangeBucketsAt(slot uint16) []int {
-	if !s.bmHotRange || s.exec.bm == nil {
-		return []int{0}
-	}
-	sh, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID, slot)
-	if err != nil {
-		return []int{0}
-	}
-	r := s.req.Ranges[s.rangeIdx]
-	lo, hi := r.Lo, r.Hi
-	// 开区间边界微调用于重叠判定（开区间贴边桶需排除）
-	if r.LoOpen {
-		lo = math.Nextafter(lo, math.Inf(1))
-	}
-	if r.HiOpen {
-		hi = math.Nextafter(hi, math.Inf(-1))
-	}
-	return sh.ReadBucketsRange(lo, hi)
-}
-
-// pageCmd 生成一桶一页的命令（ZRANGE 家族，带 LIMIT——有界纪律 docs/04 §4.1）。
+// pageCmd 生成一桶一页的命令（ZRANGE 偏移分页，带 LIMIT——有界纪律 docs/04 §4.1）。
+// （RangeLookup 的分页命令在 topk.go——WITHSCORES + 双向。）
 func (s *RowStream) pageCmd(b bucketScan) kidb.Cmd {
 	batch := s.exec.batch
-	if s.req.Kind == RangeLookup {
-		r := s.req.Ranges[s.rangeIdx]
-		return kidb.Cmd{Name: "ZRANGEBYSCORE", Args: []any{b.key, rangeBound(r.Lo, r.LoOpen), rangeBound(r.Hi, r.HiOpen), "LIMIT", b.cursor, batch}}
-	}
-	// EqLookup / FullScan：ZRANGE 偏移分页
 	return kidb.Cmd{Name: "ZRANGE", Args: []any{b.key, b.cursor, b.cursor + batch - 1}}
 }
 

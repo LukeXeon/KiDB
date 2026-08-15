@@ -158,6 +158,11 @@ func (h *kidbHandler) checkBoundedScan(ctx context.Context, stmt ast.StmtNode, w
 		return err
 	}
 	if where == nil {
+		// ORDER BY 首个排序列有可用范围索引 → 有界（全局 score 有序流，
+		// LIMIT 早停由引擎停止消费达成，docs/04 §4.1 top-k）
+		if sel, ok := stmt.(*ast.SelectStmt); ok && orderByHasRangeIndex(sel, def) {
+			return nil
+		}
 		// 无 WHERE 全表遍历：白名单或 hint 放行
 		return h.allowFullscan(ctx, def, rawQuery)
 	}
@@ -215,22 +220,51 @@ func indexStateOn(def *meta.TableDef, col string) int {
 }
 
 // collectPredCols 收集 AND 树中的谓词列（顶层合取）。
+// 叶子形态：比较运算 / IN / BETWEEN（列引用取自表达式左侧）。
+// OR 及更复杂的表达式保守不收集（宁可误拒走全扫纪律，不可误放）。
 func collectPredCols(e ast.ExprNode, out map[string]bool) {
-	be, ok := e.(*ast.BinaryOperationExpr)
-	if !ok {
-		return
-	}
-	switch be.Op {
-	case opcode.LogicAnd:
-		collectPredCols(be.L, out)
-		collectPredCols(be.R, out)
-	default: // 比较/IN/LIKE 等叶子
-		for _, side := range []ast.ExprNode{be.L, be.R} {
-			if ce, ok := side.(*ast.ColumnNameExpr); ok {
-				out[strings.ToLower(ce.Name.Name.O)] = true
+	switch x := e.(type) {
+	case *ast.BinaryOperationExpr:
+		switch x.Op {
+		case opcode.LogicAnd:
+			collectPredCols(x.L, out)
+			collectPredCols(x.R, out)
+		default: // 比较类叶子
+			for _, side := range []ast.ExprNode{x.L, x.R} {
+				if ce, ok := side.(*ast.ColumnNameExpr); ok {
+					out[strings.ToLower(ce.Name.Name.O)] = true
+				}
 			}
 		}
+	case *ast.PatternInExpr: // col IN (...) / col NOT IN (...)
+		if ce, ok := x.Expr.(*ast.ColumnNameExpr); ok {
+			out[strings.ToLower(ce.Name.Name.O)] = true
+		}
+	case *ast.BetweenExpr: // col BETWEEN a AND b
+		if ce, ok := x.Expr.(*ast.ColumnNameExpr); ok {
+			out[strings.ToLower(ce.Name.Name.O)] = true
+		}
 	}
+}
+
+// orderByHasRangeIndex 判定 ORDER BY 首列是否有可用范围索引（回填中不算）。
+// 仅识别简单列引用；表达式/序号排序保守返回 false。
+func orderByHasRangeIndex(sel *ast.SelectStmt, def *meta.TableDef) bool {
+	if sel.OrderBy == nil || len(sel.OrderBy.Items) == 0 {
+		return false
+	}
+	ce, ok := sel.OrderBy.Items[0].Expr.(*ast.ColumnNameExpr)
+	if !ok {
+		return false
+	}
+	col := ce.Name.Name.O
+	for _, idx := range def.Indexes {
+		if idx.Kind == meta.IndexRange && !idx.Building &&
+			len(idx.Columns) == 1 && strings.EqualFold(idx.Columns[0], col) {
+			return true
+		}
+	}
+	return false
 }
 
 // tableOf 取语句的主表名。

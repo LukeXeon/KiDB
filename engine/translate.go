@@ -3,6 +3,8 @@ package engine
 import (
 	"fmt"
 	"math"
+	"sort"
+	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
 
@@ -26,7 +28,7 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 
 	// 主键路径：点查直取（HGETALL），范围退化为登记册遍历 + 谓词校验
 	if idxID == "PRIMARY" {
-		return t.translatePKLookup(ranges.ToRanges())
+		return t.translatePKLookup(ranges.ToRanges(), lookup.IsReverse)
 	}
 
 	idx := t.def.Index(idxID)
@@ -49,6 +51,9 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 			}
 			values = append(values, v)
 		}
+		// 去重 + 按列值升序：gms 在 ORDER BY 索引列 ASC 时删 Sort 不咨询接口
+		// （replace_sort.go Case A），点集产出序必须即索引列序
+		values = t.dedupSortValues(col, values, lookup.IsReverse)
 		return &exec.Request{
 			Table: t.def, Kind: exec.EqLookup, Index: idx, Values: values,
 			Pred: &exec.Predicate{Column: col, Eq: values},
@@ -63,16 +68,21 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 			}
 			bounds = append(bounds, rb)
 		}
+		// 区间排序：归并器逐区间拼接产出（topk.go），非重叠区间按 Lo 升序
+		// （DESC 按 Hi 降序）拼接即全局有序
+		sortRangeBounds(bounds, lookup.IsReverse)
 		return &exec.Request{
 			Table: t.def, Kind: exec.RangeLookup, Index: idx, Ranges: bounds,
 			Pred: &exec.Predicate{Column: col, Ranges: bounds},
+			Desc: lookup.IsReverse,
 		}, nil
 	}
 	return nil, fmt.Errorf("%w: 未知索引形态 %v", kidb.ErrUnsupported, idx.Kind)
 }
 
 // translatePKLookup 主键：全部点 → PointGet；含非点范围 → 全扫 + 校验。
-func (t *Table) translatePKLookup(ranges []sql.Range) (*exec.Request, error) {
+// 点集按 pk 值排序（gms 对 PRIMARY 点查同样删 Sort——见等值分支注记）。
+func (t *Table) translatePKLookup(ranges []sql.Range, isReverse bool) (*exec.Request, error) {
 	var pks []string
 	for _, r := range ranges {
 		v, point, err := t.pointValue(r, t.def.PK)
@@ -84,7 +94,71 @@ func (t *Table) translatePKLookup(ranges []sql.Range) (*exec.Request, error) {
 		}
 		pks = append(pks, v)
 	}
+	pks = t.dedupSortValues(t.def.PK, pks, isReverse)
 	return &exec.Request{Table: t.def, Kind: exec.PointGet, Pks: pks}, nil
+}
+
+// dedupSortValues 去重并按列类型解码值排序（编码串的字典序 ≠ 数值序，如 "10"<"2"）。
+func (t *Table) dedupSortValues(col string, values []string, desc bool) []string {
+	c, ok := t.def.Column(col)
+	if !ok {
+		return values
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := values[:0]
+	for _, v := range values {
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	type pair struct {
+		enc string
+		dec any
+	}
+	pairs := make([]pair, 0, len(out))
+	for _, v := range out {
+		d, err := rowcodec.Decode(c.Type, v)
+		if err != nil {
+			return out // 解码失败保持原序（校验侧拦截，docs/04 §4.3）
+		}
+		pairs = append(pairs, pair{v, d})
+	}
+	less := func(i, j int) bool {
+		a, b := pairs[i].dec, pairs[j].dec
+		switch av := a.(type) {
+		case int64:
+			return av < b.(int64)
+		case float64:
+			return av < b.(float64)
+		case time.Time:
+			return av.Before(b.(time.Time))
+		case string:
+			return av < b.(string)
+		case []byte:
+			return string(av) < string(b.([]byte))
+		}
+		return pairs[i].enc < pairs[j].enc
+	}
+	if desc {
+		sort.SliceStable(pairs, func(i, j int) bool { return less(j, i) })
+	} else {
+		sort.SliceStable(pairs, less)
+	}
+	for i := range pairs {
+		out[i] = pairs[i].enc
+	}
+	return out
+}
+
+// sortRangeBounds 区间排序（归并逐区间拼接的前提）。
+func sortRangeBounds(bounds []exec.RangeBound, desc bool) {
+	if desc {
+		sort.SliceStable(bounds, func(i, j int) bool { return bounds[i].Hi > bounds[j].Hi })
+		return
+	}
+	sort.SliceStable(bounds, func(i, j int) bool { return bounds[i].Lo < bounds[j].Lo })
 }
 
 // fullScanFallback 非点范围兜底：exp 登记册遍历 + 谓词校验（始终正确）。

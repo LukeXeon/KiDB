@@ -36,6 +36,10 @@
 - **编码切换 msgp**（tinylib/msgp 代码生成）：Catalog `def`/`_job`、BucketMap 条目；`_fmtv` seam 升 2；
 - **快速路径**：COUNT(*) 全表（exp ZCOUNT 汇总）与 MIN/MAX（端点归并 + 回表校验跳脏）；TiDB parser 在 DML 侧仅限识别性使用。
 
+### B 组性能增强（按 ROADMAP 序推进）
+
+- **top-k 归并下推 + ORDER BY 排序正确性修复**：探针复现并修复潜在乱序——gms `replace_sort.go` 在 ORDER BY 列与索引前缀匹配时直接删除 Sort 节点（ASC 不咨询任何接口），而 KiDB 范围桶按 slot 散布、原 slot 组流式产出全局无序。修复 = RangeLookup 一律走 k 路归并（exec/topk.go：16384 路种子建堆 + 按需补页，`gopkg.in/dnaeon/go-priorityqueue.v1` 泛型堆；DESC 走 `ZREVRANGEBYSCORE` + 大顶堆），排序正确性由构造保证；`Index` 实现 `sql.OrderedIndex`（范围=Asc/Reversible，其余=None）+ `CanSupport` 收紧（等值/唯一/主键仅点范围）为契约防御面；LIMIT 早停由引擎停止消费自然达成，keyset 分页（`WHERE num > ? ORDER BY num LIMIT k`）随之成为最优路径。副带修复：sqlguard 收集 IN/BETWEEN 谓词列（`WHERE pk IN (...)` 曾被误拒 ERR_NO_INDEX）、ORDER BY 范围索引列的无 WHERE 查询按有界放行。
+
 ## v5.0（文档全面革新，docs/ 现行版本基线）
 
 - 更名 **KiDB**；叙述方式改为推导式（每机制章 "TiDB 参照 → Redis 约束 → KiDB 设计"）；

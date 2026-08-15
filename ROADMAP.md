@@ -15,9 +15,13 @@
 
 ## B. 性能增强（正确性已由通用路径保证）
 
+已完成（本批）：
+
+- **top-k 归并下推**（exec/topk.go：RangeLookup 一律 16384 路 k 路归并产出全局 score 序，`go-priorityqueue` 泛型堆；顺带修复 gms `replace_sort` 删 Sort 导致的 ORDER BY 乱序隐患——探针复现后钉死；`OrderedIndex`/`CanSupport` 收紧为契约防御面；guard 补 IN/BETWEEN 列收集与 ORDER BY 范围列放行）；
+- **keyset 分页优化**（`WHERE num > ? ORDER BY num LIMIT k` 翻译为区间起点 + 归并早停，随 top-k 一并达成）。
+
 | 项 | 说明 |
 |---|---|
-| top-k 归并下推（ORDER BY + LIMIT 走桶端点） | 当前引擎层 sort；docs/04 §4.1 的 k 路归并（落地时引入 `gopkg.in/dnaeon/go-priorityqueue.v1`） |
 | 覆盖索引读路径 | member 已携带 msgp 覆盖列（rowcodec.MemberCovers 就绪），exec 命中时跳过回表未实现 |
 | L2 请求合并（同指纹并发合并） | docs/08 §8.4；落地时引入 `golang.org/x/sync`（singleflight） |
 | L3 副本读（`DoReplica` 进读路径） | 适配器能力已声明，exec 未消费 |
@@ -28,7 +32,6 @@
 | 行级近缓存（`hotkey_row_cache`） | 变量已注册，逻辑未实现 |
 | 前缀搜索 `LIKE 'abc%'`（字典序副本 ZRANGEBYLEX 查询路径） | 副本在写，查询翻译未做 |
 | HLL 基数统计接入（PFADD 写路径 + 优化器选路） | docs/04 §4.6 |
-| keyset 分页优化 | 引擎层 offset 承载中 |
 | plan cache（指纹 + 版本绑定） | docs/02 §2.6 承诺；gms 有内置语句缓存，KiDB 侧版本绑定未做 |
 | EXPLAIN 自定义节点（桶数/扇出/下推展示） | docs/02 §2.8；gms EXPLAIN 可用但无 KiDB 细节 |
 | 慢查询日志 | docs/10 §10.4 |
