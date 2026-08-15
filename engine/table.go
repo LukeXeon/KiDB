@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/dolthub/go-mysql-server/sql"
 
+	"kidb"
 	"kidb/exec"
 	"kidb/meta"
 )
@@ -63,12 +65,15 @@ func (t *Table) Schema() sql.Schema {
 }
 
 // fullSchema 全量 schema（投影无关）。
+// 忠实类型重建（docs/02 §2.2）：列类型按 Catalog 规范类型文本还原
+// （varchar 长度不丢）；文本非法 = Catalog 写坏（唯一写入点 TableFromSchema），
+// 属内核契约违例，fail fast。
 func (t *Table) fullSchema() sql.Schema {
 	sch := make(sql.Schema, 0, len(t.def.Columns))
 	for _, c := range t.def.Columns {
-		gt, err := goType(c.Type)
+		gt, err := columnTypeFromText(c.TypeText)
 		if err != nil {
-			continue // 不会到这里（DDL 白名单校验过）
+			panic(fmt.Sprintf("engine: 表 %s 列 %s 类型文本非法: %v", t.def.Name, c.Name, err))
 		}
 		sch = append(sch, &sql.Column{
 			Name:          c.Name,
@@ -150,9 +155,23 @@ func (t *Table) Partitions(ctx *sql.Context) (sql.PartitionIter, error) {
 
 // PartitionRows 全表遍历（exp 登记册驱动，docs/07 §7.4）；
 // 若分区携带编译后的索引计划（lookupPartition），执行索引路径。
+// 全扫闸门（v6.0 引擎层执法，docs/04 §4.4）：小表自动放行 / 白名单放行并告警 /
+// 否则 ERR_NO_INDEX——无索引谓词纪律的唯一落点（不再有第二套判定）。
 func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter, error) {
 	if lp, ok := part.(lookupPartition); ok {
 		return t.streamFor(ctx, lp.req), nil
+	}
+	gate := t.deps.FullscanGate
+	if gate == nil {
+		// 未装配 = 保守拒绝（docs/01 §1.0：默认取保守安全值；生产由装配层注入）
+		return nil, sqlErr(fmt.Errorf("%w: 表 %s 全表遍历未放行（全扫闸门未装配）", kidb.ErrNoIndex, t.def.Name))
+	}
+	n, _, err := t.RowCount(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := gate(ctx, t.def.Name, n); err != nil {
+		return nil, sqlErr(err)
 	}
 	req := &exec.Request{Table: t.def, Kind: exec.FullScan, Projection: t.projectionForExec()}
 	return &streamIter{s: t.deps.Exec.Run(ctx, req)}, nil

@@ -33,10 +33,10 @@ func TestProjectedIndexScan(t *testing.T) {
 	def := &meta.TableDef{
 		Name: "cov",
 		Columns: []meta.ColumnDef{
-			{Name: "uid", Type: meta.ColInt, NotNull: true},
-			{Name: "city", Type: meta.ColString, NotNull: true},
-			{Name: "age", Type: meta.ColInt},
-			{Name: "note", Type: meta.ColString},
+			{Name: "uid", Type: meta.ColInt, TypeText: "bigint", NotNull: true},
+			{Name: "city", Type: meta.ColString, TypeText: "varchar(32)", NotNull: true},
+			{Name: "age", Type: meta.ColInt, TypeText: "int"},
+			{Name: "note", Type: meta.ColString, TypeText: "varchar(255)"},
 		},
 		PK: "uid",
 		Indexes: []meta.IndexDef{

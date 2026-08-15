@@ -1,9 +1,4 @@
-// Package ddl 是 KiDB 的 DDL 语义层（docs/02 §2.4）：
-// 把 gms 的 DDL 计划产物（PrimaryKeySchema/IndexDef/COMMENT 串）转换为
-// KiDB Catalog 定义并执行全部校验。**类型语义以 gms 为准**（VARCHAR→
-// gms StringType 即字符串列，不再经第二个解析器的类型系统）——
-// 双解析器时代结束，分析面与执行面同一语法（docs/13 §13.6 决策记录）。
-package ddl
+package engine
 
 import (
 	"encoding/json"
@@ -17,11 +12,16 @@ import (
 	"kidb/meta"
 )
 
+// ddlconvert.go：DDL 语义层（docs/02 §2.3）——把 gms 的 DDL 计划产物
+// （PrimaryKeySchema/IndexDef/COMMENT 串）转换为 KiDB Catalog 定义并执行全部校验。
+// **类型语义以 gms 为准**：Catalog 忠实记录 gms 解析产物的完整类型
+// （存储类 + 规范类型文本），schema 重建见 typetext.go。
+
 // kidbCommentPrefix 是 KiDB 扩展在 COMMENT 中的前缀。
 // 非此前缀的 COMMENT 视为普通注释，两不干扰。
 const kidbCommentPrefix = "kidb:"
 
-// ==== COMMENT payload（docs/02 §2.4：只留语义声明，严格解析）====
+// ==== COMMENT payload（docs/02 §2.3：只留语义声明，严格解析）====
 
 // tableOpts 表级 payload：仅 default_ttl（行级 TTL 是缓存定位的核心语义）。
 // 未知字段报错（"不支持直接报错"优于静默忽略，docs/01 §1.0）。
@@ -68,9 +68,9 @@ func ParseIndexComment(comment string) (indexOpts, error) {
 	return io, nil
 }
 
-// ==== 类型映射：gms sql.Type → meta.ColumnType（docs/02 §2.4 白名单）====
+// ==== 类型映射：gms sql.Type → meta.ColumnType 存储类（docs/02 §2.3 白名单）====
 
-// ColumnTypeOf 列类型映射（类型语义以 gms 为准）。
+// ColumnTypeOf 列存储类映射（类型语义以 gms 为准；本函数只决定编码/索引形态）。
 // 白名单：整数/浮点/字符串/二进制/时间戳/JSON；DECIMAL/DATE/TIME/枚举等
 // 明确报错（范围索引 score 语义与编码精度不担保的类型不放行）。
 func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
@@ -96,6 +96,7 @@ func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
 // ==== CREATE TABLE：gms PrimaryKeySchema → TableDef ====
 
 // TableFromSchema 由 gms 主键 schema 与表 COMMENT 构造表定义（校验全规则）。
+// 忠实类型记录：列定义存 存储类（ColumnTypeOf）+ 规范类型文本（c.Type.String()）。
 func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*meta.TableDef, error) {
 	if len(sch.Schema) == 0 || len(sch.Schema) > 256 {
 		return nil, fmt.Errorf("%w: 列数 %d 超出 [1,256]", kidb.ErrUnsupported, len(sch.Schema))
@@ -121,8 +122,20 @@ func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*me
 		if err != nil {
 			return nil, fmt.Errorf("列 %q: %w", c.Name, err)
 		}
+		// 列级属性白名单（docs/01 §1.0：不支持直接报错，优于静默丢弃）：
+		// Catalog 只记录类型/可空性/自增，DEFAULT/ON UPDATE/列级 COLLATE
+		// 若静默丢弃会产生与用户声明不符的行为——明确拒绝。
+		if c.Default != nil {
+			return nil, fmt.Errorf("%w: 列 %q 的 DEFAULT 表达式不支持（写入请显式给值）", kidb.ErrUnsupported, c.Name)
+		}
+		if c.OnUpdate != nil {
+			return nil, fmt.Errorf("%w: 列 %q 的 ON UPDATE 不支持", kidb.ErrUnsupported, c.Name)
+		}
+		if tc, ok := c.Type.(sql.TypeWithCollation); ok && tc.Collation() != sql.Collation_Default {
+			return nil, fmt.Errorf("%w: 列 %q 的列级 COLLATE/CHARSET 不支持（全局 utf8mb4 默认）", kidb.ErrUnsupported, c.Name)
+		}
 		def.Columns = append(def.Columns, meta.ColumnDef{
-			Name: c.Name, Type: ct, NotNull: !c.Nullable,
+			Name: c.Name, Type: ct, TypeText: c.Type.String(), NotNull: !c.Nullable,
 		})
 		if c.AutoIncrement {
 			def.AutoIncrColumn = c.Name
@@ -134,7 +147,7 @@ func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*me
 	return def, validateTable(def)
 }
 
-// validateTable 表级校验（docs/02 §2.4 + docs/06 §6.1）。
+// validateTable 表级校验（docs/02 §2.3 + docs/06 §6.1）。
 func validateTable(t *meta.TableDef) error {
 	if t.PK == "" {
 		return fmt.Errorf("%w: 必须显式主键", kidb.ErrUnsupported)
@@ -213,7 +226,7 @@ func ValidateIndexForTable(idx *meta.IndexDef, t *meta.TableDef) error {
 	if !ok {
 		return fmt.Errorf("索引列 %q 不存在", idx.Columns[0])
 	}
-	// 形态推导（docs/02 §2.4）：唯一=UNIQUE；数值/时间戳=RANGE；其余=等值。
+	// 形态推导（docs/02 §2.3）：唯一=UNIQUE；数值/时间戳=RANGE；其余=等值。
 	if idx.Kind != meta.IndexUnique {
 		if col.Type.RangeIndexable() {
 			idx.Kind = meta.IndexRange

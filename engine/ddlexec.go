@@ -9,7 +9,6 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
-	"kidb/ddl"
 	"kidb/exec"
 	"kidb/keycodec"
 	"kidb/meta"
@@ -24,9 +23,16 @@ import (
 // Catalog 先落库 → 并发写入即双写新索引；回填按当前行值 ZADD，
 // ZSet 去重天然幂等；回填与删除交错的残留由回表校验兜底（docs/01 §1.7）。
 
-// CreateTable 建表（sql.TableCreator）：校验 → Catalog 落库 + 注册。
+// CreateTable 建表（sql.TableCreator）：ro 执法 → 校验 → Catalog 落库 + 注册。
 func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.PrimaryKeySchema, collation sql.CollationID, comment string) error {
-	def, err := ddl.TableFromSchema(name, schema, comment)
+	return sqlErr(d.createTable(ctx, name, schema, collation, comment))
+}
+
+func (d *Database) createTable(ctx *sql.Context, name string, schema sql.PrimaryKeySchema, collation sql.CollationID, comment string) error {
+	if err := RejectRO(ctx); err != nil {
+		return err
+	}
+	def, err := TableFromSchema(name, schema, comment)
 	if err != nil {
 		return err
 	}
@@ -51,6 +57,13 @@ func (d *Database) CreateTable(ctx *sql.Context, name string, schema sql.Primary
 // 索引/回执/登记册/预约全清）→ Catalog 删除 + 注销注册表。
 // 大表后台清理作业化是 C 组后续项（ROADMAP 在案）。
 func (d *Database) DropTable(ctx *sql.Context, name string) error {
+	return sqlErr(d.dropTable(ctx, name))
+}
+
+func (d *Database) dropTable(ctx *sql.Context, name string) error {
+	if err := RejectRO(ctx); err != nil {
+		return err
+	}
 	deps := d.p.deps
 	def, err := deps.Store.Load(ctx, name)
 	if err != nil {
@@ -91,7 +104,14 @@ func (d *Database) DropTable(ctx *sql.Context, name string) error {
 // 空表同步完成（CREATE TABLE 内联索引场景，绕开单 _job 槽位）；
 // 非空表走 _job 后台回填（Building 标记，完成前查询不可见，写入双写覆盖窗口）。
 func (t *Table) CreateIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
-	idx, err := ddl.IndexFromDef(idxDef)
+	return sqlErr(t.createIndex(ctx, idxDef))
+}
+
+func (t *Table) createIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
+	if err := RejectRO(ctx); err != nil {
+		return err
+	}
+	idx, err := IndexFromDef(idxDef)
 	if err != nil {
 		return err
 	}
@@ -107,7 +127,7 @@ func (t *Table) CreateIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
 	if def.Index(idx.ID) != nil {
 		return fmt.Errorf("%w: 索引 %q 已存在", kidb.ErrUnsupported, idx.ID)
 	}
-	if err := ddl.ValidateIndexForTable(idx, def); err != nil {
+	if err := ValidateIndexForTable(idx, def); err != nil {
 		return err
 	}
 
@@ -159,6 +179,13 @@ func (t *Table) CreateIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
 // DropIndex 删索引（sql.IndexAlterableTable）：Catalog 移除 → 桶清理
 // （等值桶按行值回推 key；范围/字典序桶按 slot 直接 UNLINK）。
 func (t *Table) DropIndex(ctx *sql.Context, indexName string) error {
+	return sqlErr(t.dropIndex(ctx, indexName))
+}
+
+func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
+	if err := RejectRO(ctx); err != nil {
+		return err
+	}
 	deps := t.deps
 	def, err := deps.Store.Load(ctx, t.def.Name)
 	if err != nil {

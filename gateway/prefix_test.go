@@ -9,6 +9,8 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
+
+	"kidb/internal/tuning"
 )
 
 // TestPrefixSearchWire: prefix search end to end (docs/04 §4.5, docs/02 §2.4 prefix_copy).
@@ -75,12 +77,24 @@ func TestPrefixSearchWire(t *testing.T) {
 		require.LessOrEqual(t, ord[i-1], ord[i], "lex order broken at row %d", i)
 	}
 
-	// infix LIKE: no usable index -> no-index discipline error
+	// v6.0 引擎层全扫闸门（docs/07 §7.4）：中缀 LIKE 无可用索引 → 全扫过闸。
+	// 小表（120 行 < 阈值）自动放行——结果是全表遍历 + 引擎过滤的精确答案。
+	rows, err = db.QueryContext(ctx, "SELECT name FROM shops WHERE city LIKE '%hai'")
+	require.NoError(t, err)
+	cnt := 0
+	for rows.Next() {
+		cnt++
+	}
+	rows.Close()
+	require.Equal(t, 20, cnt) // 'shanghai' × 20 命中（引擎层精确过滤）
+
+	// 大表（测试中压低闸门阈值模拟）无白名单 → ERR_NO_INDEX
+	tuning.OverrideForTest(t, func(tn *tuning.Tuning) { tn.Gateway.DimensionMaxRows = 5 })
 	_, err = db.QueryContext(ctx, "SELECT name FROM shops WHERE city LIKE '%hai'")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ERR_NO_INDEX")
 
-	// prefix LIKE on a column without prefix copy: also rejected
+	// prefix LIKE on a column without any index: 同样过闸（大表态拒绝）
 	_, err = db.QueryContext(ctx, "SELECT city FROM shops WHERE name LIKE 'shop1%'")
 	require.Error(t, err)
 }

@@ -1,16 +1,16 @@
 // Package engine 把 go-mysql-server 引擎绑定到 KiDB 内核：
-// DatabaseProvider/Database/Table/Index/编辑器 的实现全部落在 Catalog + exec + txguard 上。
-// 对应文档 docs/02 §2.5（DML 路径）。
+// DatabaseProvider/Database/Table/Index/编辑器/Session 的实现全部落在
+// Catalog + exec + txguard 上（docs/02）。
+//
+// v6.0 纪律（用户裁决）：**gms 分析器零规则变更**——公开扩展点之外的内部
+// 规则一个不动；MySQL 习惯校验（如 TEXT/BLOB 索引前缀长度）靠"Catalog 忠实
+// 记录 gms 类型"天然兼容（typetext.go），而非卸载规则。
 package engine
 
 import (
-	"fmt"
-	"strings"
-
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
-	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"kidb"
 	"kidb/exec"
@@ -27,48 +27,19 @@ type Deps struct {
 	Store  *meta.CatalogStore
 	Exec   *exec.Executor
 	Guard  *txguard.Guard
+
+	// FullscanGate 全表遍历闸门（docs/07 §7.4 访问控制 + docs/04 §4.1 无索引
+	// 纪律）：引擎层全扫（PartitionRows 无索引可用）前 consult；返回 nil = 放行。
+	// nil = 一律拒绝（测试默认严格；生产装配：小表自动放行 + 白名单放行并告警）。
+	FullscanGate func(ctx *sql.Context, table string, rows uint64) error
 }
 
-// Build 组装引擎：自定义分析器 + KiDB DatabaseProvider。
-//
-// 移除的规则（与 KiDB 索引模型冲突的 MySQL 习惯校验）：resolveAlterColumn
-// （OnceBeforeDefault）——它按"TEXT/BLOB 列索引必须带前缀长度"校验 ALTER/建索引，
-// 而 KiDB 字符串列经桶模型索引、无前缀长度概念（我们的 Schema 把字符串映射为
-// LongText，触发该校验）。KiDB 侧的索引校验（形态/覆盖/互斥）在 ddl 包完成。
+// Build 组装引擎：默认分析器（零规则变更）+ KiDB DatabaseProvider +
+// 语义开关注册（docs/02 §2.7）。
 func Build(d Deps) (*sqle.Engine, *Provider, error) {
+	RegisterSysvars()
 	pro := NewProvider(d)
 	ab := analyzer.NewBuilder(pro)
-	ab.RemoveOnceBeforeRule(mustRuleID("resolveAlterColumn"))
 	eng := sqle.New(ab.Build(), nil)
 	return eng, pro, nil
-}
-
-// mustRuleID 按名解析 gms 分析器规则 id（规则 id 常量未导出；
-// RuleId 的 String() 由 stringer 生成，锁版本 v0.20 钉死）。
-func mustRuleID(name string) analyzer.RuleId {
-	for i := analyzer.RuleId(0); i < 512; i++ {
-		if strings.EqualFold(i.String(), name) {
-			return i
-		}
-	}
-	panic("engine: gms 规则不存在（升级 gms 需复核）: " + name)
-}
-
-// goType 把 KiDB 列类型映射为 gms 类型（docs/02 §2.4 白名单）。
-func goType(ct meta.ColumnType) (sql.Type, error) {
-	switch ct {
-	case meta.ColInt:
-		return types.Int64, nil
-	case meta.ColFloat:
-		return types.Float64, nil
-	case meta.ColString:
-		return types.LongText, nil
-	case meta.ColBytes:
-		return types.LongBlob, nil
-	case meta.ColTimestamp:
-		return types.Timestamp, nil
-	case meta.ColJSON:
-		return types.JSON, nil
-	}
-	return nil, fmt.Errorf("engine: unknown column type %v", ct)
 }

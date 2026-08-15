@@ -24,13 +24,10 @@ type Metrics struct {
 	LuaStaleRetry   prometheus.Counter       // lua_stale_retry_total
 	LuaNoscript     prometheus.Counter       // lua_noscript_total
 	ConfigSet       *prometheus.CounterVec   // config_set_total{result}
-	PlanCacheHit    prometheus.Counter       // plan cache 命中
-	PlanCacheStale  prometheus.Counter       // plan_cache_stale_total（版本失效重建）
 	LeaseRefresh    prometheus.Counter       // schema_lease_refresh_total
 	DDLJobDuration  *prometheus.HistogramVec // ddl_job_duration_seconds{type}
 	ContractViolate prometheus.Counter       // contract_violation_total（应为 0）
 	OwnerTransition prometheus.Counter       // owner_role_transitions_total
-	SlowQueries     *prometheus.CounterVec   // slow_queries_total{route}（docs/10 §10.4）
 }
 
 // New 注册全部系列；reg 为 nil 时用默认注册表。
@@ -63,24 +60,19 @@ func New(reg prometheus.Registerer) *Metrics {
 		ConfigSet: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "kidb", Name: "config_set_total",
 		}, []string{"result"}),
-		PlanCacheHit:   prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "plan_cache_hits_total"}),
-		PlanCacheStale: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "plan_cache_stale_total"}),
 		LeaseRefresh:   prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "schema_lease_refresh_total"}),
 		DDLJobDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "kidb", Name: "ddl_job_duration_seconds", Buckets: prometheus.DefBuckets,
 		}, []string{"type"}),
 		ContractViolate: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "contract_violation_total"}),
 		OwnerTransition: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "owner_role_transitions_total"}),
-		SlowQueries: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "kidb", Name: "slow_queries_total",
-		}, []string{"route"}),
 	}
 	reg.MustRegister(
 		m.QueryDuration, m.ScatterFanout, m.BucketMembers, m.Splits, m.Merges,
 		m.HotReplicas, m.SweeperLag, m.SweptTotal, m.NearcacheHits, m.NearcacheMiss,
 		m.AsyncBacklog, m.RowsFiltered, m.FullscanTotal, m.LuaStaleRetry, m.LuaNoscript,
-		m.ConfigSet, m.PlanCacheHit, m.PlanCacheStale, m.LeaseRefresh, m.DDLJobDuration,
-		m.ContractViolate, m.OwnerTransition, m.SlowQueries,
+		m.ConfigSet, m.LeaseRefresh, m.DDLJobDuration,
+		m.ContractViolate, m.OwnerTransition,
 	)
 	return m
 }

@@ -61,6 +61,13 @@ func (e *editor) Close(*sql.Context) error { return nil }
 //     IGNORE 抑制 / ODKU 走合并更新分支）；
 //   - 行不存在或已过期 → 全新插入（过期行视为不存在，Lua 内回执分支清残留）。
 func (e *editor) Insert(ctx *sql.Context, row sql.Row) error {
+	return sqlErr(e.insert(ctx, row))
+}
+
+func (e *editor) insert(ctx *sql.Context, row sql.Row) error {
+	if err := RejectRO(ctx); err != nil {
+		return err
+	}
 	pk, fields, err := e.splitRow(row)
 	if err != nil {
 		return err
@@ -105,6 +112,13 @@ func (e *editor) Replace(ctx *sql.Context, row sql.Row) error {
 // Update 单行更新：主键不变 → 写入新行（Lua 撤旧建新）；
 // 主键变更 → 删旧行 + 写新行（两步非原子——无跨 slot 事务定位，docs/01 §1.2）。
 func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
+	return sqlErr(e.update(ctx, old, new))
+}
+
+func (e *editor) update(ctx *sql.Context, old, new sql.Row) error {
+	if err := RejectRO(ctx); err != nil {
+		return err
+	}
 	oldPK, _, err := e.splitRow(old)
 	if err != nil {
 		return err
@@ -136,6 +150,13 @@ func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
 
 // Delete 单行删除（命中已过期行 = 0 rows affected，docs/05 §5.5）。
 func (e *editor) Delete(ctx *sql.Context, row sql.Row) error {
+	return sqlErr(e.delete(ctx, row))
+}
+
+func (e *editor) delete(ctx *sql.Context, row sql.Row) error {
+	if err := RejectRO(ctx); err != nil {
+		return err
+	}
 	pk, _, err := e.splitRow(row)
 	if err != nil {
 		return err

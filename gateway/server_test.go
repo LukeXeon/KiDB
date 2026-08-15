@@ -162,6 +162,8 @@ func TestGatewaySmoke(t *testing.T) {
 
 	// 配置管理面（docs/10 §10.2：SET GLOBAL → cfg:global；SHOW LIKE 读回）
 	execSQL("SET GLOBAL query_allow_fullscan_tables = 'users'")
+	// 变量注册表进程级共享——测试尾声复位，避免串扰同进程其他测试服务器
+	defer execSQL("SET GLOBAL query_allow_fullscan_tables = ''")
 	var varName, varValue string
 	if err := db.QueryRowContext(ctx, "SHOW GLOBAL VARIABLES LIKE 'query\\_allow\\_fullscan\\_tables'").Scan(&varName, &varValue); err != nil {
 		t.Fatalf("SHOW VARIABLES: %v", err)

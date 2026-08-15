@@ -40,6 +40,12 @@ func (z *ColumnDef) DecodeMsg(dc *msgp.Reader) (err error) {
 				}
 				z.Type = ColumnType(zb0002)
 			}
+		case "TypeText":
+			z.TypeText, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "TypeText")
+				return
+			}
 		case "NotNull":
 			z.NotNull, err = dc.ReadBool()
 			if err != nil {
@@ -58,10 +64,10 @@ func (z *ColumnDef) DecodeMsg(dc *msgp.Reader) (err error) {
 }
 
 // EncodeMsg implements msgp.Encodable
-func (z ColumnDef) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 3
+func (z *ColumnDef) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 4
 	// write "Name"
-	err = en.Append(0x83, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
+	err = en.Append(0x84, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
 	if err != nil {
 		return
 	}
@@ -80,6 +86,16 @@ func (z ColumnDef) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "Type")
 		return
 	}
+	// write "TypeText"
+	err = en.Append(0xa8, 0x54, 0x79, 0x70, 0x65, 0x54, 0x65, 0x78, 0x74)
+	if err != nil {
+		return
+	}
+	err = en.WriteString(z.TypeText)
+	if err != nil {
+		err = msgp.WrapError(err, "TypeText")
+		return
+	}
 	// write "NotNull"
 	err = en.Append(0xa7, 0x4e, 0x6f, 0x74, 0x4e, 0x75, 0x6c, 0x6c)
 	if err != nil {
@@ -94,15 +110,18 @@ func (z ColumnDef) EncodeMsg(en *msgp.Writer) (err error) {
 }
 
 // MarshalMsg implements msgp.Marshaler
-func (z ColumnDef) MarshalMsg(b []byte) (o []byte, err error) {
+func (z *ColumnDef) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 3
+	// map header, size 4
 	// string "Name"
-	o = append(o, 0x83, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
+	o = append(o, 0x84, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
 	o = msgp.AppendString(o, z.Name)
 	// string "Type"
 	o = append(o, 0xa4, 0x54, 0x79, 0x70, 0x65)
 	o = msgp.AppendInt(o, int(z.Type))
+	// string "TypeText"
+	o = append(o, 0xa8, 0x54, 0x79, 0x70, 0x65, 0x54, 0x65, 0x78, 0x74)
+	o = msgp.AppendString(o, z.TypeText)
 	// string "NotNull"
 	o = append(o, 0xa7, 0x4e, 0x6f, 0x74, 0x4e, 0x75, 0x6c, 0x6c)
 	o = msgp.AppendBool(o, z.NotNull)
@@ -143,6 +162,12 @@ func (z *ColumnDef) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				}
 				z.Type = ColumnType(zb0002)
 			}
+		case "TypeText":
+			z.TypeText, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "TypeText")
+				return
+			}
 		case "NotNull":
 			z.NotNull, bts, err = msgp.ReadBoolBytes(bts)
 			if err != nil {
@@ -162,8 +187,8 @@ func (z *ColumnDef) UnmarshalMsg(bts []byte) (o []byte, err error) {
 }
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
-func (z ColumnDef) Msgsize() (s int) {
-	s = 1 + 5 + msgp.StringPrefixSize + len(z.Name) + 5 + msgp.IntSize + 8 + msgp.BoolSize
+func (z *ColumnDef) Msgsize() (s int) {
+	s = 1 + 5 + msgp.StringPrefixSize + len(z.Name) + 5 + msgp.IntSize + 9 + msgp.StringPrefixSize + len(z.TypeText) + 8 + msgp.BoolSize
 	return
 }
 

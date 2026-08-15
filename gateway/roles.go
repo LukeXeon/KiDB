@@ -8,6 +8,7 @@ import (
 	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/indexer"
+	"kidb/engine"
 	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/nearcache"
@@ -59,14 +60,15 @@ func (s *Server) startRoles(ctx context.Context) {
 // attachSemanticSwitches 语义开关轮询（1s，与 schema lease 同节奏）：
 // L3 副本读（replica_read × 适配器能力位）与行级近缓存（hotkey_row_cache，
 // 默认关闭——陈旧窗口语义见 docs/08 §8.4）。容量/TTL 用内置常量（3s/10000）。
+// 开关值读本实例 gms 注册表（单一事实源，docs/02 §2.7）。
 func (s *Server) attachSemanticSwitches(ctx context.Context) {
 	var curRow *nearcache.RowCache
 	apply := func() {
 		// L3：能力位缺失时变量无效（自动降级，docs/09 §9.4）
-		on := s.deps.Client.Capabilities().ReplicaRead && s.boolVar(ctx, "replica_read")
+		on := s.deps.Client.Capabilities().ReplicaRead && engine.SysvarBool(engine.VarReplicaRead)
 		s.deps.Exec.SetReplicaRead(on)
 		// 行级近缓存（默认关闭）
-		if s.boolVar(ctx, "hotkey_row_cache") {
+		if engine.SysvarBool(engine.VarRowCache) {
 			if curRow == nil {
 				curRow = nearcache.NewRowCache(tuning.Get().Nearcache.RowCapacity, tuning.Get().NearcacheRowTTL())
 				s.deps.Exec.SetRowCache(curRow)
@@ -93,12 +95,6 @@ func (s *Server) attachSemanticSwitches(ctx context.Context) {
 			}
 		}
 	}()
-}
-
-// boolVar 读布尔语义开关（默认 false）。
-func (s *Server) boolVar(ctx context.Context, name string) bool {
-	v, _, err := s.cfg.Get(ctx, name)
-	return err == nil && v == "true"
 }
 
 // controllerRole 控制循环：遥测候选复核 → 分裂/L4 决策（docs/08 §8.1/§8.2）。

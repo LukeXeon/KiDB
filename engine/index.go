@@ -68,9 +68,9 @@ func (i *Index) ColumnExpressionTypes() []sql.ColumnExpressionType {
 		if !ok {
 			continue
 		}
-		gt, err := goType(col.Type)
+		gt, err := columnTypeFromText(col.TypeText)
 		if err != nil {
-			continue
+			continue // Catalog 写坏（唯一写入点 TableFromSchema）；GetIndexes 面防御性跳过
 		}
 		out = append(out, sql.ColumnExpressionType{Expression: i.table + "." + c, Type: gt})
 	}

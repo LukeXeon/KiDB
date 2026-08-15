@@ -1,4 +1,4 @@
-package ddl
+package engine
 
 import (
 	"testing"
@@ -33,6 +33,10 @@ func TestTableFromSchema(t *testing.T) {
 	}
 	if def.Columns[0].Type != meta.ColInt || def.Columns[1].Type != meta.ColString {
 		t.Fatalf("types = %+v", def.Columns)
+	}
+	// 忠实类型记录（docs/02 §2.2）：规范类型文本随行落 Catalog
+	if def.Columns[0].TypeText != "bigint" || def.Columns[1].TypeText != "longtext" {
+		t.Fatalf("typetext = %+v", def.Columns)
 	}
 
 	// 复合主键拒绝

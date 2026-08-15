@@ -44,10 +44,16 @@ func (t ColumnType) RangeIndexable() bool {
 }
 
 // ColumnDef 是列定义。
+//
+// 忠实类型记录（docs/02 §2.2 用户裁决）：Type 是存储类（编码/索引形态的依据），
+// TypeText 是 gms 解析产物的规范类型文本（Type.String() 原样，如 "varchar(32)"）——
+// schema 输出按 TypeText 忠实重建 gms 类型，varchar 长度全程不丢。两字段解耦：
+// 文本演进不影响存量数据的存储编码。DDL 入口（engine/ddlconvert.go）是唯一写入点。
 type ColumnDef struct {
-	Name    string     `json:"name"`
-	Type    ColumnType `json:"type"`
-	NotNull bool       `json:"not_null"`
+	Name     string     `json:"name"`
+	Type     ColumnType `json:"type"`
+	TypeText string     `json:"type_text"` // gms 规范类型文本（"varchar(32)"/"bigint"/"datetime"）
+	NotNull  bool       `json:"not_null"`
 }
 
 // IndexKind 是索引形态（docs/03 §3.3：桶模型按形态分桶规则）。
