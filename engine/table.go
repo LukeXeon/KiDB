@@ -24,13 +24,22 @@ type Table struct {
 	proj      []string
 	projected bool
 
-	statsMu    sync.Mutex
-	statsAt    time.Time
-	statsCount uint64
+	// stats 行数统计缓存（指针：WithProjections 的表拷贝共享同一统计——
+	// 同一底层表语义正确；且规避拷贝 sync.Mutex 的 vet/竞态问题）。
+	stats *tableStats
+}
+
+// tableStats RowCount 的 1s 统计缓存（挡分析器高频调用）。
+type tableStats struct {
+	mu    sync.Mutex
+	at    time.Time
+	count uint64
 }
 
 // NewTable 构造。
-func NewTable(def *meta.TableDef, d Deps) *Table { return &Table{def: def, deps: d} }
+func NewTable(def *meta.TableDef, d Deps) *Table {
+	return &Table{def: def, deps: d, stats: &tableStats{}}
+}
 
 // Name 表名。
 func (t *Table) Name() string { return t.def.Name }
@@ -213,17 +222,17 @@ func (t *Table) GetIndexes(ctx *sql.Context) ([]sql.Index, error) {
 
 // RowCount 精确行数（Σ ZCOUNT(exp, (now, +inf))；1s 统计缓存挡分析器高频调用）。
 func (t *Table) RowCount(ctx *sql.Context) (uint64, bool, error) {
-	t.statsMu.Lock()
-	defer t.statsMu.Unlock()
-	if time.Since(t.statsAt) < time.Second && t.statsAt.Unix() > 0 {
-		return t.statsCount, true, nil
+	t.stats.mu.Lock()
+	defer t.stats.mu.Unlock()
+	if time.Since(t.stats.at) < time.Second && t.stats.at.Unix() > 0 {
+		return t.stats.count, true, nil
 	}
 	n, err := t.deps.Exec.RowCount(ctx, t.def, time.Now().Unix())
 	if err != nil {
 		return 0, false, err
 	}
-	t.statsAt = time.Now()
-	t.statsCount = n
+	t.stats.at = time.Now()
+	t.stats.count = n
 	return n, true, nil // 任意时刻精确（docs/04 §4.6 纪律：COUNT 精确）
 }
 
