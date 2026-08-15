@@ -69,10 +69,10 @@ L4 细节：
 
 **L1 janitor 过期薄层（ARC 无内置 TTL 的配套，~100 行自研）**：
 
-- 结构：旁路最小堆 `(deadline, key)` + 索引 `map[key]*elem`；单一 janitor 协程用 timer 睡到堆顶 deadline，到期批量 `arc.Remove(key)`；
-- `Add`：新 key 入堆（Replace 时先删旧堆元素再插，**统一从堆侧删除，杜绝误删新值**）；`Remove`/驱逐：同步摘堆元素；
-- 职责分离：**过期正确性由读路径兜底**（value 带 deadline，Get 时一次整数比较，消除 janitor 触发前的毫秒级窗口）；**janitor 只负责主动释放内存**（冷条目不过夜，不等 ARC 驱逐）；
-- 生命周期随内核 Close 退出；单测覆盖：过期即删、Replace 不误删、驱逐同步摘堆、janitor 退出无泄漏。
+- 结构：过期最小堆用 go-priorityqueue（选型表既有组件，与 top-k 归并共用依赖）；条目 value 携带 deadline；
+- **职责分离**：过期正确性由读路径兜底（Get 时一次整数比较，消除 janitor 触发前的窗口）；**janitor 只负责主动释放内存**（周期清扫，间隔 min(TTL/4, 100ms)）；
+- **防误删纪律（Replace 场景，两次评审钉死）**：Replace 会在堆里留新旧两条记录——janitor 弹出时比对"堆记录 deadline 与 ARC 当前条目 deadline，**相等才删**"；且**比对与删除在同一互斥临界区内**（`Add` 与摘除串行化），杜绝 Peek→Remove 之间的 TOCTOU 窗口误删新值。读路径（Get/Remove）不进临界区，热路径零影响；
+- 生命周期随内核 Close 退出；单测覆盖：过期即删、Replace 不误删（假钟确定性回归）、并发对撞排空（-race）、janitor 退出无泄漏。
 
 **L1–L4 的覆盖边界（诚实声明）**：四层防御保护的是**索引桶**，不直接保护单行读热 key（`d:{table}:{pk}` 的点查热点，如明星内容行）。行级热读的缓释手段：L3 副本读（`DoReplica` 把点查摊到 slave）+ 可选行级近缓存（L1 扩展：pk→行投影，3s TTL，回表校验天然保证不出错——默认关闭，由 `hotkey_row_cache` 变量开启）。行级**写**热点见 §8.6，属物理下界。
 

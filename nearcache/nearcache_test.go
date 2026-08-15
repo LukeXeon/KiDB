@@ -1,6 +1,8 @@
 package nearcache
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,4 +81,39 @@ func TestJanitorExitsClean(t *testing.T) {
 	require.NoError(t, err)
 	c.Add("x", 1)
 	require.NoError(t, c.Close()) // 退出无泄漏
+}
+
+// TestConcurrentAddVsJanitor 并发 Add/Get 与 janitor 清扫对撞（-race 运行）：
+// 不停 Replace 同批 key + 短 TTL，结束后越过全部 deadline → 缓存必须排空。
+// 防误删纪律经互斥临界区保证（包注释）；本测试钉住"无数据竞争 + 最终排空"。
+func TestConcurrentAddVsJanitor(t *testing.T) {
+	c, err := New[string, int](1000, 30*time.Millisecond)
+	require.NoError(t, err)
+	defer c.Close()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					k := "key-" + strconv.Itoa((id+i)%64)
+					c.Add(k, i)
+					_, _ = c.Get(k)
+				}
+			}
+		}(w)
+	}
+	time.Sleep(150 * time.Millisecond) // 多轮 Replace + 多轮清扫
+	close(stop)
+	wg.Wait()
+
+	// 静止后越过全部 deadline：janitor 必须排空
+	require.Eventually(t, func() bool { return c.Len() == 0 },
+		2*time.Second, 20*time.Millisecond, "全部到期后必须排空（含陈旧堆记录场景）")
 }
