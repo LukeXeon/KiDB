@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"kidb"
 	"kidb/ddl"
@@ -93,7 +94,10 @@ func dropTable(ctx context.Context, table string, deps engine.Deps) error {
 	return nil
 }
 
-// createIndex 在线建索引：校验 → Catalog 落库（先可见）→ 同步回填。
+// createIndex 在线建索引（docs/06 §6.3 作业流）：
+// 校验 → Catalog 落库（Building 标记，查询不可见）→ 作业落 `_job`（游标断点续作）
+// → Controller 巡检回填 → 完成转可见。写入路径在 Building 期间即双写新索引
+// （编辑器的 TableDef 含全部索引），回填与写入的交错由 ZSet 幂等吸收。
 func createIndex(ctx context.Context, table string, idx *meta.IndexDef, deps engine.Deps) error {
 	def, err := deps.Store.Load(ctx, table)
 	if err != nil {
@@ -108,74 +112,19 @@ func createIndex(ctx context.Context, table string, idx *meta.IndexDef, deps eng
 	if err := ddl.ValidateIndexForTable(idx, def); err != nil {
 		return err
 	}
-	def.Indexes = append(def.Indexes, *idx)
+	idxCopy := *idx
+	idxCopy.Building = true
+	def.Indexes = append(def.Indexes, idxCopy)
 	if err := deps.Store.Save(ctx, def, def.Ver); err != nil {
 		return err
 	}
-	deps.Cache.Invalidate() // 写入路径立即可见新索引（双写覆盖回填窗口）
-
-	// 同步回填：全扫 → 按行值 ZADD 新桶（幂等）
-	return backfillIndex(ctx, def, idx, deps)
-}
-
-// backfillIndex 回填索引桶（限流批次，512/批 pipeline）。
-func backfillIndex(ctx context.Context, def *meta.TableDef, idx *meta.IndexDef, deps engine.Deps) error {
-	col := idx.Columns[0]
-	colDef, ok := def.Column(col)
-	if !ok {
-		return fmt.Errorf("engine: 列 %q 不存在", col)
+	if err := deps.Store.SetJob(ctx, table, &meta.DDLJob{
+		Type: "create_index", Index: &idxCopy, Cursor: 0, Started: time.Now().Unix(),
+	}); err != nil {
+		return err
 	}
-	s := deps.Exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan})
-	defer s.Close()
-	var cmds []kidb.Cmd
-	flush := func() error {
-		if len(cmds) == 0 {
-			return nil
-		}
-		if _, err := deps.Client.Pipeline(ctx, cmds); err != nil {
-			return err
-		}
-		cmds = cmds[:0]
-		return nil
-	}
-	for {
-		row, err := s.Next()
-		if err != nil {
-			if isEOF(err) {
-				break
-			}
-			return err
-		}
-		pk := pkOf(def, row)
-		ci := colIndexOf(def, col)
-		if ci < 0 || ci >= len(row) || row[ci] == nil {
-			continue // NULL 不进索引
-		}
-		enc, err := rowcodec.Encode(colDef.Type, row[ci])
-		if err != nil {
-			return err
-		}
-		slot := keycodec.Slot(keycodec.RowKey(def.Name, pk))
-		switch idx.Kind {
-		case meta.IndexRange:
-			score, err := rowcodec.ScoreOf(colDef.Type, enc)
-			if err != nil {
-				return err
-			}
-			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, 0), fmt.Sprint(score), pk}})
-		default: // Eq/Unique
-			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, slot, 0), 0, pk}})
-			if idx.PrefixCopy {
-				cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, 0), 0, enc + "\x00" + pk}})
-			}
-		}
-		if len(cmds) >= 512 {
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-	}
-	return flush()
+	deps.Cache.Invalidate()
+	return nil
 }
 
 // dropIndex 删索引：Catalog 移除 → 桶清理（等值桶按行值回推 key；范围/字典序桶按 slot 直接 UNLINK）。

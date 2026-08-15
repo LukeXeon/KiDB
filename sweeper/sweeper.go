@@ -14,11 +14,13 @@ import (
 	"kidb"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/metrics"
 	"kidb/script"
 )
 
 // Sweeper 执行清扫。
 type Sweeper struct {
+	m          *metrics.Metrics // 指标（nil = no-op）
 	cli        kidb.Client
 	reg        *script.Registry
 	batch      int              // 每 tick 每 slot 到期批大小（docs/10 sweeper_batch）
@@ -133,6 +135,9 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 	}
 
 	n, _ := strconv.Atoi(fmt.Sprint(out))
+	if s.m != nil && n > 0 {
+		s.m.SweptTotal.Add(float64(n)) // swept_total
+	}
 	return n, nil
 }
 

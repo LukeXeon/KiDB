@@ -32,6 +32,7 @@ type Server struct {
 	roleCancel context.CancelFunc
 	elector    *controller.Elector
 	manager    *controller.Manager
+	jobrunner  *controller.JobRunner
 }
 
 type sessRec struct {

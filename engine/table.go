@@ -140,6 +140,9 @@ func (t *Table) GetIndexes(ctx *sql.Context) ([]sql.Index, error) {
 	out := make([]sql.Index, 0, len(t.def.Indexes)+1)
 	out = append(out, &Index{id: "PRIMARY", table: t.def.Name, cols: []string{t.def.PK}, unique: true, primary: true, deps: t.deps, def: t.def})
 	for _, idx := range t.def.Indexes {
+		if idx.Building {
+			continue // 回填中：查询不可见（docs/06 §6.3；写入路径仍双写覆盖回填窗口）
+		}
 		out = append(out, &Index{
 			id: idx.ID, table: t.def.Name, cols: idx.Columns,
 			unique: idx.Kind == meta.IndexUnique, deps: t.deps, def: t.def,

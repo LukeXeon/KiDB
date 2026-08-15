@@ -79,6 +79,16 @@ type IndexDef struct {
 	Covering   []string  `json:"covering,omitempty"`    // 覆盖列（docs/03 §3.5）
 	Async      bool      `json:"async,omitempty"`       // 异步索引（docs/05 §5.2；与 Unique 互斥）
 	PrefixCopy bool      `json:"prefix_copy,omitempty"` // 字典序副本（前缀搜索）
+	Building   bool      `json:"building,omitempty"`    // 在线回填中（docs/06 §6.3：完成前不对查询可见）
+}
+
+// DDLJob 是进行中的 DDL 作业（Catalog `_job` 字段载荷，docs/06 §6.3）。
+// 状态持久化 → 任意网关实例的 Controller 巡检接管续作。
+type DDLJob struct {
+	Type    string    `json:"type"` // "create_index"
+	Index   *IndexDef `json:"index,omitempty"`
+	Cursor  int       `json:"cursor"` // 回填进度游标（slot 号，0..16384）
+	Started int64     `json:"started"`
 }
 
 // TableDef 是表定义（Catalog 的核心载荷）。

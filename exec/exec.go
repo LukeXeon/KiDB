@@ -15,11 +15,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"kidb"
 	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/metrics"
 	"kidb/rowcodec"
 	"kidb/script"
 )
@@ -156,6 +158,10 @@ type Request struct {
 
 	Pred     *Predicate // 回表校验（nil = 不校验）
 	Pushdown bool       // 谓词下推到服务端 Lua（docs/04 §4.2，白名单形态）
+
+	// SlotLo/SlotHi：FullScan 的 slot 区间限定（DDL 回填分批游标用；
+	// 0 值 = 全量 [0, 16384)）。
+	SlotLo, SlotHi int
 }
 
 // Executor 执行 Request，产出流式行。
@@ -166,9 +172,13 @@ type Executor struct {
 	bm            *bucketmap.Store // 桶路由（分裂状态）；nil = 永远默认单桶
 	l4            L4Resolver       // L4 热桶副本（nil = 关闭）
 	telemetry     TelemetrySink    // 遥测采样（nil = 关闭）
+	m             *metrics.Metrics // 指标（nil = no-op，docs/10 §10.3）
 	batch         int
 	slotsPerRound int
 }
+
+// SetMetrics 接入指标。
+func (e *Executor) SetMetrics(m *metrics.Metrics) { e.m = m }
 
 // SetL4 接入 L4 热桶副本解析。
 func (e *Executor) SetL4(r L4Resolver) { e.l4 = r }
@@ -234,6 +244,8 @@ type RowStream struct {
 	// bm 路由判定（Run 期解析）：等值值是否热分裂 / 范围索引是否有分裂
 	bmHotEq    bool
 	bmHotRange bool
+
+	startedAt time.Time // 首个 Next 时间（query_duration_seconds 挂点）
 }
 
 type bucketScan struct {
@@ -249,6 +261,11 @@ func (e *Executor) Run(ctx context.Context, req *Request) *RowStream {
 		s.ncFP = l1Fingerprint(req)
 		if pks, ok := e.nc.Get(s.ncFP); ok {
 			s.ncCached = pks
+			if e.m != nil {
+				e.m.NearcacheHits.Inc()
+			}
+		} else if e.m != nil {
+			e.m.NearcacheMiss.Inc()
 		}
 	}
 	// bm 路由判定（热值注册表一次解析；稀疏原则——无分裂零额外读，docs/03 §3.1）
@@ -283,6 +300,9 @@ func l1Fingerprint(req *Request) string {
 
 // Next 产出下一行（已解码、已过校验）；结束返回 io.EOF。
 func (s *RowStream) Next() ([]any, error) {
+	if s.startedAt.IsZero() {
+		s.startedAt = time.Now()
+	}
 	for {
 		if s.closed {
 			return nil, io.EOF
@@ -313,7 +333,25 @@ func (s *RowStream) Next() ([]any, error) {
 func (s *RowStream) Close() error {
 	s.closed = true
 	s.rows = nil
+	if s.exec.m != nil && !s.startedAt.IsZero() {
+		s.exec.m.QueryDuration.WithLabelValues(s.planName()).Observe(time.Since(s.startedAt).Seconds())
+	}
 	return nil
+}
+
+// planName 返回计划名（query_duration_seconds{plan} 标签）。
+func (s *RowStream) planName() string {
+	switch s.req.Kind {
+	case FullScan:
+		return "fullscan"
+	case PointGet:
+		return "point_get"
+	case EqLookup:
+		return "eq_lookup"
+	case RangeLookup:
+		return "range_lookup"
+	}
+	return "unknown"
 }
 
 // fill 拉取下一批行；无更多数据返回 io.EOF。
@@ -354,15 +392,23 @@ func (s *RowStream) fillScatter() error {
 		}
 		// 本组桶游标耗尽 → 推进到下一 slot 组；RangeLookup 逐区间推进
 		if len(s.pending) == 0 {
-			if s.nextSlot >= keycodec.NumSlots {
+			slotHi := keycodec.NumSlots
+			if s.req.SlotHi > 0 {
+				slotHi = s.req.SlotHi
+			}
+			if s.nextSlot >= slotHi {
 				s.rangeIdx++
 				s.nextSlot = 0
 				if s.req.Kind != RangeLookup || s.rangeIdx >= len(s.req.Ranges) {
 					return io.EOF
 				}
 			}
-			s.pending = s.buildGroup(s.nextSlot, min(s.nextSlot+e.slotsPerRound, keycodec.NumSlots))
-			s.nextSlot += e.slotsPerRound
+			if s.nextSlot == 0 && s.req.SlotLo > 0 {
+				s.nextSlot = s.req.SlotLo
+			}
+			from := s.nextSlot
+			s.pending = s.buildGroup(from, min(from+e.slotsPerRound, slotHi))
+			s.nextSlot = from + e.slotsPerRound
 			if len(s.pending) == 0 {
 				continue
 			}
@@ -528,7 +574,10 @@ func (s *RowStream) fetchRows(pks []string) error {
 				continue // 空 Hash = 行过期/不存在 → 静默跳过
 			}
 			if !s.req.Pred.Match(raw) {
-				continue // 谓词校验拦截（rowiter_rows_filtered_total 指标挂点）
+				if s.exec.m != nil {
+					s.exec.m.RowsFiltered.Inc() // 回表校验拦截量（docs/10 §10.3）
+				}
+				continue
 			}
 			s.rows = append(s.rows, rowcodec.DecodeRow(t, batch[j], raw))
 		}

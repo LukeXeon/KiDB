@@ -15,6 +15,7 @@ import (
 	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/metrics"
 	"kidb/script"
 )
 
@@ -26,6 +27,7 @@ type Guard struct {
 	cli   kidb.Client
 	reg   *script.Registry
 	bm    *bucketmap.Store // 桶路由（分裂状态），nil = 永远 ACTIVE 单桶
+	m     *metrics.Metrics // 指标（nil = no-op）
 	clock func() time.Time // 测试可注入
 }
 
@@ -99,6 +101,9 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 		// bm 缓存可能持旧版本——先失效再重试（预约 key 我方已持有，重试幂等）。
 		if g.bm != nil {
 			g.bm.Invalidate()
+		}
+		if g.m != nil {
+			g.m.LuaStaleRetry.Inc() // lua_stale_retry_total
 		}
 	}
 	g.rollbackReservations(ctx, acquired)

@@ -67,7 +67,7 @@ func (s *CatalogStore) Save(ctx context.Context, def *TableDef, expectVer uint64
 		return fmt.Errorf("catalog %s: encode def: %w", def.Name, err)
 	}
 	key := keycodec.CatalogKey(def.Name)
-	if _, err := s.cli.Do(ctx, "HSET", key, "def", string(raw)); err != nil {
+	if _, err := s.cli.Do(ctx, "HSET", key, "def", string(raw), "_fmtv", 1); err != nil { // _fmtv：格式版本 seam（docs/06 §6.4 演进纪律）
 		return err
 	}
 	if _, err := s.cli.Do(ctx, "HINCRBY", key, "_ver", 1); err != nil {
@@ -75,6 +75,35 @@ func (s *CatalogStore) Save(ctx context.Context, def *TableDef, expectVer uint64
 	}
 	// 全局 schema 版本递增（docs/06 §6.2：plan cache 与 lease 的失效锚点）。
 	_, err = s.cli.Do(ctx, "INCR", keycodec.SchemaVerKey())
+	return err
+}
+
+// SetJob 写入 DDL 作业（Catalog `_job` 字段，docs/06 §6.3）。
+func (s *CatalogStore) SetJob(ctx context.Context, table string, job *DDLJob) error {
+	raw, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	_, err = s.cli.Do(ctx, "HSET", keycodec.CatalogKey(table), "_job", string(raw))
+	return err
+}
+
+// GetJob 读 DDL 作业（无则 nil）。
+func (s *CatalogStore) GetJob(ctx context.Context, table string) (*DDLJob, error) {
+	res, err := s.cli.Do(ctx, "HGET", keycodec.CatalogKey(table), "_job")
+	if err != nil || res == nil {
+		return nil, err
+	}
+	var job DDLJob
+	if err := json.Unmarshal([]byte(fmt.Sprint(res)), &job); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+// ClearJob 清除完成的作业。
+func (s *CatalogStore) ClearJob(ctx context.Context, table string) error {
+	_, err := s.cli.Do(ctx, "HDEL", keycodec.CatalogKey(table), "_job")
 	return err
 }
 

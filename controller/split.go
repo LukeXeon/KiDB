@@ -10,6 +10,7 @@ import (
 	"kidb"
 	"kidb/bucketmap"
 	"kidb/keycodec"
+	"kidb/metrics"
 	"kidb/script"
 )
 
@@ -23,6 +24,7 @@ type Splitter struct {
 	cli   kidb.Client
 	reg   *script.Registry
 	bm    *bucketmap.Store
+	m     *metrics.Metrics // 指标（nil = no-op）
 	batch int
 }
 
@@ -30,6 +32,9 @@ type Splitter struct {
 func NewSplitter(cli kidb.Client, reg *script.Registry, bm *bucketmap.Store) *Splitter {
 	return &Splitter{cli: cli, reg: reg, bm: bm, batch: 500}
 }
+
+// SetMetrics 接入指标。
+func (s *Splitter) SetMetrics(m *metrics.Metrics) { s.m = m }
 
 // maxStepRetries 是单步 CAS 冲突的重试上限（断点续作保证重试收敛）。
 const maxStepRetries = 8
@@ -107,6 +112,9 @@ func (s *Splitter) SplitEq(ctx context.Context, table, idxID, encVal string, slo
 			final := &bucketmap.EqEntry{Buckets: e.Split.Children}
 			if _, err := s.bm.CAS(ctx, key, sh2.Version, "e:"+encVal, final); err != nil {
 				continue
+			}
+			if s.m != nil {
+				s.m.Splits.Inc()
 			}
 			return s.bm.RegisterHot(ctx, table, idxID, encVal)
 		}

@@ -41,6 +41,7 @@ func (s *Server) startRoles(ctx context.Context) {
 	l4 := controller.NewL4(s.deps.Client, s.deps.Reg)
 	s.deps.Exec.SetL4(l4)
 	s.manager = controller.NewManager(s.deps.Client, bm, spl, l4)
+	s.jobrunner = controller.NewJobRunner(s.deps.Client, s.deps.Store, s.deps.Cache, s.deps.Exec, bm)
 
 	go s.elector.Campaign(roleCtx, s.controllerRole)
 	go s.sweeperLoop(roleCtx)
@@ -57,7 +58,8 @@ func (s *Server) controllerRole(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			_ = s.manager.Tick(ctx) // 错误不致命：下轮再来（故障安全）
+			_ = s.manager.Tick(ctx)   // 错误不致命：下轮再来（故障安全）
+			_ = s.jobrunner.Tick(ctx) // DDL 作业巡检（docs/06 §6.3）
 		}
 	}
 }
