@@ -116,15 +116,19 @@ DDL 不是一条命令的结束，而是一个作业的开始：校验 → Catal
 | 会话变量 overlay | `SET SESSION x=v` 只写会话层，不落 `cfg:global`（[10](10-配置与可观测.md) §10.2）；不支持的会话变量返回默认值 + debug 日志，**不报错**（握手兼容生死线） |
 | `LAST_INSERT_ID()` | AUTO_INCREMENT 写入后由 TxGuard 经会话状态回填（[05](05-写入路径.md) §5.4） |
 | `FOUND_ROWS()` / `ROW_COUNT()` | 按 MySQL 语义由执行器回填 |
-| 预处理语句注册表 | COM_STMT_PREPARE 解析并缓存（stmt id → 指纹 + 参数位），COM_STMT_EXECUTE 复用 plan cache；连接关闭即销毁 |
+| 预处理语句注册表 | COM_STMT_PREPARE 期完成分类/事务/ro/守卫判定（B9 补齐的执法缺口），EXECUTE 由 gms 注册表承载；LIKE 的参数模式（`LIKE ?`）保守按无索引处理（参数在 PREPARE 期不可见），前缀搜索走文本协议 |
 | 事务状态 | 恒为"无事务"；`BEGIN/COMMIT/ROLLBACK/START TRANSACTION` 一律报错 1235 |
 
 ## 2.6 Plan cache（版本绑定，对齐 TiDB plan cache 纪律）
 
-- **指纹**：`parser.NormalizeDigest(sql)`（TiDB parser 独立模块自带）产出 (normalized, digest) 作为缓存键主体；键还包含：当前命名空间、`schema_ver`、`bm_ver` 快照代际、影响计划的会话变量（如 `query_allow_fullscan_tables` 会话覆盖）；
-- **条目绑定版本**：缓存条目记录生成时的 `{catalog_ver, bm_version}`；命中前比对当前版本，不一致则重建——**DDL 上线、索引可见、桶分裂布局变化后旧计划绝不复用**（对齐 TiDB plan cache 的 schema-version 校验，`pkg/planner/core/plan_cache*.go`）；
-- 失效因此是**惰性且精确的**：不需要主动广播失效，版本比对自然完成；
-- 容器：LRU 1024 条（`plan_cache_capacity` 变量）；Prepared Statements 参数化后指纹稳定，命中率依赖预处理协议的正确实现（§2.5）；
+> **实现状态**：网关层**判定缓存**已落地（gateway/plancache.go）——缓存的不是执行计划
+> 结构（gms 有内置语句缓存），而是 TiDB parser 的判定产物：快速路径形状 + 守卫放行。
+> 预处理语句经 gms 预处理注册表承载（ComPrepare 期完成守卫判定）。
+
+- **指纹**：`parser.NormalizeDigest(sql)`（lexer 级归一，不出 AST，~µs 级）作为缓存键——同指纹必同列名集合，守卫判定在指纹内稳定（索引存在性不随字面量变化）；
+- **条目绑定版本**：条目记录生成时的全局 schema 版本（`CatalogCache.SchemaVersion`，租约内零 RTT）；命中前比对，不一致即弃用重建——**DDL 上线、索引可见后旧判定绝不复用**（惰性精确失效，对齐 TiDB plan cache 的 schema-version 校验）；
+- **有意不缓存**：全扫依赖判定（hint/白名单放行与 ERR_NO_INDEX 拒绝）——它们随 `query_allow_fullscan_tables` 漂移而配置变更不走 schema 版本，保守每次现算；
+- 容器：LRU `plan_cache_capacity`（默认 1024，热更）；
 - 防注入标准姿势：引导业务一律 Prepared Statements。
 
 ## 2.7 系统变量（配置即数据的 SQL 面）

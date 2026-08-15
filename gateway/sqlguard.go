@@ -22,28 +22,13 @@ import (
 // 识别用 TiDB parser（与分类器分工：分类器管 DDL/DML 路由，本组件管 DML 有界性）。
 // 判不准一律放行给引擎（引擎通用路径正确，只是可能慢——执法收紧不依赖猜测）。
 
-// enforceQueryPolicy 对引擎路径语句执法；fullscan=true 表示全表遍历被放行
+// enforcePolicyStmt 对已解析语句做有界性执法；fullscan=true 表示全表遍历被放行
 // （hint/白名单——慢查询日志强制告警的判定来源，docs/10 §10.4）。
-func (h *kidbHandler) enforceQueryPolicy(ctx context.Context, query string) (fullscan bool, err error) {
-	// 快筛：只有 SELECT/UPDATE/DELETE 需要判定
-	words := leadingWords(stripComments(query), 1)
-	if len(words) == 0 {
-		return false, nil
-	}
-	switch words[0] {
-	case "SELECT", "UPDATE", "DELETE":
-	default:
-		return false, nil
-	}
-
-	stmts, _, err := parser.New().Parse(query, "", "")
-	if err != nil || len(stmts) != 1 {
-		return false, nil // 解析不了交给引擎报错
-	}
-
+// 调用方负责快筛（SELECT/UPDATE/DELETE）与解析（单 parse 纪律，plan cache 批次）。
+func (h *kidbHandler) enforcePolicyStmt(ctx context.Context, stmt ast.StmtNode, rawQuery string) (fullscan bool, err error) {
 	var sel *ast.SelectStmt
 	var where ast.ExprNode
-	switch s := stmts[0].(type) {
+	switch s := stmt.(type) {
 	case *ast.SelectStmt:
 		sel = s
 		where = s.Where
@@ -68,7 +53,21 @@ func (h *kidbHandler) enforceQueryPolicy(ctx context.Context, query string) (ful
 	}
 
 	// 无索引谓词执法（无 WHERE = 全表遍历，同纪律）
-	return h.checkBoundedScan(ctx, stmts[0], where, query)
+	return h.checkBoundedScan(ctx, stmt, where, rawQuery)
+}
+
+// analyzeDML 单 parse 联合评估：快速路径形状 + 有界性执法一次完成
+// （消除 fastpath/guard 双份解析；plan cache  miss 时的评估入口）。
+func (h *kidbHandler) analyzeDML(ctx context.Context, query string) (fp *fastPath, fullscan bool, guardErr error, parsed bool) {
+	stmts, _, err := parser.New().Parse(query, "", "")
+	if err != nil || len(stmts) != 1 {
+		return nil, false, nil, false // 解析不了交引擎报错
+	}
+	if sel, ok := stmts[0].(*ast.SelectStmt); ok {
+		fp = matchFastPathAST(sel)
+	}
+	fullscan, guardErr = h.enforcePolicyStmt(ctx, stmts[0], query)
+	return fp, fullscan, guardErr, true
 }
 
 // checkJoins 逐 JOIN 判定档位（档 1/2 放行，档 4 报错）。

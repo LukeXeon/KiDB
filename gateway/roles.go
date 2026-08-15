@@ -88,6 +88,12 @@ func (s *Server) attachReadPathSwitches(ctx context.Context) {
 			_ = curRow.Close()
 			curRow = nil
 		}
+		// plan cache 容量热更（plan_cache_capacity，docs/02 §2.6）
+		if v, _, err := s.cfg.Get(ctx, "plan_cache_capacity"); err == nil {
+			if n, perr := strconv.Atoi(v); perr == nil {
+				s.plans.resize(n)
+			}
+		}
 	}
 	apply()
 	go func() {

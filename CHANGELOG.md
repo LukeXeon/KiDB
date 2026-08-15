@@ -46,6 +46,7 @@
 - **前缀搜索 LIKE 'abc%' 查询路径**：字典序副本（`i:…#l{n}`，写路径本就在维护）接通读侧——`ZRANGEBYLEX [p [p+\xff` 分页 + k 路归并产出全局字典序（字符串堆；`ORDER BY` 前缀列时 gms 删 Sort 的契约与 top-k 同源）。引擎接入走 gms `IndexSearchableTable.LookupForExpressions`（**FilteredTable 在 gms v0.20 只在 bindvar 规则内被调用，非常驻分析面——实证死路**）；`CanSupport` 对 prefix_copy 索引精确放行前缀区间形态（其余非点范围仍拒绝，防无序路径被选为排序载体）。配套修复：在线回填此前只写主桶不写字典序副本（在线建的 prefix_copy 索引查询结果残缺）；sqlguard 放行常量前缀 LIKE。
 - **慢查询日志**：网关 ComQuery 统一计时包装——超 `slow_query_threshold_ms`（新变量，默认 500ms）记录语句指纹（NormalizeDigest）/路由/行数/耗时；全扫放行（hint/白名单）与阈值无关强制告警；新增 `slow_queries_total{route}` 指标。配套补上 **cmd 指标装配缺口**（metrics 包此前只在测试接线）：`metrics.New(nil)` 入 exec + `-metrics-addr` 可选 /metrics HTTP 端点。
 - **EXPLAIN 自定义输出**：网关接管 `EXPLAIN SELECT`（两列 item/detail 计划展示：命中路径/索引 ID/扇出估算/L1-L2 标记/守卫判定）；计划推断与执行共用同一套 AST 形态分析；接管点必须在快速路径之前（否则 `EXPLAIN SELECT COUNT(*)` 会被真执行——测试钉死）。
+- **plan cache 判定缓存**：指纹（NormalizeDigest，lexer 级归一）→ 网关判定产物（fastpath 形状 + 守卫放行），条目绑定全局 schema 版本（lease 内零 RTT 比对，惰性精确失效）；全扫依赖判定不进缓存（随 query_allow_fullscan_tables 漂移）；LRU 容量 `plan_cache_capacity` 热更。顺带：fastpath/guard 双份 TiDB 解析合并为单 parse 联合评估；**补齐预处理语句执法缺口**（ComPrepare 此前绕过事务拒绝/ro/守卫直达引擎，现 PREPARE 期完成全部分类与判定；DDL 不支持预处理协议明确报错）。
 
 ## v5.0（文档全面革新，docs/ 现行版本基线）
 

@@ -61,6 +61,15 @@ func (c *CatalogCache) Invalidate() {
 	c.lease.Invalidate()
 }
 
+// SchemaVersion 返回当前快照的全局 schema 版本（plan cache 版本绑定的锚，
+// docs/02 §2.6）：租约内零 RTT（本地快照版本），越界先执行 lease 校验。
+func (c *CatalogCache) SchemaVersion(ctx context.Context) (uint64, error) {
+	if err := c.checkLease(ctx); err != nil {
+		return 0, err
+	}
+	return c.lease.Version(), nil
+}
+
 // checkLease 执行"越界必检"：租约外比对全局 schema 版本，变了清空缓存。
 func (c *CatalogCache) checkLease(ctx context.Context) error {
 	now := c.clock()

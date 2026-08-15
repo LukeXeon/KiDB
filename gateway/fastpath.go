@@ -50,7 +50,12 @@ func matchFastPath(query string) *fastPath {
 	if err != nil || len(stmts) != 1 {
 		return nil
 	}
-	sel, ok := stmts[0].(*ast.SelectStmt)
+	return matchFastPathAST(stmts[0])
+}
+
+// matchFastPathAST 在已解析 AST 上识别（analyzeDML 单 parse 联合评估的另一半）。
+func matchFastPathAST(stmt ast.StmtNode) *fastPath {
+	sel, ok := stmt.(*ast.SelectStmt)
 	if !ok {
 		return nil
 	}

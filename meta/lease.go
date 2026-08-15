@@ -47,3 +47,14 @@ func (l *LeaseTracker) Invalidate() {
 	defer l.mu.Unlock()
 	l.valid = false
 }
+
+// Version 返回最近一次校验到的全局 schema 版本（plan cache 版本绑定用，
+// docs/02 §2.6；valid=false 时返回 0——未校验过的保守值）。
+func (l *LeaseTracker) Version() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.valid {
+		return 0
+	}
+	return l.lastVer
+}

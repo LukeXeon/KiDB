@@ -12,6 +12,8 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/sqltypes"
+	querypb "github.com/dolthub/vitess/go/vt/proto/query"
+	"github.com/pingcap/tidb/pkg/parser"
 
 	"kidb"
 	"kidb/config"
@@ -26,6 +28,8 @@ type Server struct {
 	srv  *server.Server
 	deps engine.Deps
 	cfg  *config.Store // 配置管理面（docs/10 §10.2）
+
+	plans *planCache // 判定缓存（指纹 + schema 版本绑定，docs/02 §2.6）
 
 	mu       sync.Mutex
 	sessions map[uint32]*sessRec // connID → 会话状态
@@ -70,6 +74,7 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 		deps:     deps,
 		sessions: map[uint32]*sessRec{},
 		cfg:      config.New(deps.Client, deps.Reg, "kidb-server"),
+		plans:    newPlanCache(1024),
 	}
 
 	// 会话构造：BaseSession + 角色登记
@@ -199,24 +204,78 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 			qerr = err
 			return err
 		}
-		// KiDB 侧物理快速路径（白名单形状：COUNT(*)/MIN/MAX，docs/04 §4.1/§4.5）
-		if fp := matchFastPath(query); fp != nil {
-			if res, hit, err := h.tryFastPath(ctx, fp); err != nil {
-				qerr = err
-				return sqlErr(err)
-			} else if hit {
-				route = "fastpath:" + fp.table
-				qerr = cb(res, false)
-				return qerr
+
+		// 快筛：SELECT/UPDATE/DELETE 才需要快速路径/守卫判定（其余直通引擎）
+		needsGuard := false
+		if w := leadingWords(stripComments(query), 1); len(w) > 0 {
+			switch w[0] {
+			case "SELECT", "UPDATE", "DELETE":
+				needsGuard = true
 			}
 		}
-		// DML 有界性执法：无索引谓词报错 + 档 4 JOIN 报错（docs/04 §4.1/§4.4）
-		fs, err := h.enforceQueryPolicy(ctx, query)
-		if err != nil {
-			qerr = err
-			return sqlErr(err)
+		if !needsGuard {
+			qerr = h.Handler.ComQuery(ctx, c, query, cb)
+			return qerr
 		}
-		fullscan = fs
+
+		// plan cache（docs/02 §2.6）：指纹 + schema 版本绑定的判定缓存——
+		// 命中即跳过双解析器判定（TiDB parser 的 fastpath+guard 联合评估）。
+		_, digestObj := parser.NormalizeDigest(query)
+		digest := digestObj.String()
+		schemaVer, verr := h.s.deps.Cache.SchemaVersion(ctx)
+		if verr == nil {
+			if pd, hit, stale := h.s.plans.get(digest, schemaVer); hit {
+				if m := h.s.deps.Exec.Metrics(); m != nil {
+					m.PlanCacheHit.Inc()
+				}
+				if pd.fp != nil {
+					if res, ok2, err := h.tryFastPath(ctx, pd.fp); err != nil {
+						qerr = err
+						return sqlErr(err)
+					} else if ok2 {
+						route = "fastpath:" + pd.fp.table
+						qerr = cb(res, false)
+						return qerr
+					}
+				}
+				qerr = h.Handler.ComQuery(ctx, c, query, cb)
+				return qerr
+			} else if stale {
+				if m := h.s.deps.Exec.Metrics(); m != nil {
+					m.PlanCacheStale.Inc()
+				}
+			}
+		}
+
+		// miss：单 parse 联合评估（快速路径形状 + 有界性执法）
+		fp, fs, gerr, parsed := h.analyzeDML(ctx, query)
+		if parsed {
+			if fp != nil {
+				if res, hit, err := h.tryFastPath(ctx, fp); err != nil {
+					qerr = err
+					return sqlErr(err)
+				} else if hit {
+					route = "fastpath:" + fp.table
+					// fp 命中即守卫豁免（COUNT(*)/MIN/MAX 的扇出本身有界）——
+					// 重放只消费 fp，不消费守卫判定，故 fp 命中总是可缓存
+					if verr == nil {
+						h.s.plans.put(digest, planDecision{schemaVer: schemaVer, fp: fp})
+					}
+					qerr = cb(res, false)
+					return qerr
+				}
+			}
+			if gerr != nil {
+				qerr = gerr
+				return sqlErr(gerr)
+			}
+			fullscan = fs
+			// 仅缓存"配置无关的放行"（索引谓词/JOIN 档位）；全扫依赖判定
+			// （hint/白名单）随 query_allow_fullscan_tables 漂移，不进缓存
+			if verr == nil && !fs {
+				h.s.plans.put(digest, planDecision{schemaVer: schemaVer, fp: fp})
+			}
+		}
 		qerr = h.Handler.ComQuery(ctx, c, query, cb)
 		return qerr
 	}
@@ -235,6 +294,28 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 	}
 	qerr = cb(&sqltypes.Result{}, false)
 	return qerr
+}
+
+// ComPrepare 预处理：与 ComQuery 同套的执法面（此前为缺口——预处理语句
+// 绕过事务拒绝/ro/守卫直达引擎）。分类/事务/ro/守卫在 PREPARE 期判定；
+// EXECUTE 由 gms 自己的预处理注册表承载（fastpath 不进预处理路径——
+// 引擎执行结果同样正确，加速只对文本协议）。
+func (h *kidbHandler) ComPrepare(ctx context.Context, c *mysql.Conn, query string, prepare *mysql.PrepareData) ([]*querypb.Field, error) {
+	if isTxnStmt(query) {
+		return nil, mysql.NewSQLError(1235, "HY000", "KiDB 不支持事务语句（缓存定位，docs/02 §2.1）")
+	}
+	if rec := h.s.session(c.ConnectionID); rec != nil && rec.role == "ro" && isWriteStmt(query) {
+		return nil, mysql.NewSQLError(1290, "HY000", "只读账号禁止写操作（ERR_READ_ONLY）")
+	}
+	if Classify(query) == RouteDDL {
+		return nil, mysql.NewSQLError(1235, "HY000", "DDL 不支持预处理协议（低频管理面，走文本协议）")
+	}
+	// 守卫判定（模板含 ? 占位符：TiDB parser 解析为 ParamMarkerExpr——
+	// 列名收集不受影响；LIKE 参数模式保守按无索引处理，见 docs/04 §4.5 注记）
+	if _, _, gerr, parsed := h.analyzeDML(ctx, query); parsed && gerr != nil {
+		return nil, sqlErr(gerr)
+	}
+	return h.Handler.ComPrepare(ctx, c, query, prepare)
 }
 
 // sqlCtx 为 DDL 路径构造 gms 上下文。
