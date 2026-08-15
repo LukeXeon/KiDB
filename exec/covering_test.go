@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"kidb"
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/script"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -69,7 +69,7 @@ func seedCoverTable() *meta.TableDef {
 // TestCoveringReadPath 覆盖索引读路径（docs/03 §3.5）：
 // 投影∪谓词 ⊆ {索引列,覆盖列,pk} → 零回表（无 HGETALL/HMGET），活性经 exp ZSCORE。
 func TestCoveringReadPath(t *testing.T) {
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	cc := newCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedCoverTable()
@@ -135,7 +135,7 @@ func TestCoveringReadPath(t *testing.T) {
 
 // TestProjectionFetch 投影下推（docs/04 §4.3）：非覆盖时回表用 HMGET 子集。
 func TestProjectionFetch(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	cc := newCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	// 4 列表：投影 [city] + 谓词 age → 取列 {city,age} ⊊ 非主键列 {city,age,note}
@@ -183,7 +183,7 @@ func TestProjectionFetch(t *testing.T) {
 
 // TestCoveringFallback 覆盖 member 解码失败（脏 member 防御）→ 回表兜底，结果不错。
 func TestCoveringFallback(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedCoverTable()
 	ctx := context.Background()

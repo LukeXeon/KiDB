@@ -7,15 +7,15 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/nearcache"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
 // TestL1NearCache L1 集成：指纹命中跳过散取；TTL 内新行短暂不可见（文档化语义）；
 // 值变更的行被回表校验拦截（docs/08 §8.4：绝不回错行）。
 func TestL1NearCache(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 20) // 10 shanghai / 10 beijing
@@ -57,7 +57,7 @@ func TestL1NearCache(t *testing.T) {
 
 // 保证收集路径在无缓存时不 panic 且功能不变
 func TestEqLookupNoCache(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 10)

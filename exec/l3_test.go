@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"kidb"
-	"kidb/internal/redistest"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -53,7 +53,7 @@ func (f *replicaFake) counts() (int, int) {
 // TestL3ReplicaRouting L3 副本读分流（docs/08 §8.4 + docs/09 §9.4）：
 // 开关开 + 能力在 → 读走 PipelineReplica；能力缺失 → 自动回落主通道（降级不失效）。
 func TestL3ReplicaRouting(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	fake := &replicaFake{KvClient: cli, replicaOK: true}
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{

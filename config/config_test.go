@@ -6,11 +6,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
+	"kidb/testutil"
 )
 
 func TestConfigStore(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	ctx := context.Background()
 	s := New(cli, reg, "test")
 

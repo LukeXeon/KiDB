@@ -11,7 +11,7 @@ import (
 	"strconv"
 
 	"kidb"
-	"kidb/internal/tuning"
+	"kidb/tuning"
 )
 
 // CandKey 热桶候选注册表（Hash：field=桶 key，value=最近采样时间戳）。

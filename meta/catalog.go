@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"kidb"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/script"
 )
@@ -31,7 +32,7 @@ func (s *CatalogStore) Load(ctx context.Context, table string) (*TableDef, error
 	if err != nil {
 		return nil, err
 	}
-	fields, err := asStringMap(res)
+	fields, err := ds.StringMap(res)
 	if err != nil {
 		return nil, err
 	}
@@ -149,30 +150,4 @@ func (s *CatalogStore) RegisterTable(ctx context.Context, table string) error {
 func (s *CatalogStore) UnregisterTable(ctx context.Context, table string) error {
 	_, err := s.cli.Do(ctx, "HDEL", keycodec.TableRegistryKey(), table)
 	return err
-}
-
-// asStringMap 把 HGETALL 的两种返回形态（map 或扁平数组）归一为 map。
-func asStringMap(res any) (map[string]string, error) {
-	switch v := res.(type) {
-	case map[string]string:
-		return v, nil
-	case map[any]any:
-		m := make(map[string]string, len(v))
-		for k, val := range v {
-			m[fmt.Sprint(k)] = fmt.Sprint(val)
-		}
-		return m, nil
-	case []any:
-		if len(v)%2 != 0 {
-			return nil, fmt.Errorf("hgetall: odd element count %d", len(v))
-		}
-		m := make(map[string]string, len(v)/2)
-		for i := 0; i < len(v); i += 2 {
-			m[fmt.Sprint(v[i])] = fmt.Sprint(v[i+1])
-		}
-		return m, nil
-	case nil:
-		return map[string]string{}, nil
-	}
-	return nil, fmt.Errorf("hgetall: unexpected reply type %T", res)
 }

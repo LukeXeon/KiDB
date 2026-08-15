@@ -8,8 +8,9 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
-	"kidb/internal/tuning"
+	"kidb/ds"
 	"kidb/rowcodec"
+	"kidb/tuning"
 	"kidb/txguard"
 )
 
@@ -177,15 +178,7 @@ func (e *editor) readExisting(ctx *sql.Context, pk string) (sql.Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw := map[string]string{}
-	switch v := res.(type) {
-	case map[string]string:
-		raw = v
-	case map[any]any:
-		for k, val := range v {
-			raw[fmt.Sprint(k)] = fmt.Sprint(val)
-		}
-	}
+	raw, _ := ds.StringMap(res)
 	if len(raw) == 0 {
 		return nil, nil
 	}

@@ -7,13 +7,13 @@ import (
 
 	"kidb/bucketmap"
 	"kidb/controller"
-	"kidb/indexer"
 	"kidb/engine"
-	"kidb/internal/tuning"
+	"kidb/indexer"
 	"kidb/keycodec"
 	"kidb/nearcache"
 	"kidb/sweeper"
 	"kidb/telemetry"
+	"kidb/tuning"
 )
 
 // roles.go：后台角色的装配与驱动（docs/08 §8.5）：

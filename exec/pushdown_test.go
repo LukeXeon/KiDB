@@ -9,14 +9,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
 // TestPushdownParity 是 docs/12 §12.3 P4 的落地：
 // 服务端下推 vs 客户端校验，同输入结果集必须相同。
 func TestPushdownParity(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	ctx := context.Background()
@@ -79,7 +79,7 @@ func TestPushdownParity(t *testing.T) {
 
 // TestPushdownSkipsExpired 下推路径同样拦截过期行（空 Hash 服务端跳过）。
 func TestPushdownSkipsExpired(t *testing.T) {
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	ctx := context.Background()

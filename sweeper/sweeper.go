@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"kidb"
-	"kidb/internal/tuning"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/script"
+	"kidb/tuning"
 )
 
 // Sweeper 执行清扫。
@@ -72,7 +73,7 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 	if err != nil {
 		return 0, err
 	}
-	pks := asStrings(res)
+	pks := ds.Strings(res)
 	if len(pks) == 0 {
 		return 0, nil
 	}
@@ -102,7 +103,7 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 
 	argv := []any{strconv.FormatInt(now, 10), strconv.Itoa(len(pks))}
 	for i, pk := range pks {
-		fields := asStringMap(rcpts[i])
+		fields, _ := ds.StringMap(rcpts[i])
 		var buckets [][2]string
 		for f, v := range fields {
 			if strings.HasPrefix(f, "idx:") {
@@ -152,7 +153,7 @@ func (s *Sweeper) nowUnix(ctx context.Context) (int64, error) {
 	if s.cli.Capabilities().ServerTime {
 		res, err := s.cli.Do(ctx, "TIME")
 		if err == nil {
-			if ss := asStrings(res); len(ss) > 0 {
+			if ss := ds.Strings(res); len(ss) > 0 {
 				if n, err := strconv.ParseInt(ss[0], 10, 64); err == nil {
 					return n, nil
 				}
@@ -160,38 +161,4 @@ func (s *Sweeper) nowUnix(ctx context.Context) (int64, error) {
 		}
 	}
 	return time.Now().Unix(), nil
-}
-
-func asStrings(res any) []string {
-	switch v := res.(type) {
-	case []string:
-		return v
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, e := range v {
-			out = append(out, fmt.Sprint(e))
-		}
-		return out
-	}
-	return nil
-}
-
-func asStringMap(res any) map[string]string {
-	switch v := res.(type) {
-	case map[string]string:
-		return v
-	case map[any]any:
-		out := make(map[string]string, len(v))
-		for k, val := range v {
-			out[fmt.Sprint(k)] = fmt.Sprint(val)
-		}
-		return out
-	case []any:
-		out := make(map[string]string, len(v)/2)
-		for i := 0; i+1 < len(v); i += 2 {
-			out[fmt.Sprint(v[i])] = fmt.Sprint(v[i+1])
-		}
-		return out
-	}
-	return nil
 }

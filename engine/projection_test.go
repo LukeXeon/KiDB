@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"kidb/exec"
-	"kidb/internal/redistest"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -20,7 +20,7 @@ import (
 // 索引列——投影窄 schema 曾让 PRIMARY 索引列缺失、nil stat 在 gms 内部 panic。
 // 本测试钉死：投影查询走索引路径结果精确、行宽=投影宽。
 func TestProjectedIndexScan(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	store := meta.NewCatalogStore(cli, reg)
 	deps := Deps{
 		Client: cli,

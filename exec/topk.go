@@ -5,12 +5,11 @@ import (
 	"math"
 	"strconv"
 
-	pq "gopkg.in/dnaeon/go-priorityqueue.v1"
-
 	"kidb"
-	"kidb/internal/tuning"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/tuning"
 )
 
 // topk.go：RangeLookup 的全局 score 有序流（docs/04 §4.1：ORDER BY num LIMIT k
@@ -52,7 +51,7 @@ type mergeWay struct {
 type orderedMerger struct {
 	s      *RowStream
 	r      RangeBound
-	pq     *pq.PriorityQueue[topkItem, float64]
+	pq     *ds.PriorityQueue[topkItem, float64]
 	ways   []mergeWay
 	desc   bool
 	seeded bool
@@ -61,11 +60,10 @@ type orderedMerger struct {
 
 // newOrderedMerger 构造（不发起 IO；首个 fill 时种子）。
 func newOrderedMerger(s *RowStream, r RangeBound, desc bool) *orderedMerger {
-	kind := pq.MinHeap
 	if desc {
-		kind = pq.MaxHeap
+		return &orderedMerger{s: s, r: r, desc: desc, pq: ds.NewMaxPriorityQueue[topkItem, float64]()}
 	}
-	return &orderedMerger{s: s, r: r, desc: desc, pq: pq.New[topkItem, float64](kind)}
+	return &orderedMerger{s: s, r: r, desc: desc, pq: ds.NewMinPriorityQueue[topkItem, float64]()}
 }
 
 // fillOrderedRange 驱动归并：区间耗尽推进下一区间，全部耗尽 io.EOF。
@@ -108,13 +106,13 @@ func (om *orderedMerger) step() error {
 	}
 	var cand []scored
 	var refill []int
-	for !om.pq.IsEmpty() && len(cand) < e.batch {
-		it := om.pq.Get()
-		cand = append(cand, scored{it.Value, it.Priority})
-		w := &om.ways[it.Value.way]
+	for om.pq.Len() > 0 && len(cand) < e.batch {
+		it, prio := om.pq.Pop()
+		cand = append(cand, scored{it, prio})
+		w := &om.ways[it.way]
 		w.inHeap--
 		if w.inHeap == 0 && !w.done {
-			refill = append(refill, it.Value.way)
+			refill = append(refill, it.way)
 		}
 	}
 	if len(cand) == 0 && len(refill) == 0 {
@@ -200,7 +198,7 @@ func (om *orderedMerger) seed() error {
 		w := &om.ways[i]
 		w.cursor = 1
 		w.inHeap = 1
-		om.pq.Put(topkItem{member: member, way: i}, score)
+		om.pq.Push(topkItem{member: member, way: i}, score)
 		if e.telemetry != nil {
 			e.telemetry.Sample(s.ctx, w.key) // 只采样有成员的桶（热在数据里）
 		}
@@ -222,7 +220,7 @@ func (om *orderedMerger) refillWays(idxs []int) error {
 	}
 	for j, res := range results {
 		w := &om.ways[idxs[j]]
-		members := asStrings(res)
+		members := ds.Strings(res)
 		n := len(members) / 2 // WITHSCORES 扁平对
 		if n == 0 {
 			w.done = true
@@ -233,7 +231,7 @@ func (om *orderedMerger) refillWays(idxs []int) error {
 			if perr != nil || math.IsNaN(score) {
 				continue // 脏 score 防御（正常路径不会到达：DDL 限定数值列）
 			}
-			om.pq.Put(topkItem{member: members[2*k], way: idxs[j]}, score)
+			om.pq.Push(topkItem{member: members[2*k], way: idxs[j]}, score)
 			w.inHeap++
 		}
 		w.cursor += n
@@ -260,7 +258,7 @@ func (om *orderedMerger) pageCmd(key string, off, count int) kidb.Cmd {
 
 // parseWithScores 解析 WITHSCORES 扁平返回的首个 (member, score) 对。
 func (om *orderedMerger) parseWithScores(res any) (float64, string, bool) {
-	arr := asStrings(res)
+	arr := ds.Strings(res)
 	if len(arr) < 2 {
 		return 0, "", false
 	}

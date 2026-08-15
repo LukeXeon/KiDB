@@ -12,9 +12,9 @@ import (
 
 	"kidb/bucketmap"
 	"kidb/exec"
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/telemetry"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -23,7 +23,7 @@ import (
 func toStr(v any) string { return strconv.Itoa(0)[0:0] + fmt.Sprintf("%v", v) }
 
 func TestAutoSplitViaTelemetry(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	ctx := context.Background()
@@ -63,7 +63,7 @@ func TestAutoSplitViaTelemetry(t *testing.T) {
 
 // TestL4Replicas L4 副本生命周期（docs/08 §8.4）：激活 → 副本服务 → 回收回退。
 func TestL4Replicas(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	ctx := context.Background()

@@ -6,12 +6,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
+	"kidb/testutil"
 )
 
 // TestShardRoundTrip bm 分片 msgp 编码往返（docs/03 §3.4 编码纪律）。
 func TestShardRoundTrip(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	s := New(cli, reg)
 	ctx := context.Background()
 

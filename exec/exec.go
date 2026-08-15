@@ -24,12 +24,13 @@ import (
 
 	"kidb"
 	"kidb/bucketmap"
-	"kidb/internal/tuning"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/rowcodec"
 	"kidb/script"
+	"kidb/tuning"
 )
 
 // 批大小/组宽等调优值统一收敛 internal/tuning（docs/01 §1.0：开发者参数单一调优面）。
@@ -629,7 +630,7 @@ func (s *RowStream) fillScatter() error {
 		var items []candItem
 		rest := s.pending[:0]
 		for i, b := range s.pending {
-			members := asStrings(results[i])
+			members := ds.Strings(results[i])
 			for _, m := range members {
 				pk := s.stripCovering(m)
 				if s.seen != nil { // 分裂窗口父子桶双读去重
@@ -897,7 +898,7 @@ func (s *RowStream) fetchRows(pks []string) error {
 			for _, j := range miss {
 				switch {
 				case rc != nil:
-					raw := asStringMap(results[ri])
+					raw, _ := ds.StringMap(results[ri])
 					pttlMs, _ := strconv.ParseInt(fmt.Sprint(results[ri+1]), 10, 64)
 					ri += 2
 					if len(raw) == 0 {
@@ -906,7 +907,7 @@ func (s *RowStream) fetchRows(pks []string) error {
 					rc.Add(keycodec.RowKey(t.Name, batch[j]), raw, time.Duration(pttlMs)*time.Millisecond)
 					raws[j] = raw
 				case cols == nil:
-					raw := asStringMap(results[ri])
+					raw, _ := ds.StringMap(results[ri])
 					ri++
 					if len(raw) == 0 {
 						continue
@@ -964,42 +965,6 @@ func (s *RowStream) stripCovering(member string) string {
 		return rowcodec.MemberPK(member, true)
 	}
 	return member
-}
-
-// asStrings 归一 ZRANGE 族返回为字符串切片。
-func asStrings(res any) []string {
-	switch v := res.(type) {
-	case []string:
-		return v
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, e := range v {
-			out = append(out, fmt.Sprint(e))
-		}
-		return out
-	}
-	return nil
-}
-
-// asStringMap 归一 HGETALL 返回为 map[string]string。
-func asStringMap(res any) map[string]string {
-	switch v := res.(type) {
-	case map[string]string:
-		return v
-	case map[any]any:
-		out := make(map[string]string, len(v))
-		for k, val := range v {
-			out[fmt.Sprint(k)] = fmt.Sprint(val)
-		}
-		return out
-	case []any:
-		out := make(map[string]string, len(v)/2)
-		for i := 0; i+1 < len(v); i += 2 {
-			out[fmt.Sprint(v[i])] = fmt.Sprint(v[i+1])
-		}
-		return out
-	}
-	return nil
 }
 
 // RowCount 精确行数（docs/04 §4.1：Σ ZCOUNT(exp, (now, +inf))，任意时刻精确）。

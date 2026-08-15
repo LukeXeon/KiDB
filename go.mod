@@ -18,7 +18,6 @@ require (
 	github.com/tinylib/msgp v1.6.4
 	golang.org/x/sync v0.22.0
 	golang.org/x/time v0.15.0
-	gopkg.in/dnaeon/go-priorityqueue.v1 v1.1.1
 	gopkg.in/src-d/go-errors.v1 v1.0.0
 	pgregory.net/rapid v1.3.0
 )

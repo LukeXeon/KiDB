@@ -7,9 +7,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/meta"
 	"kidb/nearcache"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -18,7 +18,7 @@ import (
 //   - 条目 TTL ≤ 行 PTTL：行过期后缓存同步失效（绝不返回过期行）；
 //   - 更新/删除的陈旧窗口 ≤ 默认 TTL（文档化取舍，默认关闭的原因）。
 func TestRowCache(t *testing.T) {
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	cc := newCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{

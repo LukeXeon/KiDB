@@ -8,14 +8,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/keycodec"
+	"kidb/testutil"
 )
 
 // TestElectionFailover 选主与故障迁移（docs/08 §8.5）：
 // 锁即选举、watchdog 续约、持有者宕机后秒级接管、续约失败立即卸任。
 func TestElectionFailover(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -56,7 +56,7 @@ func TestElectionFailover(t *testing.T) {
 
 // TestWatchdogStepDown 续约失败（锁被外部删除）→ 立即卸任（脑裂窗口消除）。
 func TestWatchdogStepDown(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

@@ -12,9 +12,9 @@ import (
 
 	"kidb/bucketmap"
 	"kidb/exec"
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -49,7 +49,7 @@ func sameSlotPKs(table string, slot uint16, n int, rng *rand.Rand) []string {
 // TestSplitEqUnderConcurrentWrites 核心不变式（docs/12 §12.3 P1 的单测形态）：
 // 分裂进行中并发写入，任意时刻等值查询结果 == 模型（不多行、不少行）。
 func TestSplitEqUnderConcurrentWrites(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	sp := NewSplitter(cli, reg, bm)
@@ -125,7 +125,7 @@ func TestSplitEqUnderConcurrentWrites(t *testing.T) {
 
 // TestSplitRangeCoversAll 范围桶分裂：查询覆盖区间无遗漏、无重复。
 func TestSplitRangeCoversAll(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	sp := NewSplitter(cli, reg, bm)
@@ -211,7 +211,7 @@ func drainRange(t *testing.T, e *exec.Executor, tbl *meta.TableDef, lo, hi int) 
 
 // TestMergeEqAfterSplit 合并镜像协议：分裂→合并→数据完整（docs/08 §8.3 末段）。
 func TestMergeEqAfterSplit(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	sp := NewSplitter(cli, reg, bm)
@@ -247,7 +247,7 @@ func TestMergeEqAfterSplit(t *testing.T) {
 
 // TestMergeRangeAfterSplit 范围桶合并。
 func TestMergeRangeAfterSplit(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	sp := NewSplitter(cli, reg, bm)

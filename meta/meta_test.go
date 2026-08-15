@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"kidb/internal/redistest"
+	"kidb/testutil"
 )
 
 func TestCatalogSaveLoad(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	ctx := context.Background()
 	store := NewCatalogStore(cli, reg)
 

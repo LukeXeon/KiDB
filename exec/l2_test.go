@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/meta"
 	"kidb/nearcache"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -19,7 +19,7 @@ import (
 // 32 路并发冷查询同一热值，散取命令量必须 ≈ 1 次（而非 32 次）；
 // 全部调用方结果一致（回表校验各自执行）。
 func TestL2Singleflight(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	cc := newCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{
@@ -86,7 +86,7 @@ func TestL2Singleflight(t *testing.T) {
 
 // TestL2FollowersDuringRefill 已有 L1 缓存时并发直接命中（L1/L2 接力）。
 func TestL2FollowersDuringRefill(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	cc := newCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{

@@ -20,6 +20,7 @@ import (
 	"github.com/tinylib/msgp/msgp"
 
 	"kidb"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/script"
 )
@@ -122,7 +123,7 @@ func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shar
 		return nil, err
 	}
 	sh := DefaultShard()
-	fields := asStringMap(res)
+	fields, _ := ds.StringMap(res)
 	if len(fields) > 0 {
 		sh.Version = parseUint(fields["version"])
 		sh.Next = int(parseUint(fields["next"]))
@@ -167,7 +168,8 @@ func (s *Store) Registry(ctx context.Context, table, idx string) (map[string]boo
 		return nil, err
 	}
 	out := map[string]bool{}
-	for f := range asStringMap(res) {
+	bmReply, _ := ds.StringMap(res)
+	for f := range bmReply {
 		out[f] = true
 	}
 	return out, nil
@@ -402,24 +404,4 @@ func decodeRanges(b []byte) ([]RangeBucket, error) {
 		out = append(out, rb)
 	}
 	return out, nil
-}
-
-func asStringMap(res any) map[string]string {
-	switch v := res.(type) {
-	case map[string]string:
-		return v
-	case map[any]any:
-		out := make(map[string]string, len(v))
-		for k, val := range v {
-			out[fmt.Sprint(k)] = fmt.Sprint(val)
-		}
-		return out
-	case []any:
-		out := make(map[string]string, len(v)/2)
-		for i := 0; i+1 < len(v); i += 2 {
-			out[fmt.Sprint(v[i])] = fmt.Sprint(v[i+1])
-		}
-		return out
-	}
-	return nil
 }

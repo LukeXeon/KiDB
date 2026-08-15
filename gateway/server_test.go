@@ -14,15 +14,15 @@ import (
 	"kidb"
 	"kidb/engine"
 	"kidb/exec"
-	"kidb/internal/redistest"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
 // newTestServer 在 miniredis 上起完整网关（随机端口），返回 DSN 与内核依赖（测试断言用）。
 func newTestServer(t *testing.T) (string, engine.Deps, func()) {
 	t.Helper()
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 
 	store := meta.NewCatalogStore(cli, reg)
 	deps := engine.Deps{
@@ -189,7 +189,7 @@ func TestGatewaySmoke(t *testing.T) {
 
 // TestGatewayRO ro 账号执法（docs/02 §2.9）。
 func TestGatewayRO(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	store := meta.NewCatalogStore(cli, reg)
 	deps := engine.Deps{
 		Client: cli, Reg: reg, Store: store,

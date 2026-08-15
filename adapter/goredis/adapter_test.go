@@ -6,11 +6,11 @@ import (
 	"testing"
 
 	"kidb"
-	"kidb/internal/redistest"
+	"kidb/testutil"
 )
 
 func TestDoAndPipeline(t *testing.T) {
-	cli, _, _ := redistest.New(t)
+	cli, _, _ := testutil.New(t)
 	ctx := context.Background()
 
 	if _, err := cli.Do(ctx, "HSET", "d:t:{1}", "name", "alice"); err != nil {
@@ -49,7 +49,7 @@ func TestDoAndPipeline(t *testing.T) {
 }
 
 func TestEvalFallbackAndProbe(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	ctx := context.Background()
 
 	lr, _ := reg.Get("lock_release")
@@ -72,7 +72,7 @@ func TestEvalFallbackAndProbe(t *testing.T) {
 }
 
 func TestDoReplicaUnsupported(t *testing.T) {
-	cli, _, _ := redistest.New(t)
+	cli, _, _ := testutil.New(t)
 	if _, err := cli.DoReplica(context.Background(), "GET", "k"); err == nil {
 		t.Fatal("DoReplica without capability must error")
 	}

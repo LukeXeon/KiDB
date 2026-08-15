@@ -1,6 +1,6 @@
-// Package redistest 提供测试基建：miniredis + 参考适配器组装成
+// Package testutil 提供测试基建：miniredis + 参考适配器组装成
 // 可用的 kidb.KvClient（docs/12 §12.2：单元/PBT 层跑在 miniredis 上）。
-package redistest
+package testutil
 
 import (
 	"context"

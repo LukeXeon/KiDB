@@ -1,13 +1,13 @@
 package exec
 
 import (
-	"container/heap"
 	"io"
 	"strings"
 
 	"kidb"
-	"kidb/internal/tuning"
+	"kidb/ds"
 	"kidb/keycodec"
+	"kidb/tuning"
 )
 
 // prefix.go：前缀搜索 LIKE 'abc%' 的字典序副本查询路径（docs/04 §4.5）：
@@ -28,25 +28,10 @@ type lexItem struct {
 	way    int
 }
 
-// lexHeap container/heap 最小堆（按 member 字节序）。
-type lexHeap []lexItem
-
-func (h lexHeap) Len() int           { return len(h) }
-func (h lexHeap) Less(i, j int) bool { return h[i].member < h[j].member }
-func (h lexHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *lexHeap) Push(x any)        { *h = append(*h, x.(lexItem)) }
-func (h *lexHeap) Pop() any {
-	old := *h
-	n := len(old)
-	it := old[n-1]
-	*h = old[:n-1]
-	return it
-}
-
-// lexMerger 字典序副本的 k 路归并器。
+// lexMerger 字典序副本的 k 路归并器（ds 泛型堆，member 为优先级 = 小顶堆字典序）。
 type lexMerger struct {
 	s      *RowStream
-	heap   lexHeap
+	heap   *ds.PriorityQueue[lexItem, string]
 	ways   []mergeWay
 	seeded bool
 }
@@ -54,7 +39,7 @@ type lexMerger struct {
 // fillPrefix 驱动字典序归并（单区间：[LexLo, LexHi) 无多区间概念）。
 func (s *RowStream) fillPrefix() error {
 	if s.lm == nil {
-		s.lm = &lexMerger{s: s}
+		s.lm = &lexMerger{s: s, heap: ds.NewMinPriorityQueue[lexItem, string]()}
 	}
 	return s.lm.step()
 }
@@ -72,8 +57,8 @@ func (lm *lexMerger) step() error {
 
 	var cand []lexItem
 	var refill []int
-	for len(lm.heap) > 0 && len(cand) < e.batch {
-		it := heap.Pop(&lm.heap).(lexItem)
+	for lm.heap.Len() > 0 && len(cand) < e.batch {
+		it, _ := lm.heap.Pop()
 		cand = append(cand, it)
 		w := &lm.ways[it.way]
 		w.inHeap--
@@ -144,7 +129,7 @@ func (lm *lexMerger) seed() error {
 		return err
 	}
 	for i, res := range results {
-		members := asStrings(res)
+		members := ds.Strings(res)
 		if len(members) == 0 {
 			lm.ways[i].done = true
 			continue
@@ -152,7 +137,7 @@ func (lm *lexMerger) seed() error {
 		w := &lm.ways[i]
 		w.cursor = 1
 		w.inHeap = 1
-		heap.Push(&lm.heap, lexItem{member: members[0], way: i})
+		lm.heap.Push(lexItem{member: members[0], way: i}, members[0])
 		if e.telemetry != nil {
 			e.telemetry.Sample(s.ctx, w.key)
 		}
@@ -174,13 +159,13 @@ func (lm *lexMerger) refillWays(idxs []int) error {
 	}
 	for j, res := range results {
 		w := &lm.ways[idxs[j]]
-		members := asStrings(res)
+		members := ds.Strings(res)
 		if len(members) == 0 {
 			w.done = true
 			continue
 		}
 		for _, m := range members {
-			heap.Push(&lm.heap, lexItem{member: m, way: idxs[j]})
+			lm.heap.Push(lexItem{member: m, way: idxs[j]}, m)
 			w.inHeap++
 		}
 		w.cursor += len(members)

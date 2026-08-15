@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"kidb"
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/testutil"
 )
 
 func testTable() *meta.TableDef {
@@ -92,7 +92,7 @@ func slotOf(tbl *meta.TableDef, pk string) uint16 {
 // TestWriteRowInvariants 覆盖 docs/12 §12.2 的七项一致性断言主路径：
 // 行、等值桶、范围桶、字典序副本、exp、cnt、rcpt（+唯一预约）。
 func TestWriteRowInvariants(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := New(cli, reg, nil)
 	tbl := testTable()
 	p := probe{t: t, cli: cli, tbl: tbl}
@@ -182,7 +182,7 @@ func TestWriteRowInvariants(t *testing.T) {
 // TestResurrection 主键复活：旧行已过期、回执仍在 → 按回执撤销旧索引、
 // cnt 不重复 INCR（跨脚本不变式见 write_row.lua 头部）。
 func TestResurrection(t *testing.T) {
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	g := New(cli, reg, nil)
 	tbl := testTable()
 	p := probe{t: t, cli: cli, tbl: tbl}
@@ -216,7 +216,7 @@ func TestResurrection(t *testing.T) {
 // TestCASWriteGuard 调用方 CAS 写语义：期望版本与预读不符 → fail-fast 不重试
 // （docs/05 §5.6：预读→提交间的并发竞态才走 stale 整体重试）。
 func TestCASWriteGuard(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := New(cli, reg, nil)
 	tbl := testTable()
 	ctx := context.Background()

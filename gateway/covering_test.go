@@ -16,8 +16,8 @@ import (
 	"kidb"
 	"kidb/engine"
 	"kidb/exec"
-	"kidb/internal/redistest"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -88,7 +88,7 @@ func (w *wireCounter) reset() {
 // 经 gms 全链路（pruneTables 投影下推 → ITA → translate 覆盖判定），
 // 命中覆盖的投影查询零回表（无 HGETALL/HMGET），结果精确。
 func TestCoveringWire(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	wc := &wireCounter{KvClient: cli, counts: map[string]int{}}
 
 	store := meta.NewCatalogStore(cli, reg)

@@ -6,8 +6,8 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"kidb"
-	"kidb/internal/tuning"
 	"kidb/keycodec"
+	"kidb/tuning"
 )
 
 // hll.go：索引基数 HLL 的采样写入（docs/04 §4.6：结果必须精确，统计可以近似）。

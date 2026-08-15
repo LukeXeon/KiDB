@@ -10,15 +10,15 @@ import (
 
 	"kidb/bucketmap"
 	"kidb/exec"
-	"kidb/internal/redistest"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
 // TestDDLJobResumable DDL 作业续作（docs/06 §6.3 + docs/12 §12.3 P6 形态）：
 // 作业落库 → 分批推进（中途换执行器接管）→ 完成后索引可见且内容正确。
 func TestDDLJobResumable(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	e := exec.New(cli, reg)

@@ -10,10 +10,10 @@ import (
 	"kidb"
 	"kidb/bucketmap"
 	"kidb/exec"
-	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
+	"kidb/tuning"
 	"kidb/txguard"
 )
 

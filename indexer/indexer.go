@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"kidb"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
@@ -33,7 +34,7 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 	if err != nil {
 		return 0, err
 	}
-	entries := asStrings(res)
+	entries := ds.Strings(res)
 	if len(entries) == 0 {
 		return 0, nil
 	}
@@ -103,18 +104,4 @@ func (i *Indexer) LogBacklog(ctx context.Context, t *meta.TableDef, idx *meta.In
 		return 0, err
 	}
 	return strconv.ParseInt(fmt.Sprint(res), 10, 64)
-}
-
-func asStrings(res any) []string {
-	switch v := res.(type) {
-	case []string:
-		return v
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, e := range v {
-			out = append(out, fmt.Sprint(e))
-		}
-		return out
-	}
-	return nil
 }

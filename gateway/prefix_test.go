@@ -10,7 +10,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/tuning"
+	"kidb/tuning"
 )
 
 // TestPrefixSearchWire: prefix search end to end (docs/04 §4.5, docs/02 §2.4 prefix_copy).

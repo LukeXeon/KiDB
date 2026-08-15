@@ -8,16 +8,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/testutil"
 )
 
 // TestHLLSampling 基数统计采样写 + 估算读（docs/04 §4.6）：
 // 写入 10000 行 5000 distinct 值 → PFCOUNT×回补 ≈ 5000（±30% 界，
 // 采样误差 + HLL 自身误差的有界断言——近似纪律的验收方式）。
 func TestHLLSampling(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := New(cli, reg, nil)
 	tbl := &meta.TableDef{
 		Name: "st",

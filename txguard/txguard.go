@@ -13,12 +13,13 @@ import (
 
 	"kidb"
 	"kidb/bucketmap"
-	"kidb/internal/tuning"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/rowcodec"
 	"kidb/script"
+	"kidb/tuning"
 )
 
 // maxStaleRetries 由调用点读取 tuning.Get().Txguard.StaleRetries（docs/05 §5.5）。
@@ -622,22 +623,7 @@ func (g *Guard) hgetall(ctx context.Context, key string) (map[string]string, err
 	if err != nil || res == nil {
 		return nil, err
 	}
-	out := map[string]string{}
-	switch v := res.(type) {
-	case map[string]string:
-		return v, nil
-	case map[any]any:
-		for k, val := range v {
-			out[fmt.Sprint(k)] = fmt.Sprint(val)
-		}
-		return out, nil
-	case []any:
-		for i := 0; i+1 < len(v); i += 2 {
-			out[fmt.Sprint(v[i])] = fmt.Sprint(v[i+1])
-		}
-		return out, nil
-	}
-	return nil, fmt.Errorf("txguard: unexpected HGETALL reply %T", res)
+	return ds.StringMap(res)
 }
 
 func oldVerOf(oldRow map[string]string) uint64 {

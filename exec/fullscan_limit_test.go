@@ -9,15 +9,15 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
 // TestFullscanLimit 全扫限流通道（docs/07 §7.4）：并发全扫受信号量约束，
 // 超限查询排队（而非击穿集群）。
 func TestFullscanLimit(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{
 		Name: "fs",

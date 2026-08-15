@@ -3,7 +3,7 @@ package meta
 import (
 	"context"
 
-	"kidb/internal/tuning"
+	"kidb/tuning"
 	"sync"
 	"time"
 )

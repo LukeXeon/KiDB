@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -63,7 +63,7 @@ func drain(t *testing.T, s *RowStream) [][]any {
 }
 
 func TestFullScanAndPointGet(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 100)
@@ -86,7 +86,7 @@ func TestFullScanAndPointGet(t *testing.T) {
 }
 
 func TestEqLookupWithValidation(t *testing.T) {
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 50)
@@ -124,7 +124,7 @@ func TestEqLookupWithValidation(t *testing.T) {
 }
 
 func TestRangeLookup(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 50) // age = 20..69

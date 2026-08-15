@@ -8,8 +8,8 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
-	"kidb/internal/tuning"
 	"kidb/metrics"
+	"kidb/tuning"
 )
 
 // fullscan.go：引擎层全表遍历闸门（docs/07 §7.4 访问控制 + docs/04 §4.4）。

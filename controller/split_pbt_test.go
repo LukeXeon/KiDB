@@ -9,7 +9,7 @@ import (
 
 	"kidb/bucketmap"
 	"kidb/exec"
-	"kidb/internal/redistest"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -23,7 +23,7 @@ func TestSplitMergePBT(t *testing.T) {
 	slot := uint16(2048)
 	values := []string{"red", "green", "blue"}
 
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	ctx := context.Background()
 	tbl := splitTable()
 	pks := sameSlotPKs(tbl.Name, slot, 400, rand.New(rand.NewSource(31)))

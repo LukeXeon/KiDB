@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -32,7 +32,7 @@ func sweepTable() *meta.TableDef {
 
 // TestSweepExpired 到期行清扫：索引/登记册/计数/回执/预约全清（docs/07 §7.3）。
 func TestSweepExpired(t *testing.T) {
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	now := time.Now()
 	clock := func() time.Time { return now } // 共享钟：写入/清扫同源
@@ -75,7 +75,7 @@ func TestSweepExpired(t *testing.T) {
 // TestSweepSkipsResurrected 复活复查不变式（write_row.lua 头部跨脚本约定）：
 // 行已复活（exp score 在未来）时 sweeper 必须跳过，绝不清活行的索引。
 func TestSweepSkipsResurrected(t *testing.T) {
-	cli, reg, m := redistest.New(t)
+	cli, reg, m := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	now := time.Now()
 	clock := func() time.Time { return now }

@@ -2,7 +2,7 @@ package kidb
 
 import (
 	"context"
-	"kidb/internal/tuning"
+	"kidb/tuning"
 	"strings"
 	"time"
 )

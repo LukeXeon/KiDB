@@ -2,7 +2,7 @@ package controller
 
 import (
 	"context"
-	"kidb/internal/tuning"
+	"kidb/tuning"
 
 	"kidb"
 	"kidb/bucketmap"

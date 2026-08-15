@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb/internal/redistest"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/testutil"
 	"kidb/txguard"
 )
 
@@ -32,7 +32,7 @@ func asyncTable() *meta.TableDef {
 // 查询正确性由回表校验兜底（docs/05 §5.2：最终一致，不会出错行）。
 // 断言对 slot 碰撞健壮（两行同 slot 时日志/桶合一）。
 func TestAsyncIndexFlow(t *testing.T) {
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	g := txguard.New(cli, reg, nil)
 	tbl := asyncTable()
 	ctx := context.Background()

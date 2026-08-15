@@ -9,6 +9,7 @@ import (
 
 	"kidb"
 	"kidb/bucketmap"
+	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/metrics"
 	"kidb/rowcodec"
@@ -138,7 +139,7 @@ func (s *Splitter) migrateEq(ctx context.Context, table, idxID, encVal string, s
 			if err != nil {
 				return err
 			}
-			members := asStrings(res)
+			members := ds.Strings(res)
 			if len(members) == 0 {
 				break
 			}
@@ -382,20 +383,6 @@ func boundOf(s string) float64 {
 	return f
 }
 
-func asStrings(res any) []string {
-	switch v := res.(type) {
-	case []string:
-		return v
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, e := range v {
-			out = append(out, fmt.Sprint(e))
-		}
-		return out
-	}
-	return nil
-}
-
 func asAnySlice(res any) []any {
 	switch v := res.(type) {
 	case []any:
@@ -457,7 +444,7 @@ func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, slo
 					if err != nil {
 						return err
 					}
-					members := asStrings(res)
+					members := ds.Strings(res)
 					if len(members) == 0 {
 						break
 					}

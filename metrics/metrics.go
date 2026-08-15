@@ -60,7 +60,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		ConfigSet: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "kidb", Name: "config_set_total",
 		}, []string{"result"}),
-		LeaseRefresh:   prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "schema_lease_refresh_total"}),
+		LeaseRefresh: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "schema_lease_refresh_total"}),
 		DDLJobDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "kidb", Name: "ddl_job_duration_seconds", Buckets: prometheus.DefBuckets,
 		}, []string{"type"}),

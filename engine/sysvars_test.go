@@ -9,14 +9,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"kidb/config"
-	"kidb/internal/redistest"
+	"kidb/testutil"
 )
 
 // TestSysvarsPersistOnSetGlobal SET GLOBAL → NotifyChanged → cfg:global 持久化
 // （docs/02 §2.7 数据流）；ro 账号在钩子内被拒。
 func TestSysvarsPersistOnSetGlobal(t *testing.T) {
 	RegisterSysvars()
-	cli, reg, _ := redistest.New(t)
+	cli, reg, _ := testutil.New(t)
 	store := config.New(cli, reg, "test")
 
 	rw := &Session{BaseSession: sql.NewBaseSession(), Role: "rw", Cfg: store}
