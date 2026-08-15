@@ -17,8 +17,8 @@ import (
 )
 
 // ExecDDL 执行 DDL 操作（docs/06 §6.3 作业流）。
-// v1 边界：CREATE INDEX 回填与 DROP 清理为**同步执行**（小数据成立；
-// 大表走 docs/06 §6.3 的后台作业化，随 controller 落地切换）。
+// CREATE INDEX 走后台作业化（Building 标记 + JobRunner 巡检回填，docs/06 §6.3）；
+// DROP TABLE/INDEX 的清理当前为同步执行（小表成立；大表清理走同样的作业化后续扩展）。
 // 正确性论证：Catalog 先落库 → 并发写入即双写新索引；回填按当前行值 ZADD，
 // ZSet 去重天然幂等；回填与删除交错的残留由回表校验兜底（docs/01 §1.7）。
 func ExecDDL(ctx context.Context, op *ddl.Op, deps engine.Deps) error {

@@ -7,6 +7,7 @@ import (
 
 	"kidb"
 	"kidb/keycodec"
+	"kidb/script"
 )
 
 // CatalogStore 是 Catalog 的读写存储（docs/06 §6.1：`c:table:{table}` Hash，
@@ -16,10 +17,13 @@ import (
 // TODO(impl): Save 的 CAS 当前为读-改-写，实现期改 config_set 风格 Lua 原子 CAS。
 type CatalogStore struct {
 	cli kidb.KvClient
+	reg *script.Registry
 }
 
-// NewCatalogStore 构造存储。
-func NewCatalogStore(cli kidb.KvClient) *CatalogStore { return &CatalogStore{cli: cli} }
+// NewCatalogStore 构造存储（reg 供 catalog_set.lua 原子 CAS）。
+func NewCatalogStore(cli kidb.KvClient, reg *script.Registry) *CatalogStore {
+	return &CatalogStore{cli: cli, reg: reg}
+}
 
 // Load 读取表定义；表不存在返回 (nil, 0, nil)。
 func (s *CatalogStore) Load(ctx context.Context, table string) (*TableDef, error) {
@@ -47,33 +51,33 @@ func (s *CatalogStore) Load(ctx context.Context, table string) (*TableDef, error
 	return &def, nil
 }
 
-// Save 写表定义（带期望版本；version 由存储侧 _ver+1）。
+// Save 写表定义（catalog_set.lua 原子 CAS：HGET _ver 校验 → HSET def → _ver+1）。
+// 并发 DDL 不丢更新；期望版本不符即 stale 报错（**不自动换基线重试**——
+// 调用方拿着旧 def，换基线重试会覆盖并发变更，正是要防的丢更新）。
 func (s *CatalogStore) Save(ctx context.Context, def *TableDef, expectVer uint64) error {
-	cur, err := s.Load(ctx, def.Name)
-	if err != nil {
-		return err
-	}
-	var curVer uint64
-	if cur != nil {
-		curVer = cur.Ver
-	}
-	if curVer != expectVer {
-		return fmt.Errorf("%w: catalog %s expect _ver=%d got %d", kidb.ErrStaleMetadata, def.Name, expectVer, curVer)
-	}
 	raw, err := def.MarshalMsg(nil)
 	if err != nil {
 		return fmt.Errorf("catalog %s: encode def: %w", def.Name, err)
 	}
+	cs, _ := s.reg.Get("catalog_set")
 	key := keycodec.CatalogKey(def.Name)
-	if _, err := s.cli.Do(ctx, "HSET", key, "def", string(raw), "_fmtv", 2); err != nil { // _fmtv=2：msgp 代码生成版（docs/03 §3.4）
+	out, err := s.cli.Eval(ctx, cs, []string{key}, string(raw), strconv.FormatUint(expectVer, 10), 2)
+	if err != nil {
 		return err
 	}
-	if _, err := s.cli.Do(ctx, "HINCRBY", key, "_ver", 1); err != nil {
-		return err
+	arr, _ := out.([]any)
+	if len(arr) == 0 {
+		return fmt.Errorf("catalog %s: bad cas reply %v", def.Name, out)
 	}
-	// 全局 schema 版本递增（docs/06 §6.2：plan cache 与 lease 的失效锚点）。
-	_, err = s.cli.Do(ctx, "INCR", keycodec.SchemaVerKey())
-	return err
+	switch fmt.Sprint(arr[0]) {
+	case "ok":
+		// 全局 schema 版本递增（docs/06 §6.2：plan cache 与 lease 的失效锚点）。
+		_, err = s.cli.Do(ctx, "INCR", keycodec.SchemaVerKey())
+		return err
+	case "stale":
+		return fmt.Errorf("%w: catalog %s expect _ver=%d got %s", kidb.ErrStaleMetadata, def.Name, expectVer, fmt.Sprint(arr[1]))
+	}
+	return fmt.Errorf("catalog %s: unknown cas status %v", def.Name, arr[0])
 }
 
 // SetJob 写入 DDL 作业（Catalog `_job` 字段，docs/06 §6.3）。

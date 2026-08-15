@@ -9,9 +9,9 @@ import (
 )
 
 func TestCatalogSaveLoad(t *testing.T) {
-	cli, _, _ := redistest.New(t)
+	cli, reg, _ := redistest.New(t)
 	ctx := context.Background()
-	store := NewCatalogStore(cli)
+	store := NewCatalogStore(cli, reg)
 
 	def := &TableDef{
 		Name: "users",

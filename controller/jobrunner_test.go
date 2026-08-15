@@ -22,7 +22,7 @@ func TestDDLJobResumable(t *testing.T) {
 	g := txguard.New(cli, reg, bm)
 	e := exec.New(cli, reg)
 	e.SetBucketMap(bm)
-	store := meta.NewCatalogStore(cli)
+	store := meta.NewCatalogStore(cli, reg)
 	cache := meta.NewCatalogCache(store)
 	ctx := context.Background()
 

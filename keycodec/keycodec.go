@@ -3,7 +3,10 @@ package keycodec
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 // key 布局规范见 docs/03 §3.1。记号：{table} 为裸插值占位；
@@ -126,9 +129,12 @@ func SweepLockKey(slotStart, slotEnd uint16) string {
 }
 
 // EscapeValue 桶/预约 key 中 value 的转义规则（docs/03 §3.2）：
-// URL escape；超长（>128B）或含 ':'、'{'、'}'、'#' 的值改取摘要
-// （TODO(impl)：摘要变体随 cespare/xxhash 依赖落地，桶 key 带 "~x" 前缀）。
+// URL escape；超长（>128B）或含 ':'、'{'、'}'、'#' 的值改取 xxhash64 摘要
+// （桶 key 带 "~x" 前缀标记为摘要桶，查询侧同规则寻址——两径同源本函数）。
 func EscapeValue(v string) string {
+	if len(v) > 128 || strings.ContainsAny(v, ":{}#") {
+		return "~x" + strconv.FormatUint(xxhash.Sum64String(v), 16)
+	}
 	return url.QueryEscape(v)
 }
 

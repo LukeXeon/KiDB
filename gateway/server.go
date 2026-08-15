@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync"
@@ -95,7 +96,13 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 		Address:  boot.ListenAddr,
 		Version:  "8.0.30-KiDB", // 版本伪装（docs/02 §2.10）
 		Listener: l,
-		// TODO(impl): TLSConfig 由 boot.TLSCertFile/TLSKeyFile 构造
+	}
+	if boot.TLSCertFile != "" && boot.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(boot.TLSCertFile, boot.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("gateway: TLS 证书加载: %w", err)
+		}
+		cfg.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 
 	wrapper := func(h mysql.Handler) (mysql.Handler, error) {

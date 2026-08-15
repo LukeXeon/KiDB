@@ -1,6 +1,6 @@
 // Package rowcodec 负责 gms 类型值 ↔ Redis 字符串编码的转换
-// （docs/03 §3.4：标量字段 Hash 平铺零序列化；JSON 列当前存文本形态，
-// TODO(impl): 切换 msgp 代码生成版，迁移走 docs/06 §6.4 版本纪律）。
+// （docs/03 §3.4：标量字段 Hash 平铺零序列化；JSON 列保留文本形态——
+// 文本即 JSON 标准格式，msgp 压缩收益在列内文档场景，经 _fmtv 演进）。
 package rowcodec
 
 import (

@@ -23,7 +23,7 @@ func newTestServer(t *testing.T) (string, func()) {
 	t.Helper()
 	cli, reg, _ := redistest.New(t)
 
-	store := meta.NewCatalogStore(cli)
+	store := meta.NewCatalogStore(cli, reg)
 	deps := engine.Deps{
 		Client: cli,
 		Reg:    reg,
@@ -172,7 +172,7 @@ func TestGatewaySmoke(t *testing.T) {
 // TestGatewayRO ro 账号执法（docs/02 §2.9）。
 func TestGatewayRO(t *testing.T) {
 	cli, reg, _ := redistest.New(t)
-	store := meta.NewCatalogStore(cli)
+	store := meta.NewCatalogStore(cli, reg)
 	deps := engine.Deps{
 		Client: cli, Reg: reg, Store: store,
 		Cache: meta.NewCatalogCache(store), Exec: exec.New(cli, reg), Guard: txguard.New(cli, reg, nil),

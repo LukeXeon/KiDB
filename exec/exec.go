@@ -2,8 +2,8 @@
 // 执行为全链路流式 RowStream——桶游标分页 → pk 批 → pipeline 回表 →
 // 谓词校验 → 解码产出。一切命令有界（页 512），任何路径不物化全量。
 //
-// v1 边界：桶一律 ACTIVE 单桶形态（分裂状态机随 controller 落地扩展）；
-// 谓词下推 Lua（docs/04 §4.2）与 L1~L4 热 key 防御随后续批次接入。
+// 分裂状态机经 bucketmap 接入（SetBucketMap）；谓词下推（SetPushdown 注册表）
+// 与 L1/L4（SetNearCache/SetL4）均已接线。
 package exec
 
 import (

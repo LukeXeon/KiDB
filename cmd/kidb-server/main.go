@@ -65,7 +65,7 @@ func main() {
 	}
 	defer k.Close()
 
-	store := meta.NewCatalogStore(cli)
+	store := meta.NewCatalogStore(cli, k.Scripts())
 	bm := bucketmap.New(cli, k.Scripts())
 	deps := engine.Deps{
 		Client: cli,

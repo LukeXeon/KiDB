@@ -59,3 +59,29 @@ func TestReplicaOffSlot(t *testing.T) {
 		seen[Slot(rep)] = true
 	}
 }
+
+// TestEscapeValueDigest 摘要桶规则（docs/03 §3.2）：
+// 超长/含结构字符的值走 xxhash64 摘要（~x 前缀），同值必同 key。
+func TestEscapeValueDigest(t *testing.T) {
+	// 常规值：URL escape 直通
+	if got := EscapeValue("shanghai"); got != "shanghai" {
+		t.Fatalf("EscapeValue = %q", got)
+	}
+	// 含冒号：摘要
+	a := EscapeValue("has:colon")
+	if !HasDigestPrefix(a) {
+		t.Fatalf("含冒号值应摘要，got %q", a)
+	}
+	// 超长：摘要
+	long := make([]byte, 200)
+	for i := range long {
+		long[i] = 'x'
+	}
+	if !HasDigestPrefix(EscapeValue(string(long))) {
+		t.Fatal("超长值应摘要")
+	}
+	// 同值同摘要（唯一约束同值必同 key 的前提）
+	if EscapeValue("has:colon") != a {
+		t.Fatal("同值必须同摘要")
+	}
+}
