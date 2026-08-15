@@ -144,17 +144,21 @@ func (h *kidbHandler) buildExplain(ctx context.Context, inner string) ([][2]stri
 		}
 		if col, vals := eqPredOn(def, where); col != "" {
 			add("plan", "eq_lookup")
-			add("index", eqIndexID(def, col))
+			idxID := eqIndexID(def, col)
+			add("index", idxID)
 			add("values", fmt.Sprint(len(vals)))
 			add("fanout", fmt.Sprintf("16384 × %d values", len(vals)))
 			add("l1_l2", "nearcache+singleflight（热值指纹）")
+			h.addCardinality(ctx, add, def.Name, idxID)
 			return rows, nil
 		}
 		if col := rangePredOn(def, where); col != "" {
 			add("plan", "range_lookup(ordered)")
-			add("index", rangeIndexID(def, col))
+			idxID := rangeIndexID(def, col)
+			add("index", idxID)
 			add("fanout", "16384 buckets (seed) + k-way merge")
 			add("note", "全局 score 有序流；LIMIT 早停由引擎停止消费达成")
+			h.addCardinality(ctx, add, def.Name, idxID)
 			return rows, nil
 		}
 		if col := prefixPredOn(def, where); col != "" {
@@ -314,4 +318,16 @@ func fullscanVerdict(ctx context.Context, h *kidbHandler, def *meta.TableDef, ra
 		return "ERR_NO_INDEX（hint /*+ FULLSCAN */ 或表白名单可放行）"
 	}
 	return "允许（hint/白名单）→ exp 登记册遍历 + 回表校验"
+}
+
+// addCardinality 附加索引基数估算行（HLL 采样，近似——docs/04 §4.6 决策依据）。
+func (h *kidbHandler) addCardinality(ctx context.Context, add func(string, string), table, idxID string) {
+	if idxID == "" {
+		return
+	}
+	n, err := h.s.deps.Exec.IndexCardinality(ctx, table, idxID)
+	if err != nil {
+		return
+	}
+	add("cardinality(approx)", fmt.Sprint(n))
 }

@@ -96,6 +96,7 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 			return Result{}, err
 		}
 		if !stale {
+			g.hllSample(ctx, req) // 索引基数统计采样（docs/04 §4.6：统计可以近似）
 			return res, nil
 		}
 		// stale：行被并发改写或桶布局在动，整体重读重试。

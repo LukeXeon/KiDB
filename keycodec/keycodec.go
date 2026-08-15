@@ -104,6 +104,10 @@ func BucketMapKey(table, idx string) string { return "bm:" + table + ":" + idx }
 // CatalogKey 表元数据：`c:table:{table}`。
 func CatalogKey(table string) string { return "c:table:" + table }
 
+// HLLKey 索引基数 HLL：`hll:{table}:{idx}`（索引级单 key——
+// 消费方是索引级基数估算；per-slot 形态的 16384 路 PFCOUNT 扇出无消费方，见 docs/04 §4.6）。
+func HLLKey(table, idx string) string { return "hll:" + table + ":" + idx }
+
 // TableRegistryKey 表注册表：`c:tables` Hash（field=表名，value=1）。
 // SHOW TABLES / INFORMATION_SCHEMA 由此生成（docs/02 §2.10）。
 func TableRegistryKey() string { return "c:tables" }

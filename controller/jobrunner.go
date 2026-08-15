@@ -13,6 +13,7 @@ import (
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
+	"kidb/txguard"
 )
 
 // jobrunner.go：DDL 后台作业执行器（docs/06 §6.3）：
@@ -205,6 +206,10 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		// 与 txguard 写路径同一编码——rowcodec.LexMember 单点）
 		if idx.PrefixCopy && idx.Kind != meta.IndexRange {
 			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, 0), 0, rowcodec.LexMember(enc, pk)}})
+		}
+		// 基数统计采样（docs/04 §4.6：与增量写入同一按值采样规则）
+		if txguard.HLLSampledValue(idx.ID, enc) {
+			cmds = append(cmds, kidb.Cmd{Name: "PFADD", Args: []any{keycodec.HLLKey(def.Name, idx.ID), enc}})
 		}
 		if len(cmds) >= 512 {
 			if err := flush(); err != nil {

@@ -28,13 +28,13 @@
 - **EXPLAIN 自定义输出**（网关接管 `EXPLAIN SELECT`：两列计划展示——路径/索引/扇出估算/守卫判定；计划推断非执行回放；必须在快速路径之前接管，否则 EXPLAIN COUNT(*) 会真执行）。
 - **plan cache 判定缓存**（指纹 NormalizeDigest + schema 版本绑定，LRU `plan_cache_capacity` 热更；缓存的是网关判定产物（fastpath 形状+守卫放行）而非计划结构；全扫依赖判定保守不缓存（随配置漂移）；顺带合并 fastpath/guard 双份解析为单 parse 联合评估；**补齐预处理语句执法缺口**——ComPrepare 此前绕过事务/ro/守卫直达引擎）。
 - **全扫/回填限流通道**（`golang.org/x/time/rate`：DDL 回填按 `ddl_backfill_rate_limit` 行/s/实例限速；全扫并发信号量 `query_fullscan_rate_limit`（超限排队，ctx 贯穿）——两变量轮询热更）。
+- **HLL 基数统计**（按值确定性采样 PFADD（1/64，频率无关——按 pk 采样会把低基数列高估 ~64 倍，推导后否决）；PFCOUNT×64 读侧 + EXPLAIN cardinality(approx) 行；AND 自动选路接管留作后续项——gms coster 当前承载，实测偏差 -10.4%@5000 distinct）。
 
 | 项 | 说明 |
 |---|---|
 | 并发扇出池 | 当前顺序 pipeline 批 + 批大小 bulkhead 已够用；需要结构化并发时引入 `sourcegraph/conc` / errgroup |
 | 后台任务池 | 后台角色为常驻循环，无任务池负载；需要时引入 `panjf2000/ants` |
 | 故障注入 | docs/12 §12.6 清单在案；引入 `Shopify/toxiproxy`（CI 环境项） |
-| HLL 基数统计接入（PFADD 写路径 + 优化器选路） | docs/04 §4.6 |
 
 ## C. 运维与验证基建
 
