@@ -122,12 +122,6 @@ func (s *Server) rowCacheEnabled(ctx context.Context) bool {
 	return err == nil && v == "true"
 }
 
-// replicaReadEnabled 读 replica_read 变量（默认 false）。
-func (s *Server) replicaReadEnabled(ctx context.Context) bool {
-	v, _, err := s.cfg.Get(ctx, "replica_read")
-	return err == nil && v == "true"
-}
-
 // l1Config 读取 nearcache_ttl/_capacity 变量（解析失败回落默认——
 // 变量校验在 SET 时 fail-fast，这里是防御）。
 func (s *Server) l1Config(ctx context.Context) (time.Duration, int) {
