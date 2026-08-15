@@ -36,12 +36,15 @@ func (t *Table) Replacer(ctx *sql.Context) sql.RowReplacer {
 }
 
 // editor 是 Insert/Update/Delete/Replace 四用的行编辑器。
+// applied 计数本语句已提交行数（StatementBegin 重置）——多行 DML 失败时
+// 错误信息携带部分成功明细（docs/05 §5.5：无整体回滚）。
 type editor struct {
-	t *Table
+	t       *Table
+	applied int
 }
 
-// StatementBegin 无事务定位下的 no-op（docs/02 §2.1：语句即原子）。
-func (e *editor) StatementBegin(ctx *sql.Context) {}
+// StatementBegin 重置语句内计数。
+func (e *editor) StatementBegin(ctx *sql.Context) { e.applied = 0 }
 
 // DiscardChanges no-op（单行已原子提交，无暂存变更可弃）。
 func (e *editor) DiscardChanges(ctx *sql.Context, _ error) error { return nil }
@@ -52,7 +55,10 @@ func (e *editor) StatementComplete(ctx *sql.Context) error { return nil }
 // Close 关闭。
 func (e *editor) Close(*sql.Context) error { return nil }
 
-// Insert 单行插入（UPSERT 语义由写入 Lua 的旧行分支天然提供）。
+// Insert 单行插入。语义分层（docs/05 §5.4/§5.5）：
+//   - 活行已存在 → UniqueKeyError（携带既有行——gms 用它区分 plain INSERT 报错 /
+//     IGNORE 抑制 / ODKU 走合并更新分支）；
+//   - 行不存在或已过期 → 全新插入（过期行视为不存在，Lua 内回执分支清残留）。
 func (e *editor) Insert(ctx *sql.Context, row sql.Row) error {
 	pk, fields, err := e.splitRow(row)
 	if err != nil {
@@ -67,13 +73,27 @@ func (e *editor) Insert(ctx *sql.Context, row sql.Row) error {
 		}
 		pk = fmt.Sprint(n)
 	}
+	// 主键判重（plain INSERT 语义）：预读既有行，活行冲突报错带 Existing
+	// （upsert 语义走 Replacer，不经此路）
+	if existing, err := e.readExisting(ctx, pk); err != nil {
+		return err
+	} else if existing != nil {
+		return sql.NewUniqueKeyErr(pk, true, existing)
+	}
+	if err := e.checkRowSize(pk, fields); err != nil {
+		return e.withProgress(err)
+	}
 	_, err = e.t.deps.Guard.WriteRow(ctx, txguard.WriteReq{
 		Table:  e.t.def,
 		PK:     pk,
 		Fields: fields,
 		TTL:    e.t.rowTTL(),
 	})
-	return translateWriteErr(err)
+	if err != nil {
+		return e.withProgress(translateWriteErr(err))
+	}
+	e.applied++
+	return nil
 }
 
 // Replace 同 Insert（upsert）。
@@ -97,13 +117,20 @@ func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
 			return err
 		}
 	}
+	if err := e.checkRowSize(newPK, fields); err != nil {
+		return e.withProgress(err)
+	}
 	_, err = e.t.deps.Guard.WriteRow(ctx, txguard.WriteReq{
 		Table:  e.t.def,
 		PK:     newPK,
 		Fields: fields,
 		TTL:    e.t.rowTTL(),
 	})
-	return translateWriteErr(err)
+	if err != nil {
+		return e.withProgress(translateWriteErr(err))
+	}
+	e.applied++
+	return nil
 }
 
 // Delete 单行删除（命中已过期行 = 0 rows affected，docs/05 §5.5）。
@@ -112,9 +139,39 @@ func (e *editor) Delete(ctx *sql.Context, row sql.Row) error {
 	if err != nil {
 		return err
 	}
-	_, err = e.t.deps.Guard.DeleteRow(ctx, e.t.def, pk)
-	return translateWriteErr(err)
+	deleted, err := e.t.deps.Guard.DeleteRow(ctx, e.t.def, pk)
+	if err != nil {
+		return e.withProgress(translateWriteErr(err))
+	}
+	if deleted {
+		e.applied++
+	}
+	return nil
 }
+
+// readExisting 预读既有行（判重用）：返回解码后的行，不存在/已过期返回 nil。
+func (e *editor) readExisting(ctx *sql.Context, pk string) (sql.Row, error) {
+	res, err := e.t.deps.Client.Do(ctx, "HGETALL", rowKeyOf(e.t.def.Name, pk))
+	if err != nil {
+		return nil, err
+	}
+	raw := map[string]string{}
+	switch v := res.(type) {
+	case map[string]string:
+		raw = v
+	case map[any]any:
+		for k, val := range v {
+			raw[fmt.Sprint(k)] = fmt.Sprint(val)
+		}
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	return rowcodec.DecodeRow(e.t.def, pk, raw), nil
+}
+
+// rowKeyOf 行 key（keycodec 布局）。
+func rowKeyOf(table, pk string) string { return "d:" + table + ":{" + pk + "}" }
 
 // splitRow 把 gms 行拆为 pk 与编码字段（nil → NULL = 字段缺失）。
 func (e *editor) splitRow(row sql.Row) (pk string, fields map[string]string, err error) {
@@ -153,6 +210,26 @@ func (t *Table) rowTTL() time.Duration {
 		return time.Duration(t.def.DefaultTTL) * time.Second
 	}
 	return 0
+}
+
+// withProgress 给错误附部分成功明细（docs/05 §5.5）。
+func (e *editor) withProgress(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w（本语句已提交 %d 行，无整体回滚——docs/05 §5.5）", err, e.applied)
+}
+
+// checkRowSize 单行体积防线（docs/03 §3.4：max_row_bytes，超限 ERR_ROW_TOO_LARGE）。
+func (e *editor) checkRowSize(pk string, fields map[string]string) error {
+	total := len(pk)
+	for f, v := range fields {
+		total += len(f) + len(v)
+	}
+	if total > e.t.def.EffectiveMaxRowBytes() {
+		return fmt.Errorf("%w: %d bytes > max_row_bytes=%d", kidb.ErrRowTooLarge, total, e.t.def.EffectiveMaxRowBytes())
+	}
+	return nil
 }
 
 // translateWriteErr 把内核错误翻译为 gms 可识别的形态

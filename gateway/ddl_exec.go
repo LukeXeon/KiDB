@@ -112,6 +112,12 @@ func createIndex(ctx context.Context, table string, idx *meta.IndexDef, deps eng
 	if err := ddl.ValidateIndexForTable(idx, def); err != nil {
 		return err
 	}
+	// 单 _job 槽位：表内有进行中作业则拒绝（DDL 低频管理面，队列化属过度设计）
+	if job, err := deps.Store.GetJob(ctx, table); err != nil {
+		return err
+	} else if job != nil {
+		return fmt.Errorf("%w: 表 %s 有进行中的 DDL 作业，完成后重试", kidb.ErrUnsupported, table)
+	}
 	idxCopy := *idx
 	idxCopy.Building = true
 	def.Indexes = append(def.Indexes, idxCopy)

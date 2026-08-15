@@ -72,15 +72,20 @@ func (e *Elector) Campaign(ctx context.Context, role func(ctx context.Context) e
 			}
 			continue
 		}
-		// 任职
+		// 任职：角色与续约**并发**跑（角色阻塞在前台，watchdog 在后台盯续约；
+		// 任一结束——角色退出或续约失败——都收掉另一方）
 		e.isOwner.Store(true)
 		roleCtx, cancel := context.WithCancel(ctx)
-		watchdogErr := e.runWatchdog(roleCtx, cancel)
+		watchDone := make(chan struct{})
+		go func() {
+			e.runWatchdog(roleCtx, cancel) // 续约失败 → cancel roleCtx
+			close(watchDone)
+		}()
 		roleErr := runRole(roleCtx, role)
-		cancel()
+		cancel() // 角色退出 → 停续约循环
+		<-watchDone
 		e.isOwner.Store(false)
 		e.release(context.Background()) // 卸任释放（锁在任期自然到期也可）
-		_ = watchdogErr
 		_ = roleErr
 		// 重新竞选
 	}

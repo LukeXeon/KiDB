@@ -13,7 +13,7 @@ import (
 // TestFastPathCountMinMax KiDB 侧快速路径（docs/04 §4.1/§4.5）：
 // COUNT(*) 精确、MIN/MAX 端点归并+回表校验、脏 member 跳过、空集 NULL。
 func TestFastPathCountMinMax(t *testing.T) {
-	dsn, cleanup := newTestServer(t)
+	dsn, deps, cleanup := newTestServer(t)
 	defer cleanup()
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
@@ -29,8 +29,20 @@ func TestFastPathCountMinMax(t *testing.T) {
 
 	execSQL("CREATE TABLE scores (id BIGINT NOT NULL, age INT, PRIMARY KEY (id)) COMMENT 'kidb:{}'")
 	execSQL("CREATE INDEX idx_age ON scores (age)")
-	// 等待 DDL 作业回填完成（JobRunner 1s tick）
-	time.Sleep(2500 * time.Millisecond)
+	// 轮询等索引可见（Building 期间 MIN 走引擎全扫被执法拦截——文档化语义）
+	require.Eventually(t, func() bool {
+		rows, err := db.QueryContext(ctx, "SELECT /*+ FULLSCAN */ 1 FROM scores")
+		if err != nil {
+			return false
+		}
+		rows.Close()
+		def, err := deps.Store.Load(ctx, "scores")
+		if err != nil || def == nil {
+			return false
+		}
+		idx := def.Index("idx_age")
+		return idx != nil && !idx.Building
+	}, 10*time.Second, 200*time.Millisecond, "DDL 作业应完成")
 
 	// 空表：COUNT(*)=0；MIN 空集 NULL
 	var n int
@@ -72,7 +84,7 @@ func TestFastPathCountMinMax(t *testing.T) {
 
 // TestFastPathFallback 非白名单形状一律回退引擎（不多拦）。
 func TestFastPathFallback(t *testing.T) {
-	dsn, cleanup := newTestServer(t)
+	dsn, _, cleanup := newTestServer(t)
 	defer cleanup()
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
@@ -91,10 +103,9 @@ func TestFastPathFallback(t *testing.T) {
 	var n int
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t WHERE id = 1").Scan(&n))
 	require.Equal(t, 1, n)
-	// GROUP BY 回退
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t GROUP BY v").Scan(&n))
-	// DISTINCT 回退
-	rows, err := db.QueryContext(ctx, "SELECT DISTINCT v FROM t")
-	require.NoError(t, err)
-	rows.Close()
+	// GROUP BY 回退——但无索引全扫被执法拦截（docs/04 §4.1 无索引谓词默认报错）
+	require.Error(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t GROUP BY v").Scan(&n))
+	// DISTINCT 回退同样被拦截（无 WHERE 全扫）
+	_, err = db.QueryContext(ctx, "SELECT DISTINCT v FROM t")
+	require.Error(t, err)
 }

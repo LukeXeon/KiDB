@@ -34,6 +34,9 @@ func TestElectionFailover(t *testing.T) {
 
 	go e1.Campaign(ctx, role(&roleRuns1))
 	require.Eventually(t, e1.IsOwner, 2*time.Second, 10*time.Millisecond, "inst-1 应抢到锁任职")
+	// 关键：在任期间角色必须真的在跑（反死锁断言）
+	require.Eventually(t, func() bool { return roleRuns1.Load() > 0 }, 2*time.Second, 10*time.Millisecond,
+		"在任但角色未运行 = 死锁（watchdog/角色必须并发）")
 
 	go e2.Campaign(ctx, role(&roleRuns2))
 	time.Sleep(150 * time.Millisecond)

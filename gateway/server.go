@@ -181,6 +181,10 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 				return callback(res, false)
 			}
 		}
+		// DML 有界性执法：无索引谓词报错 + 档 4 JOIN 报错（docs/04 §4.1/§4.4）
+		if err := h.enforceQueryPolicy(ctx, query); err != nil {
+			return sqlErr(err)
+		}
 		return h.Handler.ComQuery(ctx, c, query, callback)
 	}
 

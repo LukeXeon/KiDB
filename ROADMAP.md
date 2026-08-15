@@ -4,22 +4,27 @@
 > 本清单是唯一权威的"还没做什么"记录；每项标注性质与去向。完成即划走。
 > 排序即建议优先级。
 
-## A. 正确性执法缺口（最高优先）
+## A. 正确性执法缺口——**已完成（v5.1 批次）**
 
-| 项 | 说明 | 去向 |
-|---|---|---|
-| **JOIN 分档执法** | docs/04 §4.4 承诺档 4（大表任意 JOIN）报错 `ERR_UNSUPPORTED_JOIN`；当前 gms 引擎会执行（内存 hash join 全量拉表）——需自定义 analyzer 规则或网关节点拦截有界性 | 下一批 |
-| **无索引谓词报错**（`ERR_NO_INDEX` + FULLSCAN hint/白名单通道） | docs/04 §4.1：无索引谓词默认报错；当前全扫直接执行。拦截点在引擎/网关 | 下一批 |
-| **多行 DML 的部分成功明细** | docs/05 §5.5：跨 slot 多行写逐行执行、失败返回部分成功明细；当前依赖引擎逐行调用，失败语义未按文档化 | 下一批 |
+- JOIN 分档执法（gateway/sqlguard.go：档 1 主键等值/档 2 维表广播放行，档 4 报错 1235）；
+- 无索引谓词报错（`ERR_NO_INDEX`；`/*+ FULLSCAN */` hint 与 `query_allow_fullscan_tables` 白名单放行；索引建设中给明确提示）；
+- 多行 DML 部分成功明细（非 dup 类失败携带"已提交 N 行，无整体回滚"）；**INSERT 主键判重**（1062 + UniqueKeyError 携带既有行，IGNORE/ODKU 语义经 gms 正确分流）；
+- 单行体积防线 `ERR_ROW_TOO_LARGE`（docs/03 §3.4 承诺落地）；
+- 副产物：修复选举器角色永不执行的**死锁**（watchdog 与角色现在并发跑；测试加反死锁断言）；
+- DDL 作业：表级单 `_job` 槽位——有进行中作业则新 DDL 拒绝（避免作业覆盖）。
 
 ## B. 性能增强（正确性已由通用路径保证）
 
 | 项 | 说明 |
 |---|---|
-| top-k 归并下推（ORDER BY + LIMIT 走桶端点） | 当前引擎层 sort；docs/04 §4.1 的 k 路归并 |
+| top-k 归并下推（ORDER BY + LIMIT 走桶端点） | 当前引擎层 sort；docs/04 §4.1 的 k 路归并（落地时引入 `gopkg.in/dnaeon/go-priorityqueue.v1`） |
 | 覆盖索引读路径 | member 已携带 msgp 覆盖列（rowcodec.MemberCovers 就绪），exec 命中时跳过回表未实现 |
-| L2 请求合并（singleflight 同指纹并发合并） | docs/08 §8.4；未接线 |
+| L2 请求合并（同指纹并发合并） | docs/08 §8.4；落地时引入 `golang.org/x/sync`（singleflight） |
 | L3 副本读（`DoReplica` 进读路径） | 适配器能力已声明，exec 未消费 |
+| 并发扇出池 | 当前顺序 pipeline 批 + 批大小 bulkhead 已够用；需要结构化并发时引入 `sourcegraph/conc` / errgroup |
+| 后台任务池 | 后台角色为常驻循环，无任务池负载；需要时引入 `panjf2000/ants` |
+| 全扫/回填限流通道 | 落地时引入 `golang.org/x/time/rate` |
+| 故障注入 | docs/12 §12.6 清单在案；引入 `Shopify/toxiproxy`（CI 环境项） |
 | 行级近缓存（`hotkey_row_cache`） | 变量已注册，逻辑未实现 |
 | 前缀搜索 `LIKE 'abc%'`（字典序副本 ZRANGEBYLEX 查询路径） | 副本在写，查询翻译未做 |
 | HLL 基数统计接入（PFADD 写路径 + 优化器选路） | docs/04 §4.6 |

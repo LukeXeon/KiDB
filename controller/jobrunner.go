@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"kidb"
 	"kidb/bucketmap"
@@ -18,17 +19,18 @@ import (
 
 // JobRunner 执行 DDL 作业。
 type JobRunner struct {
-	cli       kidb.KvClient
-	store     *meta.CatalogStore
-	cache     *meta.CatalogCache
-	exec      *exec.Executor
-	bm        *bucketmap.Store
-	slotsPerT int // 每 tick 处理的 slot 数（回填限速由批大小保证）
+	cli        kidb.KvClient
+	store      *meta.CatalogStore
+	cache      *meta.CatalogCache
+	exec       *exec.Executor
+	bm         *bucketmap.Store
+	slotsPerT  int           // 每批处理的 slot 数
+	tickBudget time.Duration // 每 tick 回填时间预算
 }
 
-// NewJobRunner 构造。
+// NewJobRunner 构造（tickBudget 每 tick 回填时间预算，默认 500ms）。
 func NewJobRunner(cli kidb.KvClient, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store) *JobRunner {
-	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: 256}
+	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: 256, tickBudget: 500 * time.Millisecond}
 }
 
 // Tick 巡检一轮：所有表的进行中作业各推进一个批次。
@@ -52,7 +54,8 @@ func (r *JobRunner) Tick(ctx context.Context) error {
 	return nil
 }
 
-// step 推进一个作业批次；完成时转可见 + 清作业。
+// step 推进作业：每个 tick 在时间预算内连跑多批（空/小表一轮即完成；
+// 大表按批限速推进）。完成时转可见 + 清作业。
 func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) error {
 	def, err := r.store.Load(ctx, table)
 	if err != nil || def == nil {
@@ -64,16 +67,18 @@ func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) er
 		if idx == nil {
 			return r.finish(ctx, def)
 		}
-		// 回填一批 slot（游标续作）
-		hi := job.Cursor + r.slotsPerT
-		if hi > keycodec.NumSlots {
-			hi = keycodec.NumSlots
+		deadline := time.Now().Add(r.tickBudget)
+		for job.Cursor < keycodec.NumSlots {
+			hi := min(job.Cursor+r.slotsPerT, keycodec.NumSlots)
+			if err := r.backfillSlots(ctx, def, idx, job.Cursor, hi); err != nil {
+				return err
+			}
+			job.Cursor = hi
+			if time.Now().After(deadline) {
+				break // 预算用尽，游标落库下轮续作
+			}
 		}
-		if err := r.backfillSlots(ctx, def, idx, job.Cursor, hi); err != nil {
-			return err
-		}
-		job.Cursor = hi
-		if hi >= keycodec.NumSlots {
+		if job.Cursor >= keycodec.NumSlots {
 			return r.finish(ctx, def)
 		}
 		return r.store.SetJob(ctx, table, job) // 游标落库（断点）

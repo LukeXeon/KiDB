@@ -9,6 +9,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/require"
 
 	"kidb"
 	"kidb/engine"
@@ -18,8 +19,8 @@ import (
 	"kidb/txguard"
 )
 
-// newTestServer 在 miniredis 上起完整网关（随机端口），返回 DSN。
-func newTestServer(t *testing.T) (string, func()) {
+// newTestServer 在 miniredis 上起完整网关（随机端口），返回 DSN 与内核依赖（测试断言用）。
+func newTestServer(t *testing.T) (string, engine.Deps, func()) {
 	t.Helper()
 	cli, reg, _ := redistest.New(t)
 
@@ -48,13 +49,13 @@ func newTestServer(t *testing.T) (string, func()) {
 	time.Sleep(50 * time.Millisecond) // 等监听就绪
 
 	dsn := fmt.Sprintf("root:@tcp(%s)/kidb", l.Addr().String())
-	return dsn, func() { srv.Close() }
+	return dsn, deps, func() { srv.Close() }
 }
 
 // TestGatewaySmoke 端到端冒烟：真实 MySQL 驱动 → DDL → CRUD → 预处理。
 // 覆盖 docs/02 §2.10 的最小客户端路径（go-sql-driver）。
 func TestGatewaySmoke(t *testing.T) {
-	dsn, cleanup := newTestServer(t)
+	dsn, deps, cleanup := newTestServer(t)
 	defer cleanup()
 
 	db, err := sql.Open("mysql", dsn)
@@ -75,6 +76,21 @@ func TestGatewaySmoke(t *testing.T) {
 	execSQL("CREATE TABLE users (uid BIGINT NOT NULL, city VARCHAR(32), age INT, PRIMARY KEY (uid)) COMMENT 'kidb:{}'")
 	execSQL("CREATE INDEX idx_city ON users (city)")
 	execSQL("INSERT INTO users (uid, city, age) VALUES (1, 'shanghai', 30), (2, 'beijing', 25), (3, 'shanghai', 40)")
+	// 索引串行建（单 _job 槽位：有进行中作业则拒绝——DDL 低频管理面）
+	waitIdx := func(id string) {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			def, err := deps.Store.Load(ctx, "users")
+			if err != nil || def == nil {
+				return false
+			}
+			idx := def.Index(id)
+			return idx != nil && !idx.Building
+		}, 15*time.Second, 200*time.Millisecond)
+	}
+	waitIdx("idx_city")
+	execSQL("CREATE INDEX idx_age ON users (age)")
+	waitIdx("idx_age")
 
 	// 主键点查
 	var city string
