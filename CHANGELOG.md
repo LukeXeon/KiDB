@@ -42,6 +42,7 @@
 - **投影下推 + 覆盖索引读路径**：`Table` 实现 gms `ProjectedTable`——回表从 HGETALL 降为 HMGET 列子集（零宽投影退化为 EXISTS 活性判定）；覆盖索引命中（投影∪谓词 ⊆ 索引列+覆盖列+pk）时**跳过回表**：member msgp 解码覆盖列 + `ZSCORE exp` 活性校验（过期行绝不返回），解码失败防御性回退回表。配套修复：在线回填（`_job`）补上 member 覆盖列编码（此前回填产裸 pk，覆盖读路径对回填索引全灭）；DDL 覆盖列必须 NOT NULL（msgp 字符串数组无法保真 NULL，防静默错值）。**gms 集成实证**：`PrimaryKeySchema()` 必须恒返全量 schema——投影窄 schema 会让 coster 的 `indexFds` 找不到 PRIMARY 索引列、nil stat 在 `ordinalsForStat` panic；gms `fix_exec_indexes` 显式兼容宽 PrimaryKeySchema（dolt 同形）。
 - **L2 请求合并（singleflight）**：EqLookup 同指纹并发查询共享一次散取——leader 物化 pk 列表（2^20 上限，超出各调用方退回独立流式，有界性优先）并填充 L1，followers 经 `DoChan` 共享（leader 客户端断开不连坐）后各自回表校验。命令量实证：32 路并发冷查询热值，桶读取 ≈1 次散取而非 32 次。配套补上 **L1 网关装配缺口**（此前 `SetNearCache` 只在测试内接线，生产路径 L1 休眠）：装配进 `startRoles`，`nearcache_ttl/_capacity` 变量轮询换装。
 - **L3 副本读进读路径**：契约新增 `PipelineReplica`（批级副本读——散取/回表是批量形态，单命令 `DoReplica` 无法满足 RTT 纪律；`KvClient` 契约面扩为六方法，docs/09 §9.3 同步）；参考适配器改为**独立 `ReadOnly` 副本客户端**（修正原实现：`ReadOnly` 设在主客户端上会把 go-redis 内建只读命令表的全部读分流到副本，主节点读纪律失守）；exec 读命令统一走 `readPipeline`/`readDo` 分流出口；开关 = `replica_read` 变量 × 适配器能力位（轮询热更，能力缺失自动降级）。cmd 新增 `--replica-read` 能力开关。
+- **行级近缓存（hotkey_row_cache）**：pk→行投影近缓存落地（此前只注册了变量）——命中零 RTT；条目 TTL = min(默认 TTL, 行剩余 PTTL)（HGETALL+PTTL 同 pipeline 填充，零额外 RTT），**行物理过期则条目同步死亡**；更新/删除在 TTL 窗口内返回陈旧内容（无跨实例失效广播——默认关闭的根因，docs/08 §8.4 语义如实改写，替代原文稿过于乐观的"天然保证"表述）。开关经 `hotkey_row_cache` 变量轮询生效。
 
 ## v5.0（文档全面革新，docs/ 现行版本基线）
 

@@ -57,9 +57,11 @@ func (s *Server) startRoles(ctx context.Context) {
 }
 
 // attachReadPathSwitches 读路径近端开关装配 + 轮询（1s，与 schema lease 同节奏）：
-// L1 近缓存（变量变化换装）与 L3 副本读（replica_read × 适配器能力位）。
+// L1 近缓存（变量变化换装）、L3 副本读（replica_read × 能力位）、
+// 行级近缓存（hotkey_row_cache；默认关闭——陈旧窗口语义见 docs/08 §8.4）。
 func (s *Server) attachReadPathSwitches(ctx context.Context) {
 	var cur *nearcache.ShardedCache[[]string]
+	var curRow *nearcache.RowCache
 	var curTTL time.Duration
 	var curCap int
 	apply := func() {
@@ -75,6 +77,17 @@ func (s *Server) attachReadPathSwitches(ctx context.Context) {
 		// L3：能力位缺失时变量无效（自动降级，docs/09 §9.4）
 		on := s.deps.Client.Capabilities().ReplicaRead && s.replicaReadEnabled(ctx)
 		s.deps.Exec.SetReplicaRead(on)
+		// 行级近缓存（默认关闭；容量/TTL 随 nearcache_* 变量）
+		if s.rowCacheEnabled(ctx) {
+			if curRow == nil {
+				curRow = nearcache.NewRowCache(curCap, curTTL)
+				s.deps.Exec.SetRowCache(curRow)
+			}
+		} else if curRow != nil {
+			s.deps.Exec.SetRowCache(nil)
+			_ = curRow.Close()
+			curRow = nil
+		}
 	}
 	apply()
 	go func() {
@@ -86,12 +99,27 @@ func (s *Server) attachReadPathSwitches(ctx context.Context) {
 				if cur != nil {
 					_ = cur.Close()
 				}
+				if curRow != nil {
+					_ = curRow.Close()
+				}
 				return
 			case <-t.C:
 				apply()
 			}
 		}
 	}()
+}
+
+// replicaReadEnabled 读 replica_read 变量（默认 false）。
+func (s *Server) replicaReadEnabled(ctx context.Context) bool {
+	v, _, err := s.cfg.Get(ctx, "replica_read")
+	return err == nil && v == "true"
+}
+
+// rowCacheEnabled 读 hotkey_row_cache 变量（默认 false，docs/08 §8.4 覆盖边界）。
+func (s *Server) rowCacheEnabled(ctx context.Context) bool {
+	v, _, err := s.cfg.Get(ctx, "hotkey_row_cache")
+	return err == nil && v == "true"
 }
 
 // replicaReadEnabled 读 replica_read 变量（默认 false）。

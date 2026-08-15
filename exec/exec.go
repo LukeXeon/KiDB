@@ -190,6 +190,7 @@ type Executor struct {
 	m             *metrics.Metrics // 指标（nil = no-op，docs/10 §10.3）
 	clock         func() time.Time // 覆盖读路径活性判定时钟（测试可注入，与写入侧共钟）
 	replicaRead   atomic.Bool        // L3 副本读开关（SetReplicaRead；docs/08 §8.4）
+	rowCache      RowCache           // 行级近缓存（nil = 关闭，默认关闭；hotkey_row_cache 变量驱动）
 	sf            singleflight.Group // L2 请求合并（docs/08 §8.4：同指纹并发合并；随 L1 装配生效）
 	batch         int
 	slotsPerRound int
@@ -240,6 +241,17 @@ type L1Cache interface {
 	Get(key string) ([]string, bool)
 	Add(key string, val []string)
 }
+
+// RowCache 是行级近缓存接口（nearcache.RowCache 满足，docs/08 §8.4 覆盖边界）。
+// 条目 TTL ≤ 行剩余 TTL——过期行绝不返回；更新陈旧窗口 ≤ 默认 TTL
+// （最终一致文档化语义，默认关闭，hotkey_row_cache 变量开启）。
+type RowCache interface {
+	Get(key string) (map[string]string, bool)
+	Add(key string, fields map[string]string, rowTTL time.Duration)
+}
+
+// SetRowCache 接入行级近缓存（nil = 关闭；默认关闭是有意取舍）。
+func (e *Executor) SetRowCache(c RowCache) { e.rowCache = c }
 
 // L4Resolver 是热桶副本解析接口（controller.L4Manager 满足，docs/08 §8.4）：
 // 若值有 L4 副本，返回一个随机副本 key（异 slot）。
@@ -758,50 +770,92 @@ func (s *RowStream) fetchCovered(items []candItem) error {
 // 空行跳过 → 谓词校验 → 解码入队。
 // 这是"回表校验"纪律的落实点（docs/04 §4.3）：一切索引路径的输出都经此过滤。
 // 谓词为白名单形态且开启 Pushdown 时，校验在服务端 Lua 完成（网络只传命中行）。
+// 行级近缓存开启时：命中行零 RTT；未命中行 HGETALL+PTTL 同 pipeline 取回并填充
+// （条目 TTL ≤ 行剩余 TTL——过期行绝不返回；更新陈旧窗口语义见 docs/08 §8.4）。
 func (s *RowStream) fetchRows(pks []string) error {
 	if s.req.Pushdown && s.req.Pred != nil && s.req.Pred.pushdownable() && s.exec.reg != nil {
 		return s.fetchRowsPushdown(s.ctx, pks)
 	}
 	t := s.req.Table
 	cols := s.fetchColumns()
+	rc := s.exec.rowCache
 	for i := 0; i < len(pks); i += s.exec.batch {
 		batch := pks[i:min(i+s.exec.batch, len(pks))]
-		cmds := make([]kidb.Cmd, 0, len(batch))
-		for _, pk := range batch {
-			rk := keycodec.RowKey(t.Name, pk)
-			switch {
-			case cols == nil:
-				cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{rk}})
-			case len(cols) == 0:
-				cmds = append(cmds, kidb.Cmd{Name: "EXISTS", Args: []any{rk}})
-			default:
-				args := make([]any, 0, len(cols)+1)
-				args = append(args, rk)
-				for _, c := range cols {
-					args = append(args, c)
+		raws := make([]map[string]string, len(batch))
+
+		// 行缓存预取：命中直接可用（谓词校验/解码照走——缓存只是免 RTT）
+		var miss []int
+		for j, pk := range batch {
+			if rc != nil {
+				if f, ok := rc.Get(keycodec.RowKey(t.Name, pk)); ok {
+					raws[j] = f
+					continue
 				}
-				cmds = append(cmds, kidb.Cmd{Name: "HMGET", Args: args})
+			}
+			miss = append(miss, j)
+		}
+
+		if len(miss) > 0 {
+			var cmds []kidb.Cmd
+			for _, j := range miss {
+				rk := keycodec.RowKey(t.Name, batch[j])
+				switch {
+				case rc != nil:
+					// 行缓存开启：取全行 + PTTL（同 pipeline 零额外 RTT）用于填充
+					cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{rk}},
+						kidb.Cmd{Name: "PTTL", Args: []any{rk}})
+				case cols == nil:
+					cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{rk}})
+				case len(cols) == 0:
+					cmds = append(cmds, kidb.Cmd{Name: "EXISTS", Args: []any{rk}})
+				default:
+					args := make([]any, 0, len(cols)+1)
+					args = append(args, rk)
+					for _, c := range cols {
+						args = append(args, c)
+					}
+					cmds = append(cmds, kidb.Cmd{Name: "HMGET", Args: args})
+				}
+			}
+			results, err := s.exec.readPipeline(s.ctx, cmds)
+			if err != nil {
+				return fmt.Errorf("exec: fetch rows: %w", err)
+			}
+			ri := 0
+			for _, j := range miss {
+				switch {
+				case rc != nil:
+					raw := asStringMap(results[ri])
+					pttlMs, _ := strconv.ParseInt(fmt.Sprint(results[ri+1]), 10, 64)
+					ri += 2
+					if len(raw) == 0 {
+						continue // 空 Hash = 行过期/不存在
+					}
+					rc.Add(keycodec.RowKey(t.Name, batch[j]), raw, time.Duration(pttlMs)*time.Millisecond)
+					raws[j] = raw
+				case cols == nil:
+					raw := asStringMap(results[ri])
+					ri++
+					if len(raw) == 0 {
+						continue
+					}
+					raws[j] = raw
+				case len(cols) == 0:
+					if fmt.Sprint(results[ri]) == "1" {
+						raws[j] = map[string]string{}
+					}
+					ri++
+				default:
+					raws[j] = hmgetMap(cols, results[ri])
+					ri++
+				}
 			}
 		}
-		results, err := s.exec.readPipeline(s.ctx, cmds)
-		if err != nil {
-			return fmt.Errorf("exec: fetch rows: %w", err)
-		}
-		for j, res := range results {
-			var raw map[string]string
-			switch {
-			case cols == nil:
-				raw = asStringMap(res)
-				if len(raw) == 0 {
-					continue // 空 Hash = 行过期/不存在 → 静默跳过
-				}
-			case len(cols) == 0:
-				if fmt.Sprint(res) != "1" {
-					continue // EXISTS=0
-				}
-				raw = map[string]string{}
-			default:
-				raw = hmgetMap(cols, res)
+
+		for j, pk := range batch {
+			raw := raws[j]
+			if raw == nil {
+				continue // 行不存在/过期/缓存未命中填充为空
 			}
 			if !s.req.Pred.Match(raw) {
 				if s.exec.m != nil {
@@ -809,7 +863,7 @@ func (s *RowStream) fetchRows(pks []string) error {
 				}
 				continue
 			}
-			s.rows = append(s.rows, rowcodec.DecodeRowCols(t, batch[j], raw, s.req.Projection))
+			s.rows = append(s.rows, rowcodec.DecodeRowCols(t, pk, raw, s.req.Projection))
 		}
 	}
 	return nil
