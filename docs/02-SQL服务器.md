@@ -1,6 +1,6 @@
 # 02 · SQL 服务器（核心）
 
-> 本章是 v5.0 的中心章：KiDB 以 **MySQL 协议网关** 交付，SQL 服务器是唯产品形态。
+> 本章是 KiDB 的中心章：KiDB 以 **MySQL 协议网关** 交付，SQL 服务器是唯产品形态。
 > 解析策略：**DDL 走 TiDB `pkg/parser`（go.mod 直接依赖，零修改），DML 走 go-mysql-server 引擎**，
 > 前置分类器负责把语句路由到正确的解析路径。复用论证见 [13](13-TiDB复用清单.md)。
 
@@ -62,10 +62,10 @@ ComQuery(sql)
 
 gms 认识一张表的时刻是**查询期**：SELECT 进来，gms analyzer 解析表引用 → 调我们的 `Database.GetTableInsensitive` → 我们从 Catalog 读出 TableDef 返回 Table 对象。DDL 期 gms 完全不知情——这就是"两个引擎互不感知对方存在"的确切含义。
 
-实证记录（v5.1）：gms/vitess parser 对 KiDB DDL 形态**语法层可解析、COMMENT 载体可提取**（表选项 `TableOpts`、索引选项 `IndexOption` 均可达）——所以不选它不是"做不到"，是代价结构：用它就要接受它的执行绑定与调用约定，且 plan cache 指纹需自研；DDL 是低频管理面，为它选语法面最强的解析器成本为零。
+实证记录：gms/vitess parser 对 KiDB DDL 形态**语法层可解析、COMMENT 载体可提取**（表选项 `TableOpts`、索引选项 `IndexOption` 均可达）——所以不选它不是"做不到"，是代价结构：用它就要接受它的执行绑定与调用约定，且 plan cache 指纹需自研；DDL 是低频管理面，为它选语法面最强的解析器成本为零。
 
 **纪律**：DDL 路径产出 Catalog 定义后直接落库，绝不把 DDL 文本透传给 gms；DML 路径绝不经过 TiDB parser。两个路径的语法面不追求互相兼容对方全集，只保证各自文档化子集。
-**v5.1 注记**：TiDB parser 在 DML 侧有一处**识别性**使用——网关快速路径（COUNT(*)/MIN/MAX 白名单形状识别，[04](04-查询路径.md) §4.1/§4.5）；它只回答"形状是否命中白名单"，执行语义仍归 gms/内核执行器，判不准一律回退引擎路径。
+**注记**：TiDB parser 在 DML 侧有一处**识别性**使用——网关快速路径（COUNT(*)/MIN/MAX 白名单形状识别，[04](04-查询路径.md) §4.1/§4.5）；它只回答"形状是否命中白名单"，执行语义仍归 gms/内核执行器，判不准一律回退引擎路径。
 
 ## 2.4 DDL 路径（ddl 包）
 
@@ -76,7 +76,7 @@ gms 认识一张表的时刻是**查询期**：SELECT 进来，gms analyzer 解�
 | `CREATE TABLE` | ✅ 受限子集 | 列类型白名单（下表）；必须显式主键（单列）；KiDB 表选项经 COMMENT 载体 |
 | `CREATE INDEX` / `CREATE UNIQUE INDEX` | ✅ | 等值/范围/前缀副本由列类型与选项推导；在线构建（[06](06-元数据与Schema演进.md) §6.3） |
 | `DROP TABLE` / `DROP INDEX` | ✅ | DROP TABLE 走"标记下线 + 后台清扫"（借 exp 登记册遍历逐批清理，不阻塞） |
-| `ALTER TABLE` | ⚠️ 极小集 | 仅 `ADD INDEX`/`DROP INDEX`（映射独立作业）；加减列/改类型 v5.0 不支持（报错 1235，引导重建表） |
+| `ALTER TABLE` | ⚠️ 极小集 | 仅 `ADD INDEX`/`DROP INDEX`（映射独立作业）；加减列/改类型暂不支持（报错 1235，引导重建表） |
 | `TRUNCATE TABLE` | ❌ | 无界操作，报错（[01](01-定位架构与TiDB对齐.md) §1.2） |
 
 列类型白名单：`BIGINT/INT/TINYINT/BOOLEAN`、`DOUBLE/FLOAT`、`VARCHAR(n)/CHAR(n)`、`VARBINARY/BLOB`、`DATETIME/TIMESTAMP`（存 Unix 秒）、`JSON`（嵌套 blob，msgp 编码）。范围索引列必须是数值或时间戳且 int64 不越 2^53（[03](03-数据模型与编码.md) §3.4）。
@@ -112,7 +112,7 @@ DDL 不是一条命令的结束，而是一个作业的开始：校验 → Catal
 
 | 状态 | 语义 |
 |---|---|
-| 当前命名空间 | `USE db` 接受并记录。**v1 实现为扁平命名空间**（表名全局唯一，不加前缀）；多租户前缀隔离列入后续 |
+| 当前命名空间 | `USE db` 接受并记录。**当前实现为扁平命名空间**（表名全局唯一，不加前缀）；多租户前缀隔离列入后续 |
 | 会话变量 overlay | `SET SESSION x=v` 只写会话层，不落 `cfg:global`（[10](10-配置与可观测.md) §10.2）；不支持的会话变量返回默认值 + debug 日志，**不报错**（握手兼容生死线） |
 | `LAST_INSERT_ID()` | AUTO_INCREMENT 写入后由 TxGuard 经会话状态回填（[05](05-写入路径.md) §5.4） |
 | `FOUND_ROWS()` / `ROW_COUNT()` | 按 MySQL 语义由执行器回填 |
@@ -152,7 +152,7 @@ go-mysql-server 原生 system variable 机制注册 KiDB 全部变量；`SET GLO
 | `ERR_READ_ONLY` | 1290 | 只读账号执行写语句 |
 | `ERR_CAPABILITY` | 启动期拒绝 | EVAL 缺失等能力探测失败（[09](09-后端契约与适配器.md) §9.4） |
 
-### 权限（v5.0 边界）
+### 权限边界
 
 账号在引导配置声明：`user/host/password/role`，role ∈ {`rw`, `ro`}。`ro` 账号执行 DML 写/DDL/SET GLOBAL 报 `ERR_READ_ONLY`。无 GRANT/REVOKE、无库表级 ACL——缓存查询层定位，权限是部署边界问题（网络隔离 + 账号分级），不是 SQL 层功能（[14](14-红线局限与检查单.md)）。所有 DDL 与 SET GLOBAL 写入 `cfg:global._audit` 审计字段。
 

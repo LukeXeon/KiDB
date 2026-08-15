@@ -1,18 +1,8 @@
 # KiDB：Redis 集群 SQL 查询层 · 详细设计
 
 > 项目代号：**KiDB**（开源项目）
-> 版本：**v5.0**（全面革新版）
-> 定位：以 **MySQL 协议网关（server 单形态）** 交付的分布式 SQL 缓存查询层，基于可替换的 Redis 集群客户端抽象（`Client` 接口），SQL 引擎采用 go-mysql-server，DDL 解析直接依赖 TiDB `pkg/parser`。
-
-## v5.0 革新点
-
-1. **落地为代码仓库**：文档与 `/kidb` 仓库的 Go 包一一对应，文档即接口契约，不再是伪码骨架；
-2. **SQL 服务器升格为核心**（[02](02-SQL服务器.md)）：协议层、前置分类器、双解析器分工、会话、版本绑定的 plan cache、DDL 作业化；
-3. **TiDB 对齐工程化**（[13](13-TiDB复用清单.md)）：叙述方式改为**推导式**——每个机制章以 "TiDB 参照 → Redis 约束 → KiDB 设计" 三段开篇，KiDB 不是另起炉灶的设计，而是 TiDB 架构经 Redis 约束的翻译；能直接依赖的走 go.mod（`pkg/parser` 独立模块，零修改零 fork），不能依赖的按"设计移植清单"照着重写，整层搬不动的给出依赖链尸检；
-4. **元数据引入 schema lease 纪律**（[06](06-元数据与Schema演进.md)），plan cache 随 schema 版本失效——对齐 TiDB `domain`/`plan_cache`；
-5. **契约增补错误分类与退避矩阵**（[09](09-后端契约与适配器.md) §9.6）——对齐 client-go `Backoffer`；
-6. **部署形态收敛为网关单形态**（v4.3 决策延续，[11](11-部署与运维.md) §11.2）；
-7. 三方库策略不变：**能用库的用库**（go-mysql-server / TiDB parser / singleflight / conc / msgp …），能搬 TiDB 的搬 TiDB，都不存在才自研薄层。
+> 定位：以 **MySQL 协议网关（server 单形态）** 交付的分布式 SQL 缓存查询层——基于可替换的 Redis 集群客户端抽象（`KvClient` 接口），SQL 引擎采用 go-mysql-server，DDL 解析直接依赖 TiDB `pkg/parser`。
+> 变更历史见根目录 [CHANGELOG.md](../CHANGELOG.md)；本目录只含当前技术设计。
 
 ## 文档索引
 

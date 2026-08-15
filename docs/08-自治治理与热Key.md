@@ -61,20 +61,20 @@
 
 L4 细节：
 
-- 副本带 `@ver` 版本戳（伴生 String key `...副本key...@ver`——副本本体是 ZSet，单 key 单类型，"Hash 副字段"物理不可达；v5.0 实现期修订），读者校验，戳旧则回退源桶；
+- 副本带 `@ver` 版本戳（伴生 String key `...副本key...@ver`——副本本体是 ZSet，单 key 单类型，Hash 副字段不可达），读者校验，戳旧则回退源桶；
 - 写路径不变只写源桶——无多副本写一致性问题；
 - 刷新 = `ZRANGE 源桶` 全量读 + 副本 slot 内 Lua 原子重建（`DEL`+`ZADD`+`PEXPIRE 60s`），读者要么见旧副本要么见新副本；
 - 触发信号：信号源 A（采样）或 B（热 key 事件流）任一命中 + Controller `ZCARD` 复核；
 - **L4 解开了 Redis Cluster"单 key 无法水平扩展"的固有限制**：热桶读 QPS 摊到 K+1 个 slot。
 
-**L1 近缓存（otter/v2 裁决记录）**：第一纪律"过期正确性由读路径兜底"——otter 读路径 `HasExpired` 判定实证满足（过期值不返回）；内部分片并发、W-TinyLFU 抗扫描（全扫指纹规则双保险）、内置命中率统计。曾短暂自研分片 map——纪律可满足但维护面 +1，按"能用库的用库"弃用。
+**L1 近缓存（otter/v2）**：第一纪律"过期正确性由读路径兜底"——otter 读路径 `HasExpired` 判定实证满足（过期值不返回）；内部分片并发、W-TinyLFU 抗扫描（全扫指纹规则双保险）、内置命中率统计。
 
 **L1–L4 的覆盖边界（诚实声明）**：四层防御保护的是**索引桶**，不直接保护单行读热 key（`d:{table}:{pk}` 的点查热点，如明星内容行）。行级热读的缓释手段：L3 副本读（`DoReplica` 把点查摊到 slave）+ 可选行级近缓存（L1 扩展：pk→行投影，3s TTL，回表校验天然保证不出错——默认关闭，由 `hotkey_row_cache` 变量开启）。行级**写**热点见 §8.6，属物理下界。
 
 ## 8.5 Controller 选举与 watchdog 闭环（移植 TiDB owner 语义）
 
 > TiDB 参照：`pkg/owner/manager.go`——竞选成功只是开始，watchdog 盯 session，续约失败立即辞职再重新竞选。
-> v5.0 补齐闭环：**锁续期失败必须当场停止干活**，消除"锁已丢但实例还在跑"的脑裂窗口。
+> 闭环纪律：**锁续期失败必须当场停止干活**，消除"锁已丢但实例还在跑"的脑裂窗口。
 
 ```
 循环：
@@ -101,5 +101,5 @@ L4 细节：
 
 | 热点 key | 成因 | 对策 |
 |---|---|---|
-| `ver:{table}`（全局 INCR） | 早期设计每次写入 Lua 都 INCR 一次，写密集表（>5 万 wps）顶到单 slot 写上限 | **v5.0 起默认路径改行内 `HINCRBY _ver`（同 slot，免费）**；全局计数器仅低频聚合路径（维表刷新）按需聚合；若仍需全局单调源，分片计数器 `ver:{table}:{n}`（n=64，写入按 pk 选片） |
+| `ver:{table}`（全局 INCR） | 每次写入 Lua 都 INCR 全局计数器时，写密集表（>5 万 wps）顶到单 slot 写上限 | **默认路径为行内 `HINCRBY _ver`（同 slot，免费）**；全局计数器仅低频聚合路径（维表刷新）按需聚合；若仍需全局单调源，分片计数器 `ver:{table}:{n}`（n=64，写入按 pk 选片） |
 | `seq:{table}`（AUTO_INCREMENT INCR） | 同上，且语义要求近似单调 | 分片交错序列（shard i 发 i, i+n, i+2n...，同 MySQL `auto_increment_offset/increment` 语义——与 TiDB `AUTO_RANDOM` 同族的打散思想），仅开启 AUTO_INCREMENT 的表按需启用；默认单 key 已覆盖绝大多数场景 |
