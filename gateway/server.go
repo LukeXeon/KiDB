@@ -192,6 +192,13 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 	}
 
 	if Classify(query) != RouteDDL {
+		// EXPLAIN 接管（docs/02 §2.8：KiDB 计划展示；必须在快速路径之前——
+		// EXPLAIN SELECT COUNT(*) 不得真的执行）
+		if handled, err := h.explainQuery(ctx, query, cb); handled {
+			route = "explain"
+			qerr = err
+			return err
+		}
 		// KiDB 侧物理快速路径（白名单形状：COUNT(*)/MIN/MAX，docs/04 §4.1/§4.5）
 		if fp := matchFastPath(query); fp != nil {
 			if res, hit, err := h.tryFastPath(ctx, fp); err != nil {

@@ -133,7 +133,7 @@ go-mysql-server 原生 system variable 机制注册 KiDB 全部变量；`SET GLO
 
 ## 2.8 EXPLAIN
 
-自定义 EXPLAIN 节点展示 KiDB 执行细节：命中索引、桶集合与数量、扇出度、是否谓词下推、是否走副本/近缓存、回表批数估算。慢查询日志携带同一计划摘要（[10](10-配置与可观测.md) §10.4）。
+`EXPLAIN SELECT ...` 由网关接管，输出 KiDB 计划展示（两列 item/detail）：命中路径（point_get/eq_lookup/range_lookup(ordered)/prefix_lookup(lex)/fullscan/fastpath:*）、索引 ID、扇出估算（16384 桶种子 + k 路归并/top-k 早停）、L1/L2 标记、守卫判定（全扫的 ERR_NO_INDEX 或放行依据）。这是**计划推断**（与执行同规则的 AST 分析），非执行回放；仅支持 SELECT（其余报 1235）。慢查询日志携带指纹与路由摘要（[10](10-配置与可观测.md) §10.4）。
 
 ## 2.9 错误码与权限
 

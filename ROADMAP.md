@@ -25,6 +25,7 @@
 - **行级近缓存**（`hotkey_row_cache` 变量消费：pk→行投影，命中零 RTT；条目 TTL = min(默认 TTL, 行 PTTL)——过期行绝不返回；更新/删除陈旧窗口 ≤3s 为文档化取舍（默认关闭的根因），docs/08 §8.4 语义已如实改写）。
 - **前缀搜索**（`LIKE 'abc%'` → 字典序副本 ZRANGEBYLEX k 路归并：引擎接入走 gms `IndexSearchableTable.LookupForExpressions`——FilteredTable 在 v0.20 只在 bindvar 规则被调用，是死路；`CanSupport` 对 prefix_copy 索引额外放行前缀区间形态 [p, p+\xff)；回表 HasPrefix 重判；回填补齐字典序副本产出（此前 `_job` 回填只写主桶，在线建的副本是哑的）；guard 同步放行常量前缀 LIKE）。
 - **慢查询日志**（`slow_query_threshold_ms` 变量（默认 500ms）；网关统一计时：指纹 NormalizeDigest/路由/行数/耗时；全扫放行强制告警 + slow_queries_total/fullscan_fallback_total；配套补上 cmd 的指标装配缺口——metrics.New(nil) + 可选 -metrics-addr /metrics 端点，此前 SetMetrics 在生产路径未接线）。
+- **EXPLAIN 自定义输出**（网关接管 `EXPLAIN SELECT`：两列计划展示——路径/索引/扇出估算/守卫判定；计划推断非执行回放；必须在快速路径之前接管，否则 EXPLAIN COUNT(*) 会真执行）。
 
 | 项 | 说明 |
 |---|---|
@@ -34,7 +35,6 @@
 | 故障注入 | docs/12 §12.6 清单在案；引入 `Shopify/toxiproxy`（CI 环境项） |
 | HLL 基数统计接入（PFADD 写路径 + 优化器选路） | docs/04 §4.6 |
 | plan cache（指纹 + 版本绑定） | docs/02 §2.6 承诺；gms 有内置语句缓存，KiDB 侧版本绑定未做 |
-| EXPLAIN 自定义节点（桶数/扇出/下推展示） | docs/02 §2.8；gms EXPLAIN 可用但无 KiDB 细节 |
 
 ## C. 运维与验证基建
 

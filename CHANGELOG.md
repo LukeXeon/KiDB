@@ -45,6 +45,7 @@
 - **行级近缓存（hotkey_row_cache）**：pk→行投影近缓存落地（此前只注册了变量）——命中零 RTT；条目 TTL = min(默认 TTL, 行剩余 PTTL)（HGETALL+PTTL 同 pipeline 填充，零额外 RTT），**行物理过期则条目同步死亡**；更新/删除在 TTL 窗口内返回陈旧内容（无跨实例失效广播——默认关闭的根因，docs/08 §8.4 语义如实改写，替代原文稿过于乐观的"天然保证"表述）。开关经 `hotkey_row_cache` 变量轮询生效。
 - **前缀搜索 LIKE 'abc%' 查询路径**：字典序副本（`i:…#l{n}`，写路径本就在维护）接通读侧——`ZRANGEBYLEX [p [p+\xff` 分页 + k 路归并产出全局字典序（字符串堆；`ORDER BY` 前缀列时 gms 删 Sort 的契约与 top-k 同源）。引擎接入走 gms `IndexSearchableTable.LookupForExpressions`（**FilteredTable 在 gms v0.20 只在 bindvar 规则内被调用，非常驻分析面——实证死路**）；`CanSupport` 对 prefix_copy 索引精确放行前缀区间形态（其余非点范围仍拒绝，防无序路径被选为排序载体）。配套修复：在线回填此前只写主桶不写字典序副本（在线建的 prefix_copy 索引查询结果残缺）；sqlguard 放行常量前缀 LIKE。
 - **慢查询日志**：网关 ComQuery 统一计时包装——超 `slow_query_threshold_ms`（新变量，默认 500ms）记录语句指纹（NormalizeDigest）/路由/行数/耗时；全扫放行（hint/白名单）与阈值无关强制告警；新增 `slow_queries_total{route}` 指标。配套补上 **cmd 指标装配缺口**（metrics 包此前只在测试接线）：`metrics.New(nil)` 入 exec + `-metrics-addr` 可选 /metrics HTTP 端点。
+- **EXPLAIN 自定义输出**：网关接管 `EXPLAIN SELECT`（两列 item/detail 计划展示：命中路径/索引 ID/扇出估算/L1-L2 标记/守卫判定）；计划推断与执行共用同一套 AST 形态分析；接管点必须在快速路径之前（否则 `EXPLAIN SELECT COUNT(*)` 会被真执行——测试钉死）。
 
 ## v5.0（文档全面革新，docs/ 现行版本基线）
 
