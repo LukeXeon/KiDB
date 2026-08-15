@@ -1,170 +1,103 @@
 # 02 · SQL 服务器（核心）
 
-> 本章是 KiDB 的中心章：KiDB 以 **MySQL 协议网关** 交付，SQL 服务器是唯产品形态。
-> 解析策略：**DDL 走 TiDB `pkg/parser`（go.mod 直接依赖，零修改），DML 走 go-mysql-server 引擎**，
-> 前置分类器负责把语句路由到正确的解析路径。复用论证见 [13](13-TiDB复用清单.md)。
+> **v6.0 架构原则（设计原点 docs/01 §1.0 的直接推论）**：
+> **gms 直接承接 SQL，然后才到我们的代码——我们在 gms 框架内实现数据库，不是把它包装一层。**
+> 网关不做任何 SQL 文本解析/分流/预解析优化（那是重复 gms 的劳动）；
+> 一切语义落在 gms 扩展点（Database/Table/Index/Session/系统变量）与内核执行器上。
 
 ## 2.1 协议层（go-mysql-server wire server）
 
-协议层直接采用 go-mysql-server 的 `server` 包（MySQL wire protocol 实现），不自研协议编解码：
+协议层直接采用 go-mysql-server 的 `server` 包（MySQL wire protocol 实现），**无 handler 包装层**：
 
 | 能力 | 来源 | 说明 |
 |---|---|---|
-| 握手/认证 | gms `server` + 自定义 AuthBackend | `mysql_native_password`；账号在引导配置声明（只读/读写两级，见 §2.9） |
-| COM_QUERY / COM_STMT_PREPARE / COM_STMT_EXECUTE / COM_STMT_CLOSE / COM_STMT_SEND_LONG_DATA / COM_PING / COM_QUIT / COM_INIT_DB | gms | COM_INIT_DB 映射表命名空间前缀（§2.5） |
+| 握手/认证 | gms `server` + MySQLDb | `mysql_native_password`；账号在引导配置声明（只读/读写两级，见 §2.8） |
+| COM_QUERY / COM_STMT_PREPARE / COM_STMT_EXECUTE / COM_STMT_CLOSE / COM_STMT_SEND_LONG_DATA / COM_PING / COM_QUIT / COM_INIT_DB | gms | COM_INIT_DB 映射表命名空间前缀（§2.4） |
 | 结果集流式写出 | gms `sql.RowIter` | 与内核 RowIter 全链路流式对接（[04](04-查询路径.md) §4.3），永不物化全量 |
 | TLS | gms server TLS 配置 | 可选，按部署需要开启；内网部署默认关闭 |
-| 连接数/超时 | gms server 配置 | `max_connections`、读写超时（引导配置，[10](10-配置与可观测.md) §10.4） |
+| 连接数/超时 | gms server 配置 | `max_connections`、读写超时（引导配置，[10](10-配置与可观测.md) §10.2） |
+| 慢查询观测 | gms `ServerEventListener` + 指标 | `query_duration_seconds{plan}` 直方图 + 引擎层全扫告警；无逐语句文本日志（v6.0 简化裁决） |
 
-**连接生命周期**：accept → 握手认证 → 会话对象创建（会话 id、用户、默认命名空间）→ 命令循环（每条语句经前置分类器）→ 关闭（释放预处理语句注册表、会话变量 overlay）。会话是**无事务态**的：缓存定位，不支持 BEGIN/COMMIT/ROLLBACK（收到一律报错 1235，`ERR_UNSUPPORTED`），所有语句等价 autocommit。
+**连接生命周期**：accept → 握手认证 → 会话对象创建（KiDB Session：角色 + 配置存储句柄）→ 命令循环 → 关闭。会话是**无事务态**的：缓存定位，不支持 BEGIN/COMMIT/ROLLBACK——**事务语义由自定义 Session 类型显式拒绝**（见 §2.4）。
 
-## 2.2 前置分类器（gateway/classify）
+## 2.2 单引擎纪律（v6.0）
 
-每条语句在进入引擎前，先经前置分类器决定解析路径。**分类器是唯一允许"看裸 SQL 文本"的组件**，两个引擎互不感知对方的存在。
-
-```
-StripComments(sql) → 首一/二个关键字（大小写不敏感）→ 路由：
-
-CREATE TABLE / CREATE [UNIQUE] INDEX / DROP TABLE / DROP INDEX / ALTER TABLE
-    → KiDB DDL 路径（TiDB parser 解析，§2.4）
-其余（SELECT/INSERT/UPDATE/DELETE/REPLACE/SHOW/SET/USE/EXPLAIN/DESCRIBE/…）
-    → go-mysql-server 引擎（DML 路径，§2.5）
-```
-
-实现要点：
-
-- `StripComments` 处理 `/* */`、`-- `、`#` 三类注释，且对字符串字面量敏感（`'…'`/`"…"`/反引号内不剥）；~100 行，纯函数；
-- DDL 判定集是**封闭白名单**（上表五种形态），判不准的一律走 DML 路径——宁可漏给引擎报错，不可错抢；
-- `CREATE UNIQUE INDEX` 两个关键字都要识别；`CREATE FULLTEXT/SPATIAL INDEX` 识别后走 DDL 路径再明确报错（超出定位）；
-- **正确性对拍**：分类器与 TiDB parser 的语句类型判定做 PBT 对拍（随机 SQL 语料 + 变异注释/空白/字符串，断言分类结果 == AST 顶层节点类型），见 [12](12-测试方案.md) §12.3 P5。
-
-**为什么不做单解析器**：两个引擎的 AST 体系不可互注（无法把 TiDB AST 喂给 go-mysql-server）。若用 TiDB parser 统一解析再分发，DML 仍要被 gms 二次解析（gms 只认自己的 AST），等于每条 DML 双份解析开销。前置分类器把"分类"做到 O(首关键字)，DML 只被 gms 解析一次，DDL（低频）独享 TiDB parser 的 MySQL 语法保真度。
-
-## 2.3 双解析器分工纪律
-
-| | DDL 路径 | DML 路径 |
-|---|---|---|
-| 解析器 | `github.com/pingcap/tidb/pkg/parser`（独立 module，go.mod 锁版本） | go-mysql-server 内建 parser |
-| 原因 | 要的是**纯 AST、零执行绑定**：gms 的 DDL 解析后会强制进入它自己的执行管道（TableCreator/AlterTable 接口 + 它的 plan 节点语义），而 KiDB 的 DDL 语义（COMMENT 载体、Catalog CAS、_job 作业化）与之不对应；另有 `NormalizeDigest` 指纹能力（plan cache 键，gms/vitess 无等价物）；MySQL DDL 边缘语法保真度更高 | 需要分析器/执行器/wire/sysvar 全家桶，gms 一站提供 |
-| 频率 | 低频（管理面） | 高频（数据面） |
-| 一致性风险 | 两解析器语法覆盖不完全一致（如某边缘语法一边能过一边报错） | — |
-| 缓解 | DDL 语法面刻意取两解析器交集（标准 MySQL DDL 子集，§2.4）；差异用例进测试（[12](12-测试方案.md) §12.5） | — |
-
-**接线事实（经常被误读的一点）**：两个解析器**从不接线**——没有"TiDB AST → gms AST"的翻译。数据流是并行路径：
+**一切语句进 gms 引擎；没有前置分类器、没有第二解析器、没有网关侧 SQL 分析。**
 
 ```
 ComQuery(sql)
-  → 前置分类器（剥注释 + 首关键字）
-  → DDL 白名单命中 → ddl.Parse（TiDB parser）→ 校验 → ExecDDL 直写 Redis Catalog → 回 OK 包
-      （gms 从头到尾没见过这条语句）
-  → 其余 → 原文透传 gms Handler（gms 用自己的 parser 解析执行）
+  → gms wire handler（其 parser 解析）
+  → gms analyzer（投影下推/索引选择/top-k 删 Sort 等分析器规则）
+  → KiDB 扩展点执行：
+      Database（TableCreator/TableDropper）——DDL 建表/删表
+      Table（IndexAlterableTable/IndexedTable/ProjectedTable/StatisticsTable…）——索引增删/扫描
+      exec 执行器（散取/归并/回表校验）
+      txguard（写入 Lua 编排）
 ```
 
-gms 认识一张表的时刻是**查询期**：SELECT 进来，gms analyzer 解析表引用 → 调我们的 `Database.GetTableInsensitive` → 我们从 Catalog 读出 TableDef 返回 Table 对象。DDL 期 gms 完全不知情——这就是"两个引擎互不感知对方存在"的确切含义。
+纪律与边界：
 
-实证记录：gms/vitess parser 对 KiDB DDL 形态**语法层可解析、COMMENT 载体可提取**（表选项 `TableOpts`、索引选项 `IndexOption` 均可达）——所以不选它不是"做不到"，是代价结构：用它就要接受它的执行绑定与调用约定，且 plan cache 指纹需自研；DDL 是低频管理面，为它选语法面最强的解析器成本为零。
+- **网关只做装配**（引擎构造、账号注册、后台角色启动、能力探测、限流/告警挂点）；
+- **DDL 全量经 gms**：planbuilder 产出计划节点 → 我们的 `Database.CreateTable`（`sql.TableCreator`，COMMENT 串直达）/ `Table.CreateIndex`（`sql.IndexAlterableTable`，`IndexDef.Comment` 直达）——校验与 Catalog 作业化语义不变（[06](06-元数据与Schema演进.md) §6.3），类型语义以 gms 为准（`types.Is*` 谓词映射到存储列类型）；
+- **一个定制分析器规则变更**：移除 `resolveAlterColumn`（OnceBeforeDefault）——它按"TEXT/BLOB 索引须前缀长度"的 MySQL 习惯校验，与桶模型冲突（字符串列无前缀长度概念）；
+- **历史拆除**：v5.x 的前置分类器（classify）、双解析器分工、网关快速路径（COUNT(*)/MIN/MAX 形状识别）、网关自定义 EXPLAIN、plan cache 判定缓存、网关 sqlguard 文本分析——全部删除。COUNT(*) 由 gms `replaceCountStar` 规则原生承接（命中 `sql.StatisticsTable` 精确 RowCount，即 exp 登记册 Σ ZCOUNT）；MIN/MAX 经引擎聚合（结果精确），端点加速的等价写法是 `ORDER BY col LIMIT 1`（top-k 有序流早停）。
 
-**纪律**：DDL 路径产出 Catalog 定义后直接落库，绝不把 DDL 文本透传给 gms；DML 路径绝不经过 TiDB parser。两个路径的语法面不追求互相兼容对方全集，只保证各自文档化子集。
-**注记**：TiDB parser 在 DML 侧有一处**识别性**使用——网关快速路径（COUNT(*)/MIN/MAX 白名单形状识别，[04](04-查询路径.md) §4.1/§4.5）；它只回答"形状是否命中白名单"，执行语义仍归 gms/内核执行器，判不准一律回退引擎路径。
+## 2.3 DDL 路径（gms 托管）
 
-## 2.4 DDL 路径（ddl 包）
-
-### 支持的 DDL 子集
-
-| 语句 | 支持度 | 说明 |
+| 语句 | gms 路径 | KiDB 承接 |
 |---|---|---|
-| `CREATE TABLE` | ✅ 受限子集 | 列类型白名单（下表）；必须显式主键（单列）；KiDB 表选项经 COMMENT 载体 |
-| `CREATE INDEX` / `CREATE UNIQUE INDEX` | ✅ | 等值/范围/前缀副本由列类型与选项推导；在线构建（[06](06-元数据与Schema演进.md) §6.3） |
-| `DROP TABLE` / `DROP INDEX` | ✅ | DROP TABLE 走"标记下线 + 后台清扫"（借 exp 登记册遍历逐批清理，不阻塞） |
-| `ALTER TABLE` | ⚠️ 极小集 | 仅 `ADD INDEX`/`DROP INDEX`（映射独立作业）；加减列/改类型暂不支持（报错 1235，引导重建表） |
-| `TRUNCATE TABLE` | ❌ | 无界操作，报错（[01](01-定位架构与TiDB对齐.md) §1.2） |
+| `CREATE TABLE` | `plan.CreateTable` | `Database.CreateTable(ctx, name, PrimaryKeySchema, collation, comment)`——COMMENT 串直达 |
+| `CREATE [UNIQUE] INDEX` / `ALTER TABLE ADD INDEX` | `plan.AlterIndex`（btree/hash 默认路径） | `Table.CreateIndex(ctx, sql.IndexDef)`——`IndexDef.Comment`/`Constraint` 直达 |
+| `DROP TABLE` | `plan.DropTable` | `Database.DropTable` |
+| `DROP INDEX` / `ALTER DROP INDEX` | `plan.AlterIndex` | `Table.DropIndex` |
+| `TRUNCATE TABLE` | gms 计划节点 | 不支持（无界操作，[01](01-定位架构与TiDB对齐.md) §1.2） |
+| 其余 ALTER（加减列/改类型等） | — | 不实现对应接口 → gms 明确报错 |
 
-列类型白名单：`BIGINT/INT/TINYINT/BOOLEAN`、`DOUBLE/FLOAT`、`VARCHAR(n)/CHAR(n)`、`VARBINARY/BLOB`、`DATETIME/TIMESTAMP`（存 Unix 秒）、`JSON`（嵌套 blob，msgp 编码）。范围索引列必须是数值或时间戳且 int64 不越 2^53（[03](03-数据模型与编码.md) §3.4）。
+列类型白名单（gms 类型语义）：整数族（`types.IsInteger`）、浮点（`IsFloat`）、字符串（`IsText`）、二进制（`IsBinaryType`）、`DATETIME/TIMESTAMP`（存 Unix 秒）、`JSON`。DECIMAL/DATE/TIME/枚举等明确报错（score 精度与编码纪律）。**注意**：`types.IsBinaryType` 把 JSON 算二进制——映射判定必须先 JSON 后二进制（实现教训）。
 
-### KiDB 扩展的 COMMENT 载体（不 fork parser 的关键）
+KiDB 扩展的 COMMENT 载体（不 fork parser 的关键，语义不变）：`COMMENT 'kidb:{json}'`，表级仅 `default_ttl`，索引级仅 `covering`/`async`（严格解析，未知字段报错——docs/01 §1.0：其余选项全部自动或内置）。DDL 作业化（在线建索引、`Building` 不可见、`_job` 断点续作）语义见 [06](06-元数据与Schema演进.md) §6.3；空表建索引同步完成（无回填对象，绕开单 `_job` 槽位——CREATE TABLE 内联多索引场景），非空表走 `_job` 后台回填。
 
-TiDB parser 原生解析表级/索引级 `COMMENT 'string'` 选项（`ast.TableOptionComment`、`ast.IndexOption.Comment`），KiDB 的全部自定义 DDL 参数以 JSON payload 承载于 COMMENT，**parser 零修改**：
+## 2.4 会话状态（engine.Session）
 
-```sql
-CREATE TABLE sessions (
-  uid BIGINT NOT NULL,
-  token VARCHAR(64) NOT NULL,
-  profile JSON,
-  PRIMARY KEY (uid)
-) COMMENT 'kidb:{"default_ttl":86400}';
-
-CREATE INDEX idx_profile ON sessions (uid)
-  COMMENT 'kidb:{"covering":["token"],"async":false}';  -- 覆盖索引；异步索引不允许 covering
-```
-
-**payload 只留语义声明（docs/01 §1.0 设计原点）**：表级仅 `default_ttl`；索引级仅 `covering` / `async`。曾经的调优/容量类字段（`max_row_bytes`/`expected_rows`/`exp_shards`/`dimension`/`prefix_copy`）全部转自动或内置——行体积上限固定 1MB（tuning.toml）、exp 登记册细分自动、维表按实时行数判定、字典序副本对字符串等值/唯一索引自动开启（`LIKE 'abc%'` 开箱即用）。**严格解析：未知字段报错**（不支持直接报错，优于静默忽略）。完整校验规则（索引数 ≤16、列数 ≤256、`_` 前缀列拒绝、覆盖索引必须同步、async+unique 互斥、覆盖列必须 NOT NULL 等）在执行器内 fail-fast。COMMENT 里非 `kidb:` 前缀的内容视为普通注释，两不干扰。
-
-### DDL 作业化
-
-DDL 不是一条命令的结束，而是一个作业的开始：校验 → Catalog CAS 落库（`_ver` 单调递增）→ 后台在线建索引（回源回填 + 增量追平）→ 对外可见。完整状态机与断点续作见 [06](06-元数据与Schema演进.md) §6.3。DDL 期间旧 plan 全部失效（§2.6 版本绑定保证）。
-
-## 2.5 会话状态（gateway/session）
-
-每会话维护：
+每会话维护（自定义 `engine.Session`，嵌 gms BaseSession）：
 
 | 状态 | 语义 |
 |---|---|
-| 当前命名空间 | `USE db` 接受并记录。**当前实现为扁平命名空间**（表名全局唯一，不加前缀）；多租户前缀隔离列入后续 |
-| 会话变量 overlay | `SET SESSION x=v` 只写会话层，不落 `cfg:global`（[10](10-配置与可观测.md) §10.2）；不支持的会话变量返回默认值 + debug 日志，**不报错**（握手兼容生死线） |
+| 角色 | `rw`/`ro`，连接期从账号表注入；ro 执法在写路径各入口（编辑器 Insert/Update/Delete、DDL 接口、SET GLOBAL 钩子）统一 `RejectRO` |
+| 配置存储句柄 | `Cfg *config.Store`——SET GLOBAL 的持久化桥（sysvar `NotifyChanged` 经会话找到本实例配置存储，见 §2.6） |
+| 事务表面 | 实现 `sql.TransactionSession` 全部方法并**显式报错**——gms 对不实现该接口的会话**静默 no-op** BEGIN（客户端会误以为事务生效），必须实现后报错 |
 | `LAST_INSERT_ID()` | AUTO_INCREMENT 写入后由 TxGuard 经会话状态回填（[05](05-写入路径.md) §5.4） |
-| `FOUND_ROWS()` / `ROW_COUNT()` | 按 MySQL 语义由执行器回填 |
-| 预处理语句注册表 | COM_STMT_PREPARE 期完成分类/事务/ro/守卫判定（B9 补齐的执法缺口），EXECUTE 由 gms 注册表承载；LIKE 的参数模式（`LIKE ?`）保守按无索引处理（参数在 PREPARE 期不可见），前缀搜索走文本协议 |
-| 事务状态 | 恒为"无事务"；`BEGIN/COMMIT/ROLLBACK/START TRANSACTION` 一律报错 1235 |
+| 预处理语句注册表 | gms 原生承载（PREPARE 解析缓存，EXECUTE 复用）；DDL 经预处理协议同样工作（全量走引擎后无分叉） |
 
-## 2.6 Plan cache（版本绑定，对齐 TiDB plan cache 纪律）
+## 2.5 Plan cache
 
-> **实现状态**：网关层**判定缓存**已落地（gateway/plancache.go）——缓存的不是执行计划
-> 结构（gms 有内置语句缓存），而是 TiDB parser 的判定产物：快速路径形状 + 守卫放行。
-> 预处理语句经 gms 预处理注册表承载（ComPrepare 期完成守卫判定）。
+v6.0 起网关侧不存在计划缓存。v5.x 的"判定缓存"（指纹 + schema 版本绑定）存在的理由是摊薄网关侧二次解析——网关不再解析 SQL 后该缓存失去对象。gms 内建的语句缓存与预处理注册表照常工作（引擎内部面，无需我们重复建设）。
 
-- **指纹**：`parser.NormalizeDigest(sql)`（lexer 级归一，不出 AST，~µs 级）作为缓存键——同指纹必同列名集合，守卫判定在指纹内稳定（索引存在性不随字面量变化）；
-- **条目绑定版本**：条目记录生成时的全局 schema 版本（`CatalogCache.SchemaVersion`，租约内零 RTT）；命中前比对，不一致即弃用重建——**DDL 上线、索引可见后旧判定绝不复用**（惰性精确失效，对齐 TiDB plan cache 的 schema-version 校验）；
-- **有意不缓存**：全扫依赖判定（hint/白名单放行与 ERR_NO_INDEX 拒绝）——它们随 `query_allow_fullscan_tables` 漂移而配置变更不走 schema 版本，保守每次现算；
-- 容器：LRU 1024 条（内置常量，docs/01 §1.0 调优不设变量）；
-- 防注入标准姿势：引导业务一律 Prepared Statements。
+## 2.6 EXPLAIN
 
-## 2.7 系统变量（配置即数据的 SQL 面）
+走 gms 原生 EXPLAIN（计划树展示：IndexAccess/索引名/范围等）；KiDB 侧细节经 `Index.String()` 等 gms 展示面透出。v5.x 的网关自定义 EXPLAIN 已拆除。
 
-go-mysql-server 原生 system variable 机制注册 KiDB 全部变量；`SET GLOBAL` 的持久化后端挂载到 `cfg:global`（`config_set.lua` CAS），`SET SESSION` 走会话 overlay。变量全集、默认值、校验规则与传播机制见 [10](10-配置与可观测.md) §10.2。命名纪律：小写下划线，不用点号。
+## 2.7 系统变量（gms 原生 sysvar 机制）
 
-## 2.8 EXPLAIN
+KiDB 的三个语义开关注册为 gms 原生系统变量（`sql.MysqlSystemVariable`，Dynamic，Global 作用域）：
 
-`EXPLAIN SELECT ...` 由网关接管，输出 KiDB 计划展示（两列 item/detail）：命中路径（point_get/eq_lookup/range_lookup(ordered)/prefix_lookup(lex)/fullscan/fastpath:*）、索引 ID、扇出估算（16384 桶种子 + k 路归并/top-k 早停）、L1/L2 标记、守卫判定（全扫的 ERR_NO_INDEX 或放行依据）。这是**计划推断**（与执行同规则的 AST 分析），非执行回放；仅支持 SELECT（其余报 1235）。慢查询日志携带指纹与路由摘要（[10](10-配置与可观测.md) §10.4）。
-
-## 2.9 错误码与权限
-
-### 错误码映射
-
-| 内核错误 | MySQL 错误码 | 说明 |
+| 变量 | 默认 | 说明 |
 |---|---|---|
-| `ERR_DUPLICATE_KEY` | 1062 | 唯一冲突（预约 key 判定，[05](05-写入路径.md) §5.3） |
-| `ERR_UNSUPPORTED` / `ERR_UNSUPPORTED_JOIN` | 1235 | 档 4 JOIN、事务语句、TRUNCATE、GRANT、超范围 DDL/类型 |
-| `ERR_NO_INDEX` | 自定义 | 无索引谓词且未开全扫 |
-| `ERR_ROW_TOO_LARGE` | 自定义 | 超 `max_row_bytes`（[03](03-数据模型与编码.md) §3.4） |
-| `ERR_INDEX_LOG_FULL` | 自定义 | 异步索引日志背压（[05](05-写入路径.md) §5.2） |
-| `ERR_STALE_METADATA` | 内部重试，耗尽后 1197 | Catalog/BucketMap 版本冲突（[06](06-元数据与Schema演进.md)） |
-| `ERR_REDIRECT_EXHAUSTED` | 1105 | 集群迁移窗口重试耗尽（[09](09-后端契约与适配器.md) R5） |
-| `ERR_CLUSTER_UNAVAILABLE` | 1105 | CLUSTERDOWN/LOADING 退避耗尽（[09](09-后端契约与适配器.md) §9.6） |
-| `ERR_READ_ONLY` | 1290 | 只读账号执行写语句 |
-| `ERR_CAPABILITY` | 启动期拒绝 | EVAL 缺失等能力探测失败（[09](09-后端契约与适配器.md) §9.4） |
+| `query_allow_fullscan_tables` | `''` | 全表遍历表白名单（逃生门，[07](07-TTL与过期清扫.md) §7.4） |
+| `replica_read` | `false` | L3 副本读开关（适配器能力位缺失时自动无效，[09](09-后端契约与适配器.md) §9.4） |
+| `hotkey_row_cache` | `false` | 行级读热点近缓存（陈旧窗口语义，[08](08-自治治理与热Key.md) §8.4） |
 
-### 权限边界
+- `SET GLOBAL x = v` 经 gms sysvar 机制校验 → `NotifyChanged` 钩子经会话的 `Cfg` 句柄持久化到 `cfg:global`（CAS + `_ver` 递增 + `_audit` 审计，[10](10-配置与可观测.md) §10.2）；多实例经版本校验轮询秒级收敛；
+- `SHOW [GLOBAL] VARIABLES` / `SELECT @@global.x` 由 gms 原生服务；`SET SESSION` 会话级覆盖不落盘（gms 语义）；
+- ro 账号 SET GLOBAL 在 `NotifyChanged` 钩子内拒绝（`RejectRO`）；
+- 命名纪律：小写下划线；**变量只承载语义开关**（调优参数在 `tuning/tuning.toml`，[10](10-配置与可观测.md) §10.2）。
 
-账号在引导配置声明：`user/host/password/role`，role ∈ {`rw`, `ro`}。`ro` 账号执行 DML 写/DDL/SET GLOBAL 报 `ERR_READ_ONLY`。无 GRANT/REVOKE、无库表级 ACL——缓存查询层定位，权限是部署边界问题（网络隔离 + 账号分级），不是 SQL 层功能（[14](14-红线局限与检查单.md)）。所有 DDL 与 SET GLOBAL 写入 `cfg:global._audit` 审计字段。
+## 2.8 错误码与权限
 
-## 2.10 握手兼容矩阵（采纳度生死线）
+错误码映射不变：1062 唯一冲突（预约 key 判定，[05](05-写入路径.md) §5.3）/ 1235 超定位（含事务）/ 1290 只读 / 1105 集群类与耗尽类 / `ERR_NO_INDEX`（引擎层全扫闸门拒绝）/ `ERR_ROW_TOO_LARGE` / `ERR_INDEX_LOG_FULL` / `ERR_STALE_METADATA`（内部重试耗尽 1197）。
 
-GUI 工具与驱动连接后立即发出握手探测语句，必须礼貌应答，否则客户端直接断开：
+权限边界：账号在引导配置声明（`user/host/password/role`，role ∈ {`rw`,`ro`}）。无 GRANT/REVOKE——部署边界问题（网络隔离 + 账号分级）。**ro 执法点全部在引擎扩展点内**：写入编辑器、DDL 接口、SET GLOBAL 钩子。
 
-- `SELECT @@version` / `@@version_comment` 等：返回构造值（version 伪装 MySQL 8.0.x，version_comment 标识 KiDB）；
-- `SHOW TABLES` / `SHOW CREATE TABLE` / `SHOW INDEX`：从 Catalog 生成；
-- `INFORMATION_SCHEMA.{TABLES,COLUMNS,STATISTICS}`：内存视图从 Catalog 填充；
-- `SET NAMES` / `SET autocommit` / `USE db`：会话状态接受并记录，无副作用语句一律 OK；
-- 不支持的会话变量：返回默认值 + debug 日志，不报错。
+## 2.9 握手兼容矩阵（采纳度生死线）
 
-兼容矩阵（发版门禁，[12](12-测试方案.md) §12.5）：DBeaver、Navicat、DataGrip、go-sql-driver/mysql、pymysql、MySQL CLI。每客户端一条真实连接脚本，覆盖：握手 → `USE` → `SHOW TABLES` → 一条 SELECT → 一条预处理语句。
+不变：GUI 工具与驱动的握手探测语句必须礼貌应答——`SELECT @@version` 等由 gms 原生服务；`SHOW TABLES`/`SHOW CREATE TABLE`/`SHOW INDEX` 从 Catalog 生成；`INFORMATION_SCHEMA` 内存视图；`SET NAMES`/`SET autocommit`/`USE db` 会话状态接受；不支持的会话变量返回默认值 + debug 日志，不报错。兼容矩阵与门禁见 [12](12-测试方案.md) §12.5。

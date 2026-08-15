@@ -93,17 +93,18 @@ KiDB 与 TiDB 在架构形状上同构——**无状态 SQL 计算层 + 共享 K
 业务（任意 MySQL 客户端/驱动/GUI）
         │  MySQL wire protocol
         ▼
-┌─ KiDB 网关（cmd/kidb-server）────────────────────────┐
-│  gateway   协议层：前置分类器 / 会话注册表 / 握手兼容    │
-│  ddl       DDL 执行器（TiDB parser AST → Catalog 作业）│
-│  planner   谓词翻译 / Request / plan cache / scatter   │
-│  exec      gather / 回表校验 / RowIter 流式            │
-│  txguard   写入 Lua 编排 / 幂等 / 唯一预约             │
-│  meta      Catalog/BucketMap 缓存 + schema lease       │
-│  config    cfg:global 配置存储（SET GLOBAL）           │
-│  controller/sweeper/indexer/telemetry  后台角色        │
-│  nearcache 进程内近缓存（分片 map + 周期清扫）         │
-└─────────────── kidb（根包：Kernel/Querier/KvClient/Bootstrap）┘
+┌─ go-mysql-server（协议 + 解析 + 分析器 + 执行器框架）─────────────┐
+│  engine    gms 扩展点实现：Provider/Database（TableCreator/        │
+│            TableDropper）/Table（扫描、索引、编辑、投影、统计）/    │
+│            Session（事务显式拒绝、角色）/DDL 转换校验              │
+│  exec      谓词翻译执行：散取/k 路归并/回表校验/RowIter 流式        │
+│  txguard   写入 Lua 编排 / 幂等 / 唯一预约 / HLL 采样             │
+│  meta      Catalog/BucketMap 缓存 + schema lease                   │
+│  config    cfg:global 配置存储（3 个语义开关的持久化）             │
+│  controller/sweeper/indexer/telemetry  后台角色                    │
+│  nearcache 进程内近缓存（otter 底座）                              │
+│  tuning    开发者调优参数（tuning.toml embed，唯一调优面）         │
+└─────────────── kidb（根包：KvClient 契约/Bootstrap/错误码）────────┘
         │
         ▼
 KvClient（接口，契约 R1~R7）──► [adapter/goredis 参考实现]
@@ -112,14 +113,19 @@ KvClient（接口，契约 R1~R7）──► [adapter/goredis 参考实现]
         ▼
 Redis Cluster（16384 slot；keycodec 单点负责 key 布局）
 script 包：Lua 资产 embed + 启动期静态校验
+gateway 包：纯装配（引擎构造 + wire server + 账号/角色/变量注册 + 后台角色），
+            **不含任何 SQL 文本处理**
+cmd/kidb-server：进程入口（DI 装配，wire）
 ```
 
 **分层纪律**：
 
 - 内核只 import 标准库与开源依赖，**不出现任何公司私有包**；
-- `Client` 接口与能力探测（Capabilities）是内核与具体 Redis 客户端之间的唯一契约（[09](09-后端契约与适配器.md) §9.3）；
+- `KvClient` 接口与能力探测（Capabilities）是内核与具体 Redis 客户端之间的唯一契约（[09](09-后端契约与适配器.md) §9.3）；
 - key 布局的唯一所有者是 `keycodec` 包（对齐 TiDB `tablecodec` 纪律），任何包不得手工拼接 key 字符串；
-- 适配器一致性测试套件（contract tests）保证任何新适配器满足契约（[12](12-测试方案.md) §12.4）。
+- 适配器一致性测试套件（contract tests）保证任何新适配器满足契约（[12](12-测试方案.md) §12.4）；
+- **v6.0 新纪律**：网关/装配层不做 SQL 文本解析；分析面与执行面同一语法树（gms）。
+  独立进程非库——不使用 `internal/` 可见性约束（包即边界，tuning/testutil 平铺）。
 
 内核只暴露：
 

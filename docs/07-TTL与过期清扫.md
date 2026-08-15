@@ -80,12 +80,13 @@ FullScan(table, filter) RowIter:
 | 冗余工作 | 扫全 keyspace（含其他 key 与已过期行 key） | 只扫本表名册 |
 | 正确性依赖 | 无 | 依赖写入 Lua 登记的完备性（PBT P2 不变式单独断言，[12](12-测试方案.md) §12.3） |
 
-**访问控制**：全表遍历默认不开放——无索引谓词直接报错 `ERR_NO_INDEX` 并给建索引建议。开启方式（两选一）：
+**访问控制（v6.0：引擎层全扫闸门）**：全表遍历默认不开放——引擎层全扫（无可用索引）时按表裁决：
 
-1. SQL hint：`SELECT /*+ FULLSCAN */ ...`（网关解析后改写执行计划放行）；
-2. 全局变量 `query_allow_fullscan_tables`（`SET GLOBAL ... = 't1,t2'`，表白名单，[10](10-配置与可观测.md) §10.2）。
+1. **小表自动放行**：实时行数 < `gateway.dimension_max_rows`（tuning.toml，默认 10 万）——小表全扫与维表广播同源，自动即可；
+2. **表白名单放行并告警**：`query_allow_fullscan_tables`（`SET GLOBAL ... = 't1,t2'`，[10](10-配置与可观测.md) §10.2）——放行计入 `fullscan_fallback_total` 并告警日志；
+3. 否则报错 `ERR_NO_INDEX`（附建索引/白名单建议）。
 
-开启后仍走限流通道（实现：exec 全扫并发信号量，内置常量 10 并发/实例，超限查询排队、ctx 取消贯穿），命中慢查询告警与 `fullscan_fallback_total` 指标。
+v6.0 起不再有 `/*+ FULLSCAN */` hint 通道（网关不解析 SQL 文本——hint 需经解析识别，与单引擎纪律冲突；逃生门保留白名单）。大表全扫仍走限流通道（exec 全扫并发信号量，tuning.toml `exec.fullscan_concurrency` 默认 10/实例，超限排队、ctx 取消贯穿）。
 
 **16384 扇出优化**：按 slot→节点归并后经逻辑 pipeline 发出。登记册分片数 `#{n}`（§7.2）与 slot 数正交：遍历时扇出 = 16384 × n，大表细分的代价是扇出同倍放大，由限流通道吸收。
 

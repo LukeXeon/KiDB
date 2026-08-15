@@ -33,14 +33,18 @@ TiDB 的 SQL 层不是独立的——它焊死在 TiKV 的事务模型上。`kv.
 
 结论：路线 Y 保住的只是 parser+planner+executor，而这三件 go-mysql-server 已经以库的形式提供（[10](10-配置与可观测.md) §10.1），还附送 wire protocol 与 system variables——**"能用库的用库"已经覆盖了路线 Y 想要的全部，且零手术**。
 
-## 13.3 直接依赖清单（go.mod import，零修改零 fork）
+## 13.3 直接依赖清单（v6.0 起：零 TiDB 代码依赖）
 
-| 依赖 | 事实 | KiDB 用途 |
-|---|---|---|
-| `github.com/pingcap/tidb/pkg/parser` | **独立 Go module**（自带 go.mod，go 1.25）；外部依赖仅 pingcap/errors、pingcap/log、zap、modernc 解析栈、golang.org/x/text 等公开库——零 TiKV/etcd 耦合 | ① DDL 语句解析（AST：`CreateTableStmt`/`CreateIndexStmt`/`DropTableStmt`…）；② `parser.NormalizeDigest(sql)` 产出计划缓存指纹（normalized + digest）；③ COMMENT 选项原生解析（`TableOptionComment`、`IndexOption.Comment`）——KiDB 扩展的载体（[02](02-SQL服务器.md) §2.4） |
-| （间接随 parser） | parser 模块的传递依赖 | 随 go.mod 锁版本统一管理 |
+**v6.0 起 go.mod 对 TiDB 零依赖。** v5.x 曾直接依赖 `pkg/parser`（DDL 解析 +
+`NormalizeDigest` 指纹 + COMMENT 载体），当时的三个用途全部退役：
 
-**纪律**：只 go.mod 依赖，**永不 fork parser**。fork 意味着永久背锅上游语法演进；COMMENT 载体（`kidb:{json}`）正是为了不 fork 而存在的扩展通道。
+- DDL 解析 → gms planbuilder + KiDB 扩展点（`TableCreator`/`IndexAlterableTable`，[02](02-SQL服务器.md) §2.3）；
+- `NormalizeDigest` 指纹 → plan cache 判定缓存随网关侧解析一并拆除（[02](02-SQL服务器.md) §2.5）；
+- COMMENT 载体 → gms DDL 接口直达（`CreateTable` 的 comment 参数、`IndexDef.Comment`）。
+
+保留下来的全是**设计移植**（§13.4）与不采用清单（§13.5）——它们本来就不需要代码依赖。
+fork 禁令与版本基线等纪律随之失效（无对象）。
+
 
 ## 13.4 设计移植清单（照着重写，每项都标注为什么不能直接依赖）
 
@@ -76,7 +80,6 @@ TiDB 的 SQL 层不是独立的——它焊死在 TiKV 的事务模型上。`kv.
 
 ## 13.6 复用纪律与版本基线
 
-- **版本基线**：`pkg/parser` 版本随本仓库 go.mod 锁定；当前基线 `v0.0.0-20260814130643-17c0dd0fe42b`（TiDB master @2026-08-14，go 1.25 模块线）；升级 = 改 go.mod + 全量回归（[12](12-测试方案.md) §12.9）；
-- **fork 禁令**：任何"parser 不支持我们想要的语法"的冲动，先走 COMMENT 载体；载体真不够用再评估语法 hint（`/*+ */`），仍不够才立项——fork 是最后手段且须记录决策；
-- **跟踪上游**：每季度检查 parser 上游变更（安全修复、MySQL 新语法），评估是否升基线；
-- **设计移植的回访**：移植项（§13.4）在 TiDB 上游有语义更新时（如 owner 语义变化），评估是否跟进——移植的是语义，语义有源头。
+- **零依赖后**：版本基线/fork 禁令纪律无对象（§13.3）；
+- **跟踪上游**：TiDB 的语义演进（owner/schema lease/plan cache 等移植项的源头语义）每季度回访一次——移植的是语义，语义有源头；
+- **升级纪律**：go-mysql-server / go-redis / miniredis 任一升级触发全量回归（[12](12-测试方案.md) §12.9）。

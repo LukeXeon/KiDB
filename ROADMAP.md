@@ -1,8 +1,28 @@
 # Roadmap（未实现清单）
 
-> 当前状态：SQL 服务器端到端可用（读写/DDL/自治/清扫/配置/指标全链路有测试覆盖）。
 > 本清单是唯一权威的"还没做什么"记录；每项标注性质与去向。完成即划走。
 > 排序即建议优先级。
+
+## v6.0 架构收敛（进行中，破坏性变更）
+
+> 总原则（用户裁决，2026-08-16）：**gms → 我们的转换层 → Redis**——
+> 在 gms 框架内实现数据库，不是把它包装一层；网关不做任何 SQL 文本解析；
+> 该删的删、该改的改，不接受过渡形态。历史快照在 `v6-wip` 分支（仅参考）。
+
+| # | 项 | 内容 |
+|---|---|
+| 1 | 网关纯装配化 | handler 包装层全灭；gateway 只剩装配（引擎构造/账号/角色/变量/后台角色）。事务拒绝改由自定义 `engine.Session`（实现 TransactionSession 全显式报错——gms 对无该接口的会话静默 no-op BEGIN，是隐性部分提交陷阱）；ro 执法进引擎写入口/DDL 接口/SET GLOBAL 钩子（`RejectRO`）；逐语句慢日志退役（`query_duration_seconds` 指标 + 引擎层全扫告警承接） |
+| 2 | 系统变量 gms 原生 | 3 个语义开关注册为 `sql.MysqlSystemVariable`（Dynamic/Global），`NotifyChanged` 经 `Session.Cfg` 持久化 cfg:global；配置面正则拦截删除 |
+| 3 | 全扫闸门引擎层 | `Table.PartitionRows` 全扫前过闸：小表（<dimension_max_rows）自动放行 / 白名单放行并告警 / 否则 ERR_NO_INDEX；`/*+ FULLSCAN */` hint 通道取消（需解析才能识别，与单引擎纪律冲突） |
+| 4 | 历史组件全拆 | 前置分类器、双解析器、网关快速路径（COUNT/MIN/MAX）、自定义 EXPLAIN、plan cache 判定缓存、自写指纹归一化器；**go.mod 移除 TiDB parser**（零代码依赖）。COUNT(*) 由 gms `replaceCountStar`→`StatisticsTable` 承接；MIN/MAX 经引擎聚合（端点加速写法 = ORDER BY col LIMIT 1）；EXPLAIN 走 gms 原生 |
+| 5 | ddl 包并入 engine | 转换/校验即 `engine/ddlconvert.go`（快照已含） |
+| 6 | DI 装配 | `github.com/google/wire` 编译期注入：全项目组件（KvClient/script/meta/exec/txguard/engine/config/controller/sweeper/indexer/nearcache/metrics/gateway）统一进 DI 图；wire_gen.go 入库，CI 校验重新生成一致 |
+| 7 | 工具包收敛 | `ds/` 通用工具包：自研泛型优先队列（container/heap 封装）**替代并移除 `gopkg.in/dnaeon/go-priorityqueue.v1`**；重复工具函数（回复归一/批处理等）归拢；测试基建 `internal/redistest` → `testutil/` 平铺，`internal/tuning` → `tuning/`（独立进程非库，internal 约束无对象） |
+| 8 | 泛型使用点审计 | 已扫描（2026-08-16）：手搓集合 `map[string]struct{}`（exec seen 去重 5 处、translate 去重）、`sort.SliceStable`（translate 2 处）、自写 `contains`（txguard）、container/heap 手写堆（exec/prefix.go lexHeap）、container/list LRU（plancache——v6.0 已删）。**推荐**：①stdlib 优先（Go 1.26 `slices.SortStableFunc`/`slices.Contains`/内建 min/max——零新依赖覆盖大部分）；②`ds/` 自研泛型堆（container/heap 封装，替代 dnaeon——用户指定）；③集合代数（OR 谓词 pk 求并）落地时引 `github.com/deckarep/golang-set/v2`（docs/04 §4.1 已记名）；`map[string]struct{}` 简单存在性集合保留（惯用且零开销） |
+| 9 | i18n | `github.com/nicksnyder/go-i18n/v2`：用户面向消息（错误/提示）全部走消息目录（en 默认 + zh 可选）；**消息不得含技术文档引用**（docs/xx §x.y 不进用户文本，留内部注释） |
+| 10 | 测试与文档对齐 | 网关薄壳相关测试重写；P5 分类器对拍退役（已落 docs/12）；docs 01/02/04/07/10/13 已按 v6.0 重写 |
+
+完成判据：全测试绿 + `go.mod` 无 TiDB parser/priorityqueue + gateway 无 SQL 文本处理 + wire_gen.go 装配全组件 + i18n 消息目录落位。
 
 ## A. 正确性执法缺口——**已完成（v5.1 批次）**
 

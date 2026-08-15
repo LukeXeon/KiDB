@@ -2,6 +2,24 @@
 
 所有显著的变更、修正与设计裁决记录于此。docs/ 内只保留当前设计与实现状态，不写历史。
 
+## v6.0（架构收敛，破坏性变更，进行中）
+
+> 总原则（用户裁决）：**gms → 我们的转换层 → Redis**——在 gms 框架内实现数据库，
+> 不是把它包装一层；网关不做任何 SQL 文本解析；该删的删、该改的改，不留过渡形态。
+> 完整任务清单与完成判据见 ROADMAP「v6.0 架构收敛」节。
+
+已裁决的拆除/改造（文档已按目标态重写，代码随之）：
+
+- **网关纯装配化**：handler 包装层全灭。事务拒绝改由自定义 `engine.Session`（`TransactionSession` 全显式报错——gms 对无该接口的会话静默 no-op BEGIN，是隐性部分提交陷阱，实证）；ro 执法进引擎写入口/DDL 接口/SET GLOBAL 钩子；逐语句慢日志退役（指标 + 全扫告警承接）；
+- **系统变量 gms 原生**：3 个语义开关注册为 `sql.MysqlSystemVariable`，`NotifyChanged` 经 `Session.Cfg` 持久化 `cfg:global`；配置面正则拦截删除；
+- **全扫闸门引擎层**：`Table.PartitionRows` 全扫前过闸（小表自动放行/白名单放行并告警/否则 ERR_NO_INDEX）；`/*+ FULLSCAN */` hint 通道取消（识别 hint 需要解析 SQL，与单引擎纪律冲突；逃生门保留白名单）；
+- **历史组件全拆**：前置分类器、双解析器分工、网关快速路径（COUNT/MIN/MAX）、自定义 EXPLAIN、plan cache 判定缓存、自写指纹归一化器；**go.mod 移除 TiDB parser（零代码依赖）**。承接面：COUNT(*) 由 gms `replaceCountStar`→`StatisticsTable`（精确 RowCount=Σ ZCOUNT）；MIN/MAX 经引擎聚合（端点加速写法 `ORDER BY col LIMIT 1`）；EXPLAIN 走 gms 原生；JOIN 分档由全扫闸门统一裁决；
+- **ddl 包并入 engine**（转换/校验即 `engine/ddlconvert.go`）；
+- **DI 装配**：引入 `github.com/google/wire`，全项目组件统一进 DI 图；
+- **工具包收敛**：`ds/` 通用工具包——自研泛型优先队列（container/heap 封装）替代并移除 `gopkg.in/dnaeon/go-priorityqueue.v1`；重复工具函数归拢；`internal/` 平铺（`internal/tuning`→`tuning`、`internal/redistest`→`testutil`——独立进程非库，internal 约束无对象）；
+- **i18n**：引入 `github.com/nicksnyder/go-i18n/v2`——用户面向消息全部走消息目录（en 默认 + zh）；**消息不得含技术文档引用**（docs 引用只留代码注释）；
+- **泛型使用点审计**：扫描结果与库推荐见审计记录（ROADMAP v6.0 第 8 项）。
+
 ## v5.1（实现期，进行中）
 
 ### 落地（docs 全册对应的可运行系统）
