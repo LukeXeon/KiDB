@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"kidb"
+	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/script"
@@ -24,12 +25,13 @@ const maxStaleRetries = 3
 type Guard struct {
 	cli   kidb.Client
 	reg   *script.Registry
+	bm    *bucketmap.Store  // 桶路由（分裂状态），nil = 永远 ACTIVE 单桶
 	clock func() time.Time // 测试可注入
 }
 
-// New 构造 Guard。
-func New(cli kidb.Client, reg *script.Registry) *Guard {
-	return &Guard{cli: cli, reg: reg, clock: time.Now}
+// New 构造 Guard（bm 供分裂状态路由；传 nil 退化为 ACTIVE 单桶模式）。
+func New(cli kidb.Client, reg *script.Registry, bm *bucketmap.Store) *Guard {
+	return &Guard{cli: cli, reg: reg, bm: bm, clock: time.Now}
 }
 
 // SetClock 注入测试时钟。
@@ -61,6 +63,8 @@ type indexOp struct {
 	redoMember string
 	redoScore  float64
 	hasRedo    bool
+	bmKey      string // BucketMap 分片 key（CAS 校验；"")
+	bmVer      uint64 // 期望分片版本
 }
 
 // WriteRow 执行单行写入（INSERT/UPDATE/UPSERT 共用）。
@@ -91,7 +95,11 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 		if !stale {
 			return res, nil
 		}
-		// stale：行被并发改写，整体重读重试（预约 key 我方已持有，重试幂等）
+		// stale：行被并发改写或桶布局在动，整体重读重试。
+		// bm 缓存可能持旧版本——先失效再重试（预约 key 我方已持有，重试幂等）。
+		if g.bm != nil {
+			g.bm.Invalidate()
+		}
 	}
 	g.rollbackReservations(ctx, acquired)
 	return Result{}, fmt.Errorf("%w: write %s after %d attempts", kidb.ErrStaleMetadata, rowkey, maxStaleRetries)
@@ -117,7 +125,11 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 		}
 	}
 
-	ops := buildIndexOps(t, slot, req.PK, oldRow, req.Fields)
+	shards, err := g.loadShards(ctx, t, slot)
+	if err != nil {
+		return false, err
+	}
+	ops := buildIndexOps(t, slot, req.PK, oldRow, req.Fields, shards)
 	// 复活路径：把旧回执的索引条目并入撤销集
 	if len(oldRow) == 0 && len(oldRcpt) > 0 {
 		ops = mergeReceiptUndo(ops, oldRcpt)
@@ -247,7 +259,11 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		if err != nil {
 			return false, err
 		}
-		ops := buildIndexOps(t, slot, pk, oldRow, nil)
+		shards, err := g.loadShards(ctx, t, slot)
+		if err != nil {
+			return false, err
+		}
+		ops := buildIndexOps(t, slot, pk, oldRow, nil, shards)
 		bucketKeys, argvTail := assembleIndexArgs(ops)
 		keys := append([]string{rowkey}, bucketKeys...)
 		expShards := t.EffectiveExpShards()
@@ -269,6 +285,9 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		}
 		arr, _ := out.([]any)
 		if len(arr) > 0 && fmt.Sprint(arr[0]) == "stale" {
+			if g.bm != nil {
+				g.bm.Invalidate()
+			}
 			continue
 		}
 		// 提交成功：释放该行的唯一预约（异 slot DEL）
@@ -370,82 +389,149 @@ func (g *Guard) rollbackReservations(ctx context.Context, keys []string) {
 	}
 }
 
-// buildIndexOps 按旧行/新字段展开索引撤销与重建（ACTIVE 单桶形态；
-// 分裂状态机的 SPLITTING/DRAINING 双写由控制器落地后扩展，docs/05 §5.1 第 4 步）。
-// 异步索引（docs/05 §5.2）：不碰桶，追加变更日志（条目 pk\x1f旧\x1f新，ver 由 Lua 补）。
-func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields map[string]string) []indexOp {
+// loadShards 加载本次写入涉及的全部同步索引的 BucketMap 分片（行 slot 内聚）。
+func (g *Guard) loadShards(ctx context.Context, t *meta.TableDef, slot uint16) (map[string]*bucketmap.Shard, error) {
+	shards := map[string]*bucketmap.Shard{}
+	if g.bm == nil {
+		return shards, nil
+	}
+	for _, idx := range t.Indexes {
+		if idx.Async {
+			continue
+		}
+		sh, err := g.bm.Load(ctx, t.Name, idx.ID, slot)
+		if err != nil {
+			return nil, err
+		}
+		shards[idx.ID] = sh
+	}
+	return shards, nil
+}
+
+// buildIndexOps 按旧行/新字段展开索引撤销与重建（v3：BucketMap 分裂状态感知）。
+// 双写规则（docs/08 §8.3）：SPLITTING → 撤/建双方都写父桶+子桶；DRAINING → 仅子桶；
+// 撤销集合 = 当前可读桶集合（覆盖分裂窗口的一切可能位置，ZREM 幂等无副作用）。
+// 每个描述符携带 bm 分片 key + 期望版本——Lua 内 CAS 预检，版本漂移即 stale 重试。
+func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields map[string]string, shards map[string]*bucketmap.Shard) []indexOp {
 	var ops []indexOp
+	emit := func(kind byte, bm *bucketmap.Shard, idxID string,
+		undoKeys []string, undoMember string, redoKeys []string, redoMember string, redoScore float64) {
+		bmKey, bmVer := "", uint64(0)
+		if bm != nil {
+			bmKey = bucketmap.Key(t.Name, idxID, slot)
+			bmVer = bm.Version
+		}
+		for _, uk := range undoKeys {
+			ops = append(ops, indexOp{kind: kind, undoKey: uk, undoMember: undoMember, bmKey: bmKey, bmVer: bmVer})
+		}
+		for _, rk := range redoKeys {
+			ops = append(ops, indexOp{kind: kind, redoKey: rk, redoMember: redoMember, redoScore: redoScore, hasRedo: true, bmKey: bmKey, bmVer: bmVer})
+		}
+	}
+
 	for _, idx := range t.Indexes {
 		col := idx.Columns[0]
 		oldVal, hadOld := oldRow[col]
 		newVal, hasNew := newFields[col]
+		sh := shards[idx.ID] // nil（无 bm 模式）或默认分片 → 单桶
 
 		// 异步分支：值有变化才记日志（墓碑 = 新值空串）
 		if idx.Async {
 			if hadOld == hasNew && (!hadOld || oldVal == newVal) {
 				continue
 			}
-			entry := pk + "\x1f" + oldVal + "\x1f" + newVal
 			ops = append(ops, indexOp{
 				kind:       'A',
 				redoKey:    keycodec.AsyncLogKey(t.Name, idx.ID, slot),
-				redoMember: entry,
+				redoMember: pk + "\x1f" + oldVal + "\x1f" + newVal,
 				hasRedo:    true,
 			})
 			continue
 		}
 
-		// 等值/唯一：桶按值寻址；范围：单 ACTIVE 桶；字典序副本随行
-		if idx.Kind == meta.IndexRange {
-			op := indexOp{kind: 'R'}
+		switch idx.Kind {
+		case meta.IndexRange:
+			var undoKeys, redoKeys []string
 			if hadOld {
-				op.undoKey = keycodec.RangeBucketKey(t.Name, idx.ID, slot, 0)
-				op.undoMember = pk
-			}
-			if hasNew {
-				score, err := strconv.ParseFloat(newVal, 64)
-				if err == nil {
-					op.redoKey = keycodec.RangeBucketKey(t.Name, idx.ID, slot, 0)
-					op.redoMember = coveringMember(pk, idx, newFields)
-					op.redoScore = score
-					op.hasRedo = true
+				if oldScore, err := strconv.ParseFloat(oldVal, 64); err == nil {
+					for _, b := range rangeReadSet(sh, oldScore) {
+						undoKeys = append(undoKeys, keycodec.RangeBucketKey(t.Name, idx.ID, slot, b))
+					}
 				}
 			}
-			ops = append(ops, op)
-			continue
-		}
+			var score float64
+			if hasNew {
+				if sc, err := strconv.ParseFloat(newVal, 64); err == nil {
+					score = sc
+					for _, b := range rangeWriteSet(sh, sc) {
+						redoKeys = append(redoKeys, keycodec.RangeBucketKey(t.Name, idx.ID, slot, b))
+					}
+				}
+			}
+			emit('R', sh, idx.ID, undoKeys, pk, redoKeys, coveringMember(pk, idx, newFields), score)
 
-		// IndexEq / IndexUnique
-		op := indexOp{kind: 'E'}
-		if hadOld && (!hasNew || oldVal != newVal) {
-			op.undoKey = keycodec.EqBucketKey(t.Name, idx.ID, oldVal, slot, 0)
-			op.undoMember = pk
-		}
-		if hasNew {
-			op.redoKey = keycodec.EqBucketKey(t.Name, idx.ID, newVal, slot, 0)
-			op.redoMember = coveringMember(pk, idx, newFields)
-			op.redoScore = 0
-			op.hasRedo = true
-		}
-		ops = append(ops, op)
-
-		// 字典序副本（前缀搜索，docs/04 §4.5）
-		if idx.PrefixCopy {
-			lop := indexOp{kind: 'L'}
+		default: // IndexEq / IndexUnique
+			var undoKeys, redoKeys []string
 			if hadOld && (!hasNew || oldVal != newVal) {
-				lop.undoKey = keycodec.LexBucketKey(t.Name, idx.ID, slot, 0)
-				lop.undoMember = lexMember(oldVal, pk)
+				for _, b := range eqReadSet(sh, keycodec.EscapeValue(oldVal)) {
+					undoKeys = append(undoKeys, keycodec.EqBucketKey(t.Name, idx.ID, oldVal, slot, b))
+				}
 			}
 			if hasNew {
-				lop.redoKey = keycodec.LexBucketKey(t.Name, idx.ID, slot, 0)
-				lop.redoMember = lexMember(newVal, pk)
-				lop.redoScore = 0
-				lop.hasRedo = true
+				for _, b := range eqWriteSet(sh, keycodec.EscapeValue(newVal), pk) {
+					redoKeys = append(redoKeys, keycodec.EqBucketKey(t.Name, idx.ID, newVal, slot, b))
+				}
 			}
-			ops = append(ops, lop)
+			emit('E', sh, idx.ID, undoKeys, pk, redoKeys, coveringMember(pk, idx, newFields), 0)
+
+			// 字典序副本随同等值索引分裂（"l" 条目，按 member 内 pk 同规则散列）
+			if idx.PrefixCopy {
+				var lUndo, lRedo []string
+				if hadOld && (!hasNew || oldVal != newVal) {
+					for _, b := range eqReadSet(sh, "l") {
+						lUndo = append(lUndo, keycodec.LexBucketKey(t.Name, idx.ID, slot, b))
+					}
+				}
+				if hasNew {
+					for _, b := range eqWriteSet(sh, "l", pk) {
+						lRedo = append(lRedo, keycodec.LexBucketKey(t.Name, idx.ID, slot, b))
+					}
+				}
+				emit('L', sh, idx.ID, lUndo, lexMember(oldVal, pk), lRedo, lexMember(newVal, pk), 0)
+			}
 		}
 	}
 	return ops
+}
+
+// eqReadSet / eqWriteSet / rangeReadSet / rangeWriteSet 是 bucketmap 路由规则的
+// nil 安全包装（无 bm 时恒为默认单桶 [0]）。
+func eqReadSet(sh *bucketmap.Shard, encVal string) []int {
+	if sh == nil {
+		return []int{0}
+	}
+	return sh.ReadBucketsEq(encVal)
+}
+
+func eqWriteSet(sh *bucketmap.Shard, encVal, pk string) []int {
+	if sh == nil {
+		return []int{0}
+	}
+	return sh.WriteTargetsEq(encVal, pk)
+}
+
+func rangeReadSet(sh *bucketmap.Shard, score float64) []int {
+	if sh == nil {
+		return []int{0}
+	}
+	return sh.ReadBucketsRange(score, score)
+}
+
+func rangeWriteSet(sh *bucketmap.Shard, score float64) []int {
+	if sh == nil {
+		return []int{0}
+	}
+	return sh.WriteTargetsRange(score)
 }
 
 // coveringMember 桶 member 编码：无覆盖列 = pk；
@@ -517,6 +603,7 @@ func assembleIndexArgs(ops []indexOp) (bucketKeys []string, argvTail []any) {
 			string(kind),
 			strconv.Itoa(ref(d.undoKey)), d.undoMember,
 			strconv.Itoa(ref(d.redoKey)), d.redoMember, score,
+			strconv.Itoa(ref(d.bmKey)), strconv.FormatUint(d.bmVer, 10),
 		)
 	}
 	return bucketKeys, argvTail

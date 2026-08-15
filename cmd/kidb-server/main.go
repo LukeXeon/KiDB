@@ -14,6 +14,7 @@ import (
 
 	"kidb"
 	"kidb/adapter/goredis"
+	"kidb/bucketmap"
 	"kidb/engine"
 	"kidb/exec"
 	"kidb/gateway"
@@ -65,13 +66,14 @@ func main() {
 	defer k.Close()
 
 	store := meta.NewCatalogStore(cli)
+	bm := bucketmap.New(cli, k.Scripts())
 	deps := engine.Deps{
 		Client: cli,
 		Reg:    k.Scripts(),
 		Store:  store,
 		Cache:  meta.NewCatalogCache(store),
 		Exec:   exec.New(cli, k.Scripts()),
-		Guard:  txguard.New(cli, k.Scripts()),
+		Guard:  txguard.New(cli, k.Scripts(), bm),
 	}
 	srv, err := gateway.NewServer(deps, boot)
 	if err != nil {

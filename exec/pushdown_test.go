@@ -17,7 +17,7 @@ import (
 // 服务端下推 vs 客户端校验，同输入结果集必须相同。
 func TestPushdownParity(t *testing.T) {
 	cli, reg, _ := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	ctx := context.Background()
 
@@ -80,7 +80,7 @@ func TestPushdownParity(t *testing.T) {
 // TestPushdownSkipsExpired 下推路径同样拦截过期行（空 Hash 服务端跳过）。
 func TestPushdownSkipsExpired(t *testing.T) {
 	cli, reg, m := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	ctx := context.Background()
 	seedRows(t, g, tbl, 20)

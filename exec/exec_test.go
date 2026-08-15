@@ -64,7 +64,7 @@ func drain(t *testing.T, s *RowStream) [][]any {
 
 func TestFullScanAndPointGet(t *testing.T) {
 	cli, reg, _ := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 100)
 	e := New(cli, reg)
@@ -87,7 +87,7 @@ func TestFullScanAndPointGet(t *testing.T) {
 
 func TestEqLookupWithValidation(t *testing.T) {
 	cli, reg, m := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 50)
 	e := New(cli, reg)
@@ -125,7 +125,7 @@ func TestEqLookupWithValidation(t *testing.T) {
 
 func TestRangeLookup(t *testing.T) {
 	cli, reg, _ := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 50) // age = 20..69
 	e := New(cli, reg)

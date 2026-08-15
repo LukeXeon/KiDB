@@ -1,0 +1,10 @@
+# 2026/08/15 12:41:38.600076 [TestSplitMergePBT] [rapid] draw action: "check"
+# 2026/08/15 12:41:38.600080 [TestSplitMergePBT] [rapid] draw valchk: "red"
+# 2026/08/15 12:41:38.711413 [TestSplitMergePBT] 不变式破坏: red 查询 1 行, 模型 0 行
+# 
+v0.4.8#2214446914110540628
+0x1084210842108
+0x0
+0x0
+0x0
+0x0

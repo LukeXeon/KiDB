@@ -33,7 +33,7 @@ func asyncTable() *meta.TableDef {
 // 断言对 slot 碰撞健壮（两行同 slot 时日志/桶合一）。
 func TestAsyncIndexFlow(t *testing.T) {
 	cli, reg, _ := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := asyncTable()
 	ctx := context.Background()
 	idx := tbl.Index("idx_tag")

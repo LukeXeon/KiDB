@@ -16,7 +16,7 @@ import (
 // 值变更的行被回表校验拦截（docs/08 §8.4：绝不回错行）。
 func TestL1NearCache(t *testing.T) {
 	cli, reg, _ := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 20) // 10 shanghai / 10 beijing
 
@@ -58,7 +58,7 @@ func TestL1NearCache(t *testing.T) {
 // 保证收集路径在无缓存时不 panic 且功能不变
 func TestEqLookupNoCache(t *testing.T) {
 	cli, reg, _ := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	tbl := seedTable()
 	seedRows(t, g, tbl, 10)
 	e := New(cli, reg)

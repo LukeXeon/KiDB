@@ -33,7 +33,7 @@ func sweepTable() *meta.TableDef {
 // TestSweepExpired 到期行清扫：索引/登记册/计数/回执/预约全清（docs/07 §7.3）。
 func TestSweepExpired(t *testing.T) {
 	cli, reg, m := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	now := time.Now()
 	clock := func() time.Time { return now } // 共享钟：写入/清扫同源
 	g.SetClock(clock)
@@ -76,7 +76,7 @@ func TestSweepExpired(t *testing.T) {
 // 行已复活（exp score 在未来）时 sweeper 必须跳过，绝不清活行的索引。
 func TestSweepSkipsResurrected(t *testing.T) {
 	cli, reg, m := redistest.New(t)
-	g := txguard.New(cli, reg)
+	g := txguard.New(cli, reg, nil)
 	now := time.Now()
 	clock := func() time.Time { return now }
 	g.SetClock(clock)

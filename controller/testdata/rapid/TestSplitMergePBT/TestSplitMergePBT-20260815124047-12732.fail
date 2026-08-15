@@ -1,0 +1,41 @@
+# 2026/08/15 12:40:47.472754 [TestSplitMergePBT] [rapid] draw action: "write"
+# 2026/08/15 12:40:47.472759 [TestSplitMergePBT] [rapid] draw pk: "673230238"
+# 2026/08/15 12:40:47.472760 [TestSplitMergePBT] [rapid] draw val: "green"
+# 2026/08/15 12:40:47.480703 [TestSplitMergePBT] [rapid] draw action: "check"
+# 2026/08/15 12:40:47.480706 [TestSplitMergePBT] [rapid] draw valchk: "red"
+# 2026/08/15 12:40:47.761029 [TestSplitMergePBT] [rapid] draw action: "split"
+# 2026/08/15 12:40:47.761035 [TestSplitMergePBT] [rapid] draw valsplit: "blue"
+# 2026/08/15 12:40:54.061204 [TestSplitMergePBT] [rapid] draw action: "check"
+# 2026/08/15 12:40:54.061211 [TestSplitMergePBT] [rapid] draw valchk: "green"
+# 2026/08/15 12:40:54.698002 [TestSplitMergePBT] [rapid] draw action: "check"
+# 2026/08/15 12:40:54.698008 [TestSplitMergePBT] [rapid] draw valchk: "blue"
+# 2026/08/15 12:40:55.932487 [TestSplitMergePBT] 不变式破坏: blue 查询 1 行, 模型 0 行
+# 
+v0.4.8#12540880186705345230
+0x3365e76c91d23
+0x1f5858c553c4fc
+0xffffffffffffffff
+0xe974040bcabcd
+0x7
+0x312dfefc5af6b
+0x1
+0x1087e7bb8a44a2
+0x1df526528e9ced
+0x0
+0x2ef4de94d607d
+0x0
+0x92c483534557f
+0x1dbd9e27af918d
+0x3
+0x1ab35f2868856e
+0x2
+0x1dee092e1392ab
+0xd3159ef439cb9
+0x0
+0xc02f6f7654a09
+0x1
+0x1b8fb8c47af8a2
+0x1c9363bba0651
+0x0
+0x6a48cd1bdb533
+0x2

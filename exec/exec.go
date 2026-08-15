@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"kidb"
+	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
@@ -161,9 +162,13 @@ type Executor struct {
 	cli           kidb.Client
 	reg           *script.Registry // 谓词下推脚本（nil = 不下推）
 	nc            L1Cache          // L1 近缓存（nil = 关闭，docs/08 §8.4）
+	bm            *bucketmap.Store // 桶路由（分裂状态）；nil = 永远默认单桶
 	batch         int
 	slotsPerRound int
 }
+
+// SetBucketMap 接入 BucketMap（分裂状态感知读路径，docs/08 §8.3）。
+func (e *Executor) SetBucketMap(bm *bucketmap.Store) { e.bm = bm }
 
 // L1Cache 是谓词指纹→pk 列表的近缓存接口（nearcache.Cache[string, []string] 满足）。
 // 正确性纪律：缓存只存 pk 列表，回表 + 谓词校验照常执行——陈旧列表至多
@@ -201,6 +206,13 @@ type RowStream struct {
 	ncCached  []string // 缓存命中的 pk 列表（ncCachedOff 分页消费）
 	ncOff     int
 	ncCollect []string // 散取路径收集的 pk（完全排空后才写缓存）
+
+	// 分裂窗口双读去重（SPLITTING 父子桶同 member 各一份）
+	seen map[string]struct{}
+
+	// bm 路由判定（Run 期解析）：等值值是否热分裂 / 范围索引是否有分裂
+	bmHotEq    bool
+	bmHotRange bool
 }
 
 type bucketScan struct {
@@ -216,6 +228,26 @@ func (e *Executor) Run(ctx context.Context, req *Request) *RowStream {
 		s.ncFP = l1Fingerprint(req)
 		if pks, ok := e.nc.Get(s.ncFP); ok {
 			s.ncCached = pks
+		}
+	}
+	// bm 路由判定（热值注册表一次解析；稀疏原则——无分裂零额外读，docs/03 §3.1）
+	if e.bm != nil && req.Index != nil {
+		switch req.Kind {
+		case EqLookup:
+			s.seen = map[string]struct{}{}
+			if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil {
+				for _, v := range req.Values {
+					if reg[keycodec.EscapeValue(v)] {
+						s.bmHotEq = true
+						break
+					}
+				}
+			}
+		case RangeLookup:
+			s.seen = map[string]struct{}{}
+			if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil && reg["@range"] {
+				s.bmHotRange = true
+			}
 		}
 	}
 	return s
@@ -328,7 +360,14 @@ func (s *RowStream) fillScatter() error {
 		for i, b := range s.pending {
 			members := asStrings(results[i])
 			for _, m := range members {
-				pks = append(pks, stripCovering(m))
+				pk := stripCovering(m)
+				if s.seen != nil { // 分裂窗口父子桶双读去重
+					if _, dup := s.seen[pk]; dup {
+						continue
+					}
+					s.seen[pk] = struct{}{}
+				}
+				pks = append(pks, pk)
 			}
 			if len(members) == e.batch { // 满页 = 可能还有
 				b.cursor += len(members)
@@ -358,10 +397,14 @@ func (s *RowStream) buildGroup(from, to int) []bucketScan {
 		switch s.req.Kind {
 		case EqLookup:
 			for _, v := range s.req.Values {
-				out = append(out, bucketScan{key: keycodec.EqBucketKey(t.Name, s.req.Index.ID, v, s16, 0)})
+				for _, b := range s.eqBucketsAt(s16, v) {
+					out = append(out, bucketScan{key: keycodec.EqBucketKey(t.Name, s.req.Index.ID, v, s16, b)})
+				}
 			}
 		case RangeLookup:
-			out = append(out, bucketScan{key: keycodec.RangeBucketKey(t.Name, s.req.Index.ID, s16, 0)})
+			for _, b := range s.rangeBucketsAt(s16) {
+				out = append(out, bucketScan{key: keycodec.RangeBucketKey(t.Name, s.req.Index.ID, s16, b)})
+			}
 		case FullScan:
 			for shard := 0; shard < t.EffectiveExpShards(); shard++ {
 				out = append(out, bucketScan{key: keycodec.ExpKeyN(t.Name, s16, shard, t.EffectiveExpShards())})
@@ -369,6 +412,39 @@ func (s *RowStream) buildGroup(from, to int) []bucketScan {
 		}
 	}
 	return out
+}
+
+// eqBucketsAt 该 slot 该值的读桶集合（分裂状态感知）。
+func (s *RowStream) eqBucketsAt(slot uint16, encVal string) []int {
+	if !s.bmHotEq || s.exec.bm == nil {
+		return []int{0}
+	}
+	sh, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID, slot)
+	if err != nil {
+		return []int{0} // 读不出按默认桶（写路径 CAS 保证不丢数据，读侧退化不多错）
+	}
+	return sh.ReadBucketsEq(keycodec.EscapeValue(encVal))
+}
+
+// rangeBucketsAt 该 slot 范围谓词覆盖的桶集合。
+func (s *RowStream) rangeBucketsAt(slot uint16) []int {
+	if !s.bmHotRange || s.exec.bm == nil {
+		return []int{0}
+	}
+	sh, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID, slot)
+	if err != nil {
+		return []int{0}
+	}
+	r := s.req.Ranges[s.rangeIdx]
+	lo, hi := r.Lo, r.Hi
+	// 开区间边界微调用于重叠判定（开区间贴边桶需排除）
+	if r.LoOpen {
+		lo = math.Nextafter(lo, math.Inf(1))
+	}
+	if r.HiOpen {
+		hi = math.Nextafter(hi, math.Inf(-1))
+	}
+	return sh.ReadBucketsRange(lo, hi)
 }
 
 // pageCmd 生成一桶一页的命令（ZRANGE 家族，带 LIMIT——有界纪律 docs/04 §4.1）。

@@ -1,35 +1,38 @@
 -- @name write_row
--- @version 2
--- @keys_desc KEYS[1]=row_key(router); KEYS[2..n-3]=bucket_keys; KEYS[n-2]=exp; KEYS[n-1]=cnt; KEYS[n]=rcpt
+-- @version 3
+-- @keys_desc KEYS[1]=row_key(router); KEYS[2..n-3]=bucket/bm_keys; KEYS[n-2]=exp; KEYS[n-1]=cnt; KEYS[n]=rcpt
 -- @idempotent true
 --
 -- 单行写入（INSERT/UPDATE/DELETE/UPSERT 全分支，docs/05 §5.1）。
--- 原子完成：读旧行 → 撤旧索引 → 写新行 → 建新索引 → 登记过期 → 维护回执与计数。
+-- 原子完成：读旧行 → 版本/状态 CAS 预检 → 撤旧索引 → 写新行 → 建新索引 →
+-- 登记过期 → 维护回执与计数。
 --
--- ARGV 协议（描述符中的桶序号是桶段 KEYS[2..n-3] 的相对序号，1 起；0 = 无）：
+-- ARGV 协议（v3：描述符 8 字段；桶段 KEYS[2..n-3] 相对序号 1 起；0 = 无）：
 --   [1] op: "W"=写入（含 upsert 分支） / "D"=删除
 --   [2] pk
 --   [3] ttl_ms（"0"=无 TTL）
 --   [4] now_sec（过期登记册 score 基准，秒）
 --   [5] expected_old_ver（"-1"=不校验；与行内 _ver 不符返回 stale）
 --   [6] M = 索引描述符个数
---   每个索引 6 字段（顺序消费）：
---     kind("E"=等值/"R"=范围/"L"=字典序副本/"A"=异步日志)  —— v1 同步分支同为
---                                              ZREM/ZADD，kind 区分同步与异步
+--   每个索引 8 字段（顺序消费）：
+--     kind("E"=等值/"R"=范围/"L"=字典序副本/"A"=异步日志)
 --     undo_key_idx, undo_member,
 --     redo_key_idx, redo_member, redo_score（范围桶用；其余为 "0"）
---     异步（A）：无 undo；redo_key 为日志 key，redo_member = pk\x1f旧值\x1f新值，
---              Lua 追加 newVer 后 RPUSH；日志容量超硬上限返回 {"log_full"} 背压
+--     bm_key_idx, bm_version —— BucketMap 分片版本 CAS（分裂状态一致性，
+--       docs/08 §8.3：预检不符返回 stale；0 = 该校验位关闭）
+--     异步（A）：无 undo；redo_key 为日志 key，redo_member = pk\x1f旧值\x1f新值
 --   W 追加：F = 字段数，F×(field, value)
 --   W 追加：U = 唯一预约数，U×(index_id, reservation_key)（记入回执 __uniq: 字段）
 --
--- 返回：{"ok", old_ver, new_ver} 或 {"stale", old_ver}
+-- 返回：{"ok", old_ver, new_ver} / {"stale", old_ver} / {"log_full", old_ver}
 --
--- 跨脚本不变式（docs/05 §5.6、docs/07 §7.3）：
+-- 跨脚本不变式（docs/05 §5.6、docs/07 §7.3、docs/08 §8.3）：
 --   - 复活语义：旧行空但 rcpt 存在 = 主键复活，cnt 不 INCR（原 INCR 仍成立，
 --     exp 已被本次覆盖，sweeper 不会再 DECR）——平衡由 sweep_batch.lua 的
---     "ZSCORE exp > now 则跳过" 复查保证，无复查则会 DECR 错账 + 误删新回执。
+--     "ZSCORE exp > now 则跳过" 复查保证。
 --   - ZSet member 去重天然幂等：重复应用同一写入不产生重复索引条目。
+--   - bm 版本 CAS 必须在一切写操作之前（Lua 无回滚，中途返回即部分提交）；
+--     分裂窗口的双写规则由调用方按 SPLITTING/DRAINING 展开 redo 描述符。
 
 local rowkey  = KEYS[1]
 local nkeys   = #KEYS
@@ -57,7 +60,7 @@ if expectOld >= 0 and oldVer ~= expectOld then
   return {'stale', tostring(oldVer)}
 end
 
--- 解析索引描述符
+-- 解析索引描述符（8 字段）
 local p = 7
 local descs = {}
 for i = 1, M do
@@ -68,12 +71,24 @@ for i = 1, M do
     redoKey    = tonumber(ARGV[p+3]),
     redoMember = ARGV[p+4],
     redoScore  = tonumber(ARGV[p+5]),
+    bmKey      = tonumber(ARGV[p+6]),
+    bmVer      = tonumber(ARGV[p+7]),
   }
-  p = p + 6
+  p = p + 8
 end
 
--- 异步日志容量预检（必须在任何写操作之前——Lua 无回滚，中途返回即部分提交）：
--- 日志超硬上限 → log_full 背压（docs/05 §5.2），配置化挂点 async_log_capacity。
+-- 预检一：BucketMap 版本 CAS（分裂状态一致性；先于此后的任何写操作）
+for i = 1, M do
+  local d = descs[i]
+  if d.bmKey > 0 then
+    local v = tonumber(redis.call('HGET', KEYS[1 + d.bmKey], 'version') or '0')
+    if v ~= d.bmVer then
+      return {'stale', tostring(oldVer)}
+    end
+  end
+end
+
+-- 预检二：异步日志容量（Lua 无回滚，必须先查后写；配置化挂点 async_log_capacity）
 for i = 1, M do
   local d = descs[i]
   if d.kind == 'A' and d.redoKey > 0 then
@@ -124,7 +139,7 @@ for i = 1, F do
   p = p + 2
 end
 
--- 建新索引（同步分支）
+-- 建新索引（同步分支；SPLITTING 双写/DRAINING 仅子桶由描述符展开给出）
 for i = 1, M do
   local d = descs[i]
   if d.redoKey > 0 and d.kind ~= 'A' then
@@ -155,7 +170,7 @@ if ttlms > 0 then
   redis.call('DEL', rcptkey)
   for i = 1, M do
     local d = descs[i]
-    if d.redoKey > 0 then
+    if d.redoKey > 0 and d.kind ~= 'A' then
       redis.call('HSET', rcptkey, 'idx:' .. i,
         KEYS[1 + d.redoKey] .. string.char(31) .. d.redoMember)
     end
