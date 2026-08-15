@@ -41,7 +41,7 @@ func newTestServer(t *testing.T) (string, engine.Deps, func()) {
 	// 借 server.Config.Listener 走随机端口（gms 支持自定义 listener）
 	srv, err := newServerWithListener(deps, kidb.Bootstrap{
 		Accounts: []kidb.Account{{User: "root", Host: "%", Password: "", Role: "rw"}},
-	}, l)
+	}, l, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestGatewayRO(t *testing.T) {
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	srv, err := newServerWithListener(deps, kidb.Bootstrap{
 		Accounts: []kidb.Account{{User: "ro", Host: "%", Password: "", Role: "ro"}},
-	}, l)
+	}, l, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,7 @@
 // kidb-server 是 KiDB 的 MySQL 协议网关进程（docs/11 §11.2：唯一产品形态）。
 //
-// 接线：引导参数 → adapter/goredis（构建期链接的参考适配器）→ 内核组件
-// （meta/exec/txguard）→ engine（go-mysql-server）→ gateway（分类拦截 + 认证）。
+// 接线：引导参数 → DI 图（di.InitializeServer，google/wire 编译期注入）——
+// 适配器/内核/引擎/网关/后台角色全部组件由 DI 装配，本文件只解析参数。
 package main
 
 import (
@@ -16,14 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"kidb"
-	"kidb/adapter/goredis"
-	"kidb/bucketmap"
-	"kidb/engine"
-	"kidb/exec"
-	"kidb/gateway"
-	"kidb/meta"
-	"kidb/metrics"
-	"kidb/txguard"
+	"kidb/di"
 )
 
 func main() {
@@ -59,26 +52,12 @@ func main() {
 		})
 	}
 
-	// 内核接线
-	cli := goredis.New(boot.Addrs, goredis.Options{
-		PoolSize:     boot.PoolSize,
-		ReadTimeout:  boot.ReadTimeout,
-		WriteTimeout: boot.WriteTimeout,
-		ReplicaRead:  boot.ReplicaRead,
-	})
-	k, err := kidb.NewKernel(cli, boot) // 能力探测：EVAL 必须（docs/09 §9.4）
+	// DI 装配（唯一入口，docs/01 §1.6；指标暴露为进程级可选端点）
+	srv, err := di.InitializeServer(boot)
 	if err != nil {
-		slog.Error("内核启动失败", "err", err)
+		slog.Error("kidb-server 启动失败", "err", err)
 		os.Exit(1)
 	}
-	defer k.Close()
-
-	store := meta.NewCatalogStore(cli, k.Scripts())
-	bm := bucketmap.New(cli, k.Scripts())
-	ex := exec.New(cli, k.Scripts())
-	// 指标装配（docs/10 §10.3：默认 prometheus registry；-metrics-addr 暴露 /metrics）
-	m := metrics.New(nil)
-	ex.SetMetrics(m)
 	if *metricsAddr != "" {
 		go func() {
 			mux := http.NewServeMux()
@@ -87,19 +66,6 @@ func main() {
 				slog.Error("metrics 端点退出", "err", err)
 			}
 		}()
-	}
-	deps := engine.Deps{
-		Client: cli,
-		Reg:    k.Scripts(),
-		Store:  store,
-		Cache:  meta.NewCatalogCache(store),
-		Exec:   ex,
-		Guard:  txguard.New(cli, k.Scripts(), bm),
-	}
-	srv, err := gateway.NewServer(deps, boot)
-	if err != nil {
-		slog.Error("网关启动失败", "err", err)
-		os.Exit(1)
 	}
 
 	slog.Info("kidb-server 启动", "listen", boot.ListenAddr, "redis", boot.Addrs, "rwOnly", boot.ReadWriteOnly)

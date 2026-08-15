@@ -16,33 +16,44 @@ import (
 	"github.com/dolthub/vitess/go/mysql"
 
 	"kidb"
+	"kidb/bucketmap"
 	"kidb/config"
-	"kidb/controller"
 	"kidb/engine"
 )
 
 // Server 是 KiDB 网关进程内组装体（docs/02）：gms wire server + 后台角色。
 type Server struct {
-	srv  *server.Server
-	deps engine.Deps
-	cfg  *config.Store // 配置存储（SET GLOBAL 持久化桥 + 远端变更轮询，docs/10 §10.2）
+	srv   *server.Server
+	deps  engine.Deps
+	cfg   *config.Store // 配置存储（SET GLOBAL 持久化桥 + 远端变更轮询，docs/10 §10.2）
+	roles *Roles        // 后台角色（nil = ReadWriteOnly 豁免，docs/08 §8.5）
 
-	// 后台角色（docs/08 §8.5；ReadWriteOnly 豁免）
 	roleCancel context.CancelFunc
-	elector    *controller.Elector
-	manager    *controller.Manager
-	jobrunner  *controller.JobRunner
 }
 
-// NewServer 组装网关：引擎 + wire server + 账号/变量/后台角色。
-func NewServer(deps engine.Deps, boot kidb.Bootstrap) (*Server, error) {
-	return newServerWithListener(deps, boot, nil)
+// ConfigActor 配置变更的修改者标识（cfg:global _audit 字段）。
+const ConfigActor = "kidb-server"
+
+// NewServer 组装网关（DI 入口）：引擎 + wire server + 账号/变量/后台角色。
+// roles 为 nil 且非 ReadWriteOnly 时由本函数装配（测试路径）；
+// 生产路径 DI 图（di.ProvideRoles）按 ReadWriteOnly 决定构造与否。
+func NewServer(deps engine.Deps, boot kidb.Bootstrap, roles *Roles, cfgStore *config.Store) (*Server, error) {
+	return newServerWithListener(deps, boot, nil, roles, cfgStore)
 }
 
 // newServerWithListener 允许注入自定义 listener（测试走随机端口）。
-func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener) (*Server, error) {
-	// 全扫闸门（docs/07 §7.4）：引擎层全扫的唯一执法点
-	deps.FullscanGate = engine.NewFullscanGate(deps.Exec.Metrics())
+func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener, roles *Roles, cfgStore *config.Store) (*Server, error) {
+	// 全扫闸门（docs/07 §7.4）：引擎层全扫的唯一执法点（nil = 装配缺口，补齐）
+	if deps.FullscanGate == nil {
+		deps.FullscanGate = engine.NewFullscanGate(deps.Exec.Metrics())
+	}
+	if cfgStore == nil {
+		cfgStore = config.New(deps.Client, deps.Reg, ConfigActor)
+	}
+	if roles == nil && !boot.ReadWriteOnly {
+		roles = AssembleRoles(deps.Client, deps.Reg, deps.Store, deps.Cache, deps.Exec,
+			bucketmap.New(deps.Client, deps.Reg))
+	}
 	eng, _, err := engine.Build(deps)
 	if err != nil {
 		return nil, err
@@ -59,8 +70,9 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 	}
 
 	s := &Server{
-		deps: deps,
-		cfg:  config.New(deps.Client, deps.Reg, "kidb-server"),
+		deps:  deps,
+		cfg:   cfgStore,
+		roles: roles,
 	}
 
 	// 会话构造：engine.Session（角色 + 配置存储句柄；事务显式拒绝内建于类型）
@@ -111,7 +123,7 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 	go s.pollSysvars(context.Background())
 
 	// 后台角色自动选举（docs/08 §8.5：默认参与，ReadWriteOnly 显式豁免）
-	if !boot.ReadWriteOnly {
+	if s.roles != nil {
 		s.startRoles(context.Background())
 	}
 	return s, nil

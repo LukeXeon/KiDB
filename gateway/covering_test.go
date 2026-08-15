@@ -106,7 +106,7 @@ func TestCoveringWire(t *testing.T) {
 	require.NoError(t, err)
 	srv, err := newServerWithListener(deps, kidb.Bootstrap{
 		Accounts: []kidb.Account{{User: "root", Host: "%", Password: "", Role: "rw"}},
-	}, l)
+	}, l, nil, nil)
 	require.NoError(t, err)
 	go srv.Start()
 	defer srv.Close()

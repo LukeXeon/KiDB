@@ -5,20 +5,46 @@ import (
 	"fmt"
 	"time"
 
+	"kidb"
 	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/engine"
+	"kidb/exec"
 	"kidb/indexer"
 	"kidb/keycodec"
+	"kidb/meta"
 	"kidb/nearcache"
+	"kidb/script"
 	"kidb/sweeper"
-	"kidb/telemetry"
 	"kidb/tuning"
 )
 
-// roles.go：后台角色的装配与驱动（docs/08 §8.5）：
-// 所有节点默认参与；ReadWriteOnly 节点经 Bootstrap 显式豁免。
+// roles.go：后台角色（docs/08 §8.5）的组件装配与循环驱动。
+// 所有节点默认参与；ReadWriteOnly 节点豁免（DI 层不构造 Roles）。
 // 锁即选举 + watchdog 续约；全部角色故障安全（全挂只会变慢，不出错行）。
+
+// Roles 后台角色组件集（DI 图节点：wire provider 与测试共用 AssembleRoles）。
+type Roles struct {
+	Elector   *controller.Elector
+	Manager   *controller.Manager
+	JobRunner *controller.JobRunner
+	Sweeper   *sweeper.Sweeper
+	Indexer   *indexer.Indexer
+}
+
+// AssembleRoles 后台角色组件的唯一构造函数（单一装配点纪律）：
+// 自治链路 = 遥测采样 → 候选登记 → Controller 复核分裂/L4 → DDL 作业巡检。
+// 读路径附件（telemetry/bm/l4/L1 近缓存）的 executor 接线在 DI executor
+// provider 完成（di.ProvideExecutor），不在本函数。
+func AssembleRoles(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store) *Roles {
+	return &Roles{
+		Elector:   controller.CtrlLock(cli, reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano())),
+		Manager:   controller.NewManager(cli, bm, controller.NewSplitter(cli, reg, bm), controller.NewL4(cli, reg)),
+		JobRunner: controller.NewJobRunner(cli, store, cache, ex, bm),
+		Sweeper:   sweeper.New(cli, reg),
+		Indexer:   indexer.New(cli),
+	}
+}
 
 // 周期/区间取自 tuning.toml（sweeper.tick_ms / sweep_range_slots；indexer 100ms）。
 var (
@@ -27,32 +53,18 @@ var (
 	sweepRange  = tuning.Get().Sweeper.SweepRangeSlots
 )
 
-// startRoles 启动后台角色循环（ReadWriteOnly 豁免）。
+// startRoles 启动后台角色循环。
 func (s *Server) startRoles(ctx context.Context) {
 	if s.roleCancel != nil {
 		return
 	}
 	roleCtx, cancel := context.WithCancel(ctx)
 	s.roleCancel = cancel
-	s.elector = controller.CtrlLock(s.deps.Client, s.deps.Reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano()))
 
-	// 自治链路：遥测采样 → 候选登记 → Controller 复核分裂/L4
-	rec := telemetry.New(s.deps.Client)
-	s.deps.Exec.SetTelemetry(rec)
-	bm := bucketmap.New(s.deps.Client, s.deps.Reg)
-	s.deps.Exec.SetBucketMap(bm)
-	spl := controller.NewSplitter(s.deps.Client, s.deps.Reg, bm)
-	l4 := controller.NewL4(s.deps.Client, s.deps.Reg)
-	s.deps.Exec.SetL4(l4)
-	s.manager = controller.NewManager(s.deps.Client, bm, spl, l4)
-	s.jobrunner = controller.NewJobRunner(s.deps.Client, s.deps.Store, s.deps.Cache, s.deps.Exec, bm)
-
-	// 读路径开关装配（docs/01 §1.0：变量只承载语义开关——replica_read /
-	// hotkey_row_cache；L1/L2 常量装配一次到位：3s/10000，调优参数不设变量）。
-	s.deps.Exec.SetNearCache(nearcache.NewSharded[[]string](tuning.Get().Nearcache.Capacity, tuning.Get().NearcacheTTL()))
+	// 语义开关轮询装配（L3 副本读 / 行级近缓存；值读 gms 注册表）
 	s.attachSemanticSwitches(roleCtx)
 
-	go s.elector.Campaign(roleCtx, s.controllerRole)
+	go s.roles.Elector.Campaign(roleCtx, s.controllerRole)
 	go s.sweeperLoop(roleCtx)
 	go s.indexerLoop(roleCtx)
 }
@@ -107,15 +119,14 @@ func (s *Server) controllerRole(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			_ = s.manager.Tick(ctx)   // 错误不致命：下轮再来（故障安全）
-			_ = s.jobrunner.Tick(ctx) // DDL 作业巡检（docs/06 §6.3）
+			_ = s.roles.Manager.Tick(ctx)   // 错误不致命：下轮再来（故障安全）
+			_ = s.roles.JobRunner.Tick(ctx) // DDL 作业巡检（docs/06 §6.3）
 		}
 	}
 }
 
 // sweeperLoop 过期清扫：slot 区间分摊（锁隔离），逐区间驱动。
 func (s *Server) sweeperLoop(ctx context.Context) {
-	sw := sweeper.New(s.deps.Client, s.deps.Reg)
 	for {
 		select {
 		case <-ctx.Done():
@@ -144,7 +155,7 @@ func (s *Server) sweeperLoop(ctx context.Context) {
 					continue
 				}
 				for slot := start; slot < start+sweepRange; slot++ {
-					if _, err := sw.SweepSlot(ctx, def, uint16(slot)); err != nil {
+					if _, err := s.roles.Sweeper.SweepSlot(ctx, def, uint16(slot)); err != nil {
 						break // 本区间出错（如节点宕机）→ 下区间继续，不堵全局
 					}
 				}
@@ -156,7 +167,6 @@ func (s *Server) sweeperLoop(ctx context.Context) {
 
 // indexerLoop 异步索引日志消费（无锁：LRANGE+LTRIM 并发重复消费由 ZSet 幂等吸收）。
 func (s *Server) indexerLoop(ctx context.Context) {
-	ix := indexer.New(s.deps.Client)
 	for {
 		select {
 		case <-ctx.Done():
@@ -182,7 +192,7 @@ func (s *Server) indexerLoop(ctx context.Context) {
 					if ctx.Err() != nil {
 						return
 					}
-					if _, err := ix.ConsumeLog(ctx, def, idx, uint16(slot)); err != nil {
+					if _, err := s.roles.Indexer.ConsumeLog(ctx, def, idx, uint16(slot)); err != nil {
 						break
 					}
 				}
