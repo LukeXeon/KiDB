@@ -47,6 +47,7 @@
 - **慢查询日志**：网关 ComQuery 统一计时包装——超 `slow_query_threshold_ms`（新变量，默认 500ms）记录语句指纹（NormalizeDigest）/路由/行数/耗时；全扫放行（hint/白名单）与阈值无关强制告警；新增 `slow_queries_total{route}` 指标。配套补上 **cmd 指标装配缺口**（metrics 包此前只在测试接线）：`metrics.New(nil)` 入 exec + `-metrics-addr` 可选 /metrics HTTP 端点。
 - **EXPLAIN 自定义输出**：网关接管 `EXPLAIN SELECT`（两列 item/detail 计划展示：命中路径/索引 ID/扇出估算/L1-L2 标记/守卫判定）；计划推断与执行共用同一套 AST 形态分析；接管点必须在快速路径之前（否则 `EXPLAIN SELECT COUNT(*)` 会被真执行——测试钉死）。
 - **plan cache 判定缓存**：指纹（NormalizeDigest，lexer 级归一）→ 网关判定产物（fastpath 形状 + 守卫放行），条目绑定全局 schema 版本（lease 内零 RTT 比对，惰性精确失效）；全扫依赖判定不进缓存（随 query_allow_fullscan_tables 漂移）；LRU 容量 `plan_cache_capacity` 热更。顺带：fastpath/guard 双份 TiDB 解析合并为单 parse 联合评估；**补齐预处理语句执法缺口**（ComPrepare 此前绕过事务拒绝/ro/守卫直达引擎，现 PREPARE 期完成全部分类与判定；DDL 不支持预处理协议明确报错）。
+- **全扫/回填限流通道**：引入 `golang.org/x/time/rate`——DDL 回填按 `ddl_backfill_rate_limit`（默认 1 万行/s/实例）经 rate.Limiter 限速（JobRunner.flush 按行申请额度）；全扫并发信号量（`query_fullscan_rate_limit` 默认 10，超限排队而非击穿集群，ctx 取消贯穿，槽位随 EOF/Close 释放）。两变量经配置轮询热更。
 
 ## v5.0（文档全面革新，docs/ 现行版本基线）
 

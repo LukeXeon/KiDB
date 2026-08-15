@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -202,6 +203,8 @@ type Executor struct {
 	replicaRead   atomic.Bool        // L3 副本读开关（SetReplicaRead；docs/08 §8.4）
 	rowCache      RowCache           // 行级近缓存（nil = 关闭，默认关闭；hotkey_row_cache 变量驱动）
 	sf            singleflight.Group // L2 请求合并（docs/08 §8.4：同指纹并发合并；随 L1 装配生效）
+	fsMu          sync.Mutex
+	fsSem         chan struct{} // 全扫并发信号量（query_fullscan_rate_limit，docs/07 §7.4 限流通道）
 	batch         int
 	slotsPerRound int
 }
@@ -280,7 +283,34 @@ type TelemetrySink interface {
 
 // New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
 func New(cli kidb.KvClient, reg *script.Registry) *Executor {
-	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound}
+	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound,
+		fsSem: make(chan struct{}, 10)}
+}
+
+// SetFullscanLimit 全扫并发上限热更（query_fullscan_rate_limit 变量驱动）。
+// 换通道只影响新查询；在途全扫持有旧通道引用，释放各归其道。
+func (e *Executor) SetFullscanLimit(n int) {
+	if n <= 0 {
+		n = 1
+	}
+	e.fsMu.Lock()
+	defer e.fsMu.Unlock()
+	if cap(e.fsSem) != n {
+		e.fsSem = make(chan struct{}, n)
+	}
+}
+
+// acquireFullscan 获取全扫槽位（ctx 取消贯穿，契约 R6）。
+func (e *Executor) acquireFullscan(ctx context.Context) (chan struct{}, error) {
+	e.fsMu.Lock()
+	sem := e.fsSem
+	e.fsMu.Unlock()
+	select {
+	case sem <- struct{}{}:
+		return sem, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // SetNearCache 接入 L1（nearcache_ttl 变量热更新的挂点）。
@@ -319,6 +349,8 @@ type RowStream struct {
 
 	om *orderedMerger // RangeLookup 当前区间的归并器（topk.go）
 	lm *lexMerger     // PrefixLookup 的归并器（prefix.go）
+
+	fsSem chan struct{} // 全扫限流槽位（持有至 EOF/Close，docs/07 §7.4）
 
 	startedAt time.Time // 首个 Next 时间（query_duration_seconds 挂点）
 }
@@ -480,6 +512,7 @@ func (s *RowStream) Next() ([]any, error) {
 				if s.ncFP != "" && s.ncCached == nil && s.exec.nc != nil {
 					s.exec.nc.Add(s.ncFP, s.ncCollect)
 				}
+				s.releaseFullscan()
 				s.err = io.EOF
 			}
 			return nil, err
@@ -491,10 +524,19 @@ func (s *RowStream) Next() ([]any, error) {
 func (s *RowStream) Close() error {
 	s.closed = true
 	s.rows = nil
+	s.releaseFullscan()
 	if s.exec.m != nil && !s.startedAt.IsZero() {
 		s.exec.m.QueryDuration.WithLabelValues(s.planName()).Observe(time.Since(s.startedAt).Seconds())
 	}
 	return nil
+}
+
+// releaseFullscan 释放全扫限流槽位（幂等）。
+func (s *RowStream) releaseFullscan() {
+	if s.fsSem != nil {
+		<-s.fsSem
+		s.fsSem = nil
+	}
 }
 
 // planName 返回计划名（query_duration_seconds{plan} 标签）。
@@ -549,6 +591,14 @@ func (s *RowStream) fillPointGet() error {
 // （RangeLookup 不走这里——全局有序归但见 topk.go；本路径服务 EqLookup/FullScan。）
 func (s *RowStream) fillScatter() error {
 	e := s.exec
+	// 全扫限流通道（docs/07 §7.4）：首个 fill 获取槽位，EOF/Close 释放
+	if s.req.Kind == FullScan && s.fsSem == nil {
+		sem, err := e.acquireFullscan(s.ctx)
+		if err != nil {
+			return err
+		}
+		s.fsSem = sem
+	}
 	for {
 		if err := s.ctx.Err(); err != nil {
 			return err

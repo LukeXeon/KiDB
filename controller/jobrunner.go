@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"kidb"
 	"kidb/bucketmap"
 	"kidb/exec"
@@ -26,11 +28,21 @@ type JobRunner struct {
 	bm         *bucketmap.Store
 	slotsPerT  int           // 每批处理的 slot 数
 	tickBudget time.Duration // 每 tick 回填时间预算
+	bfLimit    *rate.Limiter // 回填行速率（ddl_backfill_rate_limit 行/s/实例，docs/06 §6.3）
 }
 
 // NewJobRunner 构造（tickBudget 每 tick 回填时间预算，默认 500ms）。
 func NewJobRunner(cli kidb.KvClient, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store) *JobRunner {
-	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: 256, tickBudget: 500 * time.Millisecond}
+	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: 256, tickBudget: 500 * time.Millisecond,
+		bfLimit: rate.NewLimiter(rate.Limit(10000), 1024)}
+}
+
+// SetBackfillRate 回填速率热更（行/s/实例；gateway 轮询 ddl_backfill_rate_limit 驱动）。
+func (r *JobRunner) SetBackfillRate(rowsPerSec int) {
+	if rowsPerSec <= 0 {
+		return
+	}
+	r.bfLimit.SetLimit(rate.Limit(rowsPerSec))
 }
 
 // Tick 巡检一轮：所有表的进行中作业各推进一个批次。
@@ -120,12 +132,19 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 	s := r.exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, SlotLo: lo, SlotHi: hi})
 	defer s.Close()
 	var cmds []kidb.Cmd
+	rowsInFlight := 0
 	flush := func() error {
 		if len(cmds) == 0 {
 			return nil
 		}
+		// 回填限速（docs/06 §6.3：ddl_backfill_rate_limit 行/s/实例，
+		// 对在线读写的影响有上限）——按行计额度，ctx 取消贯穿
+		if err := r.bfLimit.WaitN(ctx, rowsInFlight); err != nil {
+			return err
+		}
 		_, err := r.cli.Pipeline(ctx, cmds)
 		cmds = cmds[:0]
+		rowsInFlight = 0
 		return err
 	}
 	for {
@@ -171,6 +190,7 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		}
 		member := rowcodec.EncodeMember(pk, covers)
 		slot := keycodec.Slot(keycodec.RowKey(def.Name, pk))
+		rowsInFlight++
 		switch idx.Kind {
 		case meta.IndexRange:
 			score, err := rowcodec.ScoreOf(colDef.Type, enc)

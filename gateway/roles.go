@@ -94,6 +94,17 @@ func (s *Server) attachReadPathSwitches(ctx context.Context) {
 				s.plans.resize(n)
 			}
 		}
+		// 限流通道热更（docs/07 §7.4 + docs/06 §6.3）
+		if v, _, err := s.cfg.Get(ctx, "query_fullscan_rate_limit"); err == nil {
+			if n, perr := strconv.Atoi(v); perr == nil {
+				s.deps.Exec.SetFullscanLimit(n)
+			}
+		}
+		if v, _, err := s.cfg.Get(ctx, "ddl_backfill_rate_limit"); err == nil {
+			if n, perr := strconv.Atoi(v); perr == nil {
+				s.jobrunner.SetBackfillRate(n)
+			}
+		}
 	}
 	apply()
 	go func() {

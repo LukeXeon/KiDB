@@ -85,7 +85,7 @@ FullScan(table, filter) RowIter:
 1. SQL hint：`SELECT /*+ FULLSCAN */ ...`（网关解析后改写执行计划放行）；
 2. 全局变量 `query_allow_fullscan_tables`（`SET GLOBAL ... = 't1,t2'`，表白名单，[10](10-配置与可观测.md) §10.2）。
 
-开启后仍走限流通道（`golang.org/x/time/rate`，默认 10 并发全扫/集群），命中慢查询告警与 `fullscan_fallback_total` 指标。
+开启后仍走限流通道（实现：exec 全扫并发信号量，`query_fullscan_rate_limit` 默认 10 并发/实例，超限查询排队、ctx 取消贯穿），命中慢查询告警与 `fullscan_fallback_total` 指标。
 
 **16384 扇出优化**：按 slot→节点归并后经逻辑 pipeline 发出。登记册分片数 `#{n}`（§7.2）与 slot 数正交：遍历时扇出 = 16384 × n，大表细分的代价是扇出同倍放大，由限流通道吸收。
 
