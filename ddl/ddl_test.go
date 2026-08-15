@@ -16,8 +16,8 @@ func TestParseCreateTable(t *testing.T) {
   profile JSON,
   PRIMARY KEY (uid),
   INDEX idx_age (age),
-  UNIQUE KEY uk_token (token) COMMENT 'kidb:{"prefix_copy":true}'
-) COMMENT 'kidb:{"default_ttl":86400,"max_row_bytes":1048576,"exp_shards":16}'`)
+  UNIQUE KEY uk_token (token)
+) COMMENT 'kidb:{"default_ttl":86400}'`)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestParseCreateTable(t *testing.T) {
 	if d.Name != "sessions" || d.PK != "uid" {
 		t.Fatalf("def = %+v", d)
 	}
-	if d.DefaultTTL != 86400 || d.MaxRowBytes != 1048576 || d.ExpShards != 16 {
+	if d.DefaultTTL != 86400 {
 		t.Fatalf("kidb 表选项未解析: %+v", d)
 	}
 	if len(d.Columns) != 4 || d.Columns[3].Type != meta.ColJSON {
@@ -42,6 +42,7 @@ func TestParseCreateTable(t *testing.T) {
 		t.Fatalf("idx_age = %+v", age)
 	}
 	tok := d.Index("uk_token")
+	// 字符串唯一索引自动带字典序副本（docs/01 §1.0：无需 prefix_copy 声明）
 	if tok == nil || tok.Kind != meta.IndexUnique || !tok.PrefixCopy {
 		t.Fatalf("uk_token = %+v", tok)
 	}

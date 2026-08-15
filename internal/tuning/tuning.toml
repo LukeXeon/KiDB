@@ -11,6 +11,7 @@
 [gateway]
 slow_query_threshold_ms = 500   # 慢查询日志阈值
 plan_cache_capacity     = 1024  # 判定缓存 LRU 容量
+dimension_max_rows      = 100000 # 档 2 维表广播的行数上限（实时行数自动判定）
 
 [nearcache]
 ttl_ms        = 3000   # L1 谓词指纹缓存 TTL
@@ -50,6 +51,7 @@ sweep_range_slots     = 1024    # slot 区间锁粒度
 stale_retries        = 3      # BucketMap/行版本冲突整体重试上限
 async_log_capacity   = 100000 # 异步索引日志容量上限/slot（背压）
 async_log_alert_ratio = 0.8   # 日志水位告警比例
+max_row_bytes        = 1048576 # 单行体积上限（大 key 防线，须显著低于 8MB 迁移红线）
 
 [telemetry]
 sample_ratio = 64 # 采样率 1/64（数据语义常量：改动改变存量统计口径）

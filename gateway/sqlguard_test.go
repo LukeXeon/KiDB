@@ -9,6 +9,8 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
+
+	"kidb/internal/tuning"
 )
 
 // TestGuardJoinTiers JOIN 分档执法（docs/04 §4.4）：
@@ -27,6 +29,9 @@ func TestGuardJoinTiers(t *testing.T) {
 		_, err := db.ExecContext(ctx, q)
 		require.NoError(t, err, q)
 	}
+	// 档 2 阈值压到 1：3 行的 users 超阈（默认 10 万内会被当维表放行——
+	// 本测试压的是档位判定本身，不是维表通路）
+	tuning.OverrideForTest(t, func(tn *tuning.Tuning) { tn.Gateway.DimensionMaxRows = 1 })
 	execSQL("CREATE TABLE orders (oid BIGINT PRIMARY KEY, uid BIGINT, amount INT)")
 	execSQL("CREATE TABLE users (uid BIGINT PRIMARY KEY, name VARCHAR(32))")
 	execSQL("INSERT INTO orders VALUES (1, 100, 50), (2, 100, 60), (3, 200, 70)")
@@ -122,7 +127,8 @@ func TestMultiRowPartialDetail(t *testing.T) {
 		_, err := db.ExecContext(ctx, q)
 		require.NoError(t, err, q)
 	}
-	execSQL("CREATE TABLE mr (id BIGINT PRIMARY KEY, v VARCHAR(16)) COMMENT 'kidb:{\"max_row_bytes\":64}'")
+	tuning.OverrideForTest(t, func(tn *tuning.Tuning) { tn.Txguard.MaxRowBytes = 64 }) // 行体积防线（tuning.toml）
+	execSQL("CREATE TABLE mr (id BIGINT PRIMARY KEY, v VARCHAR(16)) COMMENT 'kidb:{}'")
 	execSQL("INSERT INTO mr VALUES (1, 'a')")
 
 	// 多行 INSERT 中途唯一冲突：MySQL 惯例 1062 纯错误

@@ -23,7 +23,6 @@ func TestCatalogSaveLoad(t *testing.T) {
 		Indexes: []IndexDef{
 			{ID: "idx_city", Columns: []string{"city"}, Kind: IndexEq},
 		},
-		ExpShards: 1,
 	}
 	if err := store.Save(ctx, def, 0); err != nil {
 		t.Fatalf("Save: %v", err)

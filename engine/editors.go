@@ -8,6 +8,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
+	"kidb/internal/tuning"
 	"kidb/rowcodec"
 	"kidb/txguard"
 )
@@ -226,8 +227,8 @@ func (e *editor) checkRowSize(pk string, fields map[string]string) error {
 	for f, v := range fields {
 		total += len(f) + len(v)
 	}
-	if total > e.t.def.EffectiveMaxRowBytes() {
-		return fmt.Errorf("%w: %d bytes > max_row_bytes=%d", kidb.ErrRowTooLarge, total, e.t.def.EffectiveMaxRowBytes())
+	if lim := tuning.Get().Txguard.MaxRowBytes; total > lim {
+		return fmt.Errorf("%w: %d bytes > max_row_bytes=%d", kidb.ErrRowTooLarge, total, lim)
 	}
 	return nil
 }

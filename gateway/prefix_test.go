@@ -29,7 +29,7 @@ func TestPrefixSearchWire(t *testing.T) {
 		require.NoError(t, err, q)
 	}
 	execSQL("CREATE TABLE shops (id BIGINT NOT NULL, name VARCHAR(64), city VARCHAR(32), PRIMARY KEY (id)) COMMENT 'kidb:{}'")
-	execSQL("CREATE INDEX idx_city ON shops (city) COMMENT 'kidb:{\"prefix_copy\":true}'")
+	execSQL("CREATE INDEX idx_city ON shops (city)")
 	require.Eventually(t, func() bool {
 		rows, qerr := db.QueryContext(ctx, "SELECT id FROM shops WHERE city = '__probe__'")
 		if qerr != nil {

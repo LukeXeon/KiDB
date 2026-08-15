@@ -13,7 +13,7 @@
 | `bm:{table}:{idx}:{stag}` | Hash | BucketMap 分片（稀疏 + 每 slot 分片，[03](03-数据模型与编码.md) §3.1 注记）+ `version` 字段 |
 | `cfg:global` | Hash | 集群配置（[10](10-配置与可观测.md) §10.2）——与元数据共用同一套版本校验刷新循环 |
 
-表级 DDL payload 字段全集（CREATE TABLE COMMENT `kidb:{...}`）：`default_ttl`（秒，0=无）、`max_row_bytes`（默认 1MB，硬上限 4MB）、`expected_rows`（量级声明，驱动 exp 分片预设）、`exp_shards`（默认 1，>10 亿行表 ≥16）、`dimension`（维表标记）。索引级 payload：`covering`（数组）、`async`（bool，唯一索引互斥）、`prefix_copy`（字典序副本）。
+表级 DDL payload 字段全集（CREATE TABLE COMMENT `kidb:{...}`）：**仅 `default_ttl`**（秒，0=无）。索引级 payload：**仅 `covering`（数组，列必须 NOT NULL）与 `async`（bool，唯一索引互斥）**。设计原点纪律（[01](01-定位架构与TiDB对齐.md) §1.0）：调优/容量类不设 payload 字段——行体积上限固定 1MB（tuning.toml `txguard.max_row_bytes`）；exp 登记册细分恒 1（自动细分为自治后续项）；维表判定按实时行数；字典序副本对字符串等值/唯一索引自动开启。
 
 ## 6.2 Schema lease 纪律（移植 TiDB domain/SchemaValidator）
 

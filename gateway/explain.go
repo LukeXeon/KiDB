@@ -81,7 +81,7 @@ func (h *kidbHandler) buildExplain(ctx context.Context, inner string) ([][2]stri
 			case fpCountStar:
 				add("plan", "fastpath:count_star")
 				add("table", fp.table)
-				add("detail", "Σ ZCOUNT(exp, (now, +inf)) over 16384 slots × exp_shards")
+				add("detail", "Σ ZCOUNT(exp, (now, +inf)) over 16384 slots")
 				add("fanout", "16384")
 				return rows, nil
 			case fpMin, fpMax:
@@ -129,7 +129,7 @@ func (h *kidbHandler) buildExplain(ctx context.Context, inner string) ([][2]stri
 			return rows, nil
 		}
 		add("plan", "fullscan")
-		add("fanout", "16384 × exp_shards")
+		add("fanout", "16384")
 		add("guard", fullscanVerdict(ctx, h, def, inner))
 		return rows, nil
 	}

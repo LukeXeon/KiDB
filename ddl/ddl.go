@@ -43,19 +43,19 @@ type Op struct {
 }
 
 // tableOpts 是 CREATE TABLE COMMENT 的 kidb payload（docs/02 §2.4）。
+//
+// 纪律（docs/01 §1.0 设计原点）：payload 只留**语义声明**。
+// 调优/容量类选项全部自动或内置——max_row_bytes 固定 1MB（tuning.toml），
+// exp 登记册细分自动（后续自治项），维表判定按实时行数，字典序副本自动。
+// 严格解析：未知字段报错（"不支持直接报错"优于静默忽略）。
 type tableOpts struct {
-	DefaultTTL   int64  `json:"default_ttl"`
-	MaxRowBytes  int    `json:"max_row_bytes"`
-	ExpectedRows string `json:"expected_rows"`
-	ExpShards    int    `json:"exp_shards"`
-	Dimension    bool   `json:"dimension"`
+	DefaultTTL int64 `json:"default_ttl"` // 行级 TTL 语义（缓存定位的核心语义）
 }
 
-// indexOpts 是索引 COMMENT 的 kidb payload。
+// indexOpts 是索引 COMMENT 的 kidb payload（同样只留语义声明）。
 type indexOpts struct {
-	Covering   []string `json:"covering"`
-	Async      bool     `json:"async"`
-	PrefixCopy bool     `json:"prefix_copy"`
+	Covering []string `json:"covering"` // 覆盖列（存储-延迟权衡的物理设计选择，docs/03 §3.5）
+	Async    bool     `json:"async"`    // 异步索引（最终一致窗口的一致性选择，docs/05 §5.2）
 }
 
 // kidbCommentPrefix 是 KiDB 扩展在 COMMENT 中的前缀。
@@ -190,10 +190,6 @@ func buildCreateTable(s *ast.CreateTableStmt) (*Op, error) {
 	// kidb 表选项（COMMENT 载体；其余表选项如 ENGINE/CHARSET 忽略——KiDB 无此概念）
 	if to := findTableOpts(s.Options); to != nil {
 		def.DefaultTTL = to.DefaultTTL
-		def.MaxRowBytes = to.MaxRowBytes
-		def.ExpectedRows = to.ExpectedRows
-		def.ExpShards = to.ExpShards
-		def.Dimension = to.Dimension
 	}
 	if err := validateTable(def); err != nil {
 		return nil, err
@@ -225,7 +221,6 @@ func buildCreateIndex(s *ast.CreateIndexStmt) (*Op, error) {
 		}
 		idx.Covering = opts.Covering
 		idx.Async = opts.Async
-		idx.PrefixCopy = opts.PrefixCopy
 	}
 	if err := validateIndexShape(idx); err != nil {
 		return nil, err
@@ -251,7 +246,6 @@ func constraintToIndex(con *ast.Constraint) (*meta.IndexDef, error) {
 		}
 		idx.Covering = opts.Covering
 		idx.Async = opts.Async
-		idx.PrefixCopy = opts.PrefixCopy
 	}
 	if idx.ID == "" {
 		return nil, fmt.Errorf("%w: 索引必须命名", kidb.ErrUnsupported)
@@ -274,7 +268,7 @@ func indexPartColumns(parts []*ast.IndexPartSpecification) ([]string, error) {
 			return nil, fmt.Errorf("%w: 表达式索引不支持", kidb.ErrUnsupported)
 		}
 		if p.Length > 0 {
-			return nil, fmt.Errorf("%w: 前缀长度索引不支持（前缀搜索用 prefix_copy）", kidb.ErrUnsupported)
+			return nil, fmt.Errorf("%w: 前缀长度索引不支持（前缀搜索由字典序副本自动承担）", kidb.ErrUnsupported)
 		}
 		cols = append(cols, p.Column.Name.O)
 	}
@@ -321,12 +315,6 @@ func validateTable(t *meta.TableDef) error {
 	}
 	if len(t.Indexes) > 16 {
 		return fmt.Errorf("%w: 单表索引数 %d > 16", kidb.ErrUnsupported, len(t.Indexes))
-	}
-	if t.ExpShards < 0 || t.ExpShards > 64 {
-		return fmt.Errorf("exp_shards %d 超出 [1,64]", t.ExpShards)
-	}
-	if t.MaxRowBytes > 4<<20 {
-		return fmt.Errorf("max_row_bytes %d 超硬上限 4MB（docs/03 §3.4）", t.MaxRowBytes)
 	}
 	seen := map[string]bool{}
 	for i := range t.Indexes {
@@ -376,8 +364,10 @@ func validateIndexAgainstTable(idx *meta.IndexDef, t *meta.TableDef) error {
 			idx.Kind = meta.IndexEq
 		}
 	}
-	if idx.PrefixCopy && col.Type != meta.ColString {
-		return fmt.Errorf("%w: prefix_copy 限字符串列（%s.%s）", kidb.ErrUnsupported, t.Name, col.Name)
+	// 字典序副本自动开启（docs/01 §1.0：前缀搜索开箱即用，无需声明）——
+	// 字符串等值/唯一索引自带 #l 副本（写放大 1 ZADD/写，收益是 LIKE 'abc%' 直答）
+	if idx.Kind != meta.IndexRange && col.Type == meta.ColString {
+		idx.PrefixCopy = true
 	}
 	for _, cc := range idx.Covering {
 		cdef, ok := t.Column(cc)
@@ -424,7 +414,11 @@ func parseTableOpts(comment string) (*tableOpts, error) {
 		return nil, nil
 	}
 	var to tableOpts
-	if err := json.Unmarshal([]byte(v), &to); err != nil {
+	if err := func() error {
+		d := json.NewDecoder(strings.NewReader(v))
+		d.DisallowUnknownFields()
+		return d.Decode(&to)
+	}(); err != nil {
 		return nil, fmt.Errorf("kidb 表选项 JSON 非法: %w", err)
 	}
 	return &to, nil
@@ -436,7 +430,9 @@ func parseIndexOpts(comment string) (*indexOpts, error) {
 		return &indexOpts{}, nil
 	}
 	var io indexOpts
-	if err := json.Unmarshal([]byte(v), &io); err != nil {
+	dec := json.NewDecoder(strings.NewReader(v))
+	dec.DisallowUnknownFields() // 严格解析：未知/已移除字段报错（docs/01 §1.0）
+	if err := dec.Decode(&io); err != nil {
 		return nil, fmt.Errorf("kidb 索引选项 JSON 非法: %w", err)
 	}
 	return &io, nil

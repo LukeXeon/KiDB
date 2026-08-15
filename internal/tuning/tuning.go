@@ -25,6 +25,7 @@ type Tuning struct {
 	Gateway struct {
 		SlowQueryThresholdMs int `toml:"slow_query_threshold_ms"`
 		PlanCacheCapacity    int `toml:"plan_cache_capacity"`
+		DimensionMaxRows     int `toml:"dimension_max_rows"`
 	} `toml:"gateway"`
 	Nearcache struct {
 		TTLMs       int `toml:"ttl_ms"`
@@ -64,6 +65,7 @@ type Tuning struct {
 		StaleRetries       int     `toml:"stale_retries"`
 		AsyncLogCapacity   int     `toml:"async_log_capacity"`
 		AsyncLogAlertRatio float64 `toml:"async_log_alert_ratio"`
+		MaxRowBytes        int     `toml:"max_row_bytes"`
 	} `toml:"txguard"`
 	Telemetry struct {
 		SampleRatio int `toml:"sample_ratio"`

@@ -908,30 +908,6 @@ func (z *TableDef) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "DefaultTTL")
 				return
 			}
-		case "MaxRowBytes":
-			z.MaxRowBytes, err = dc.ReadInt()
-			if err != nil {
-				err = msgp.WrapError(err, "MaxRowBytes")
-				return
-			}
-		case "ExpectedRows":
-			z.ExpectedRows, err = dc.ReadString()
-			if err != nil {
-				err = msgp.WrapError(err, "ExpectedRows")
-				return
-			}
-		case "ExpShards":
-			z.ExpShards, err = dc.ReadInt()
-			if err != nil {
-				err = msgp.WrapError(err, "ExpShards")
-				return
-			}
-		case "Dimension":
-			z.Dimension, err = dc.ReadBool()
-			if err != nil {
-				err = msgp.WrapError(err, "Dimension")
-				return
-			}
 		case "AutoIncrColumn":
 			z.AutoIncrColumn, err = dc.ReadString()
 			if err != nil {
@@ -957,9 +933,9 @@ func (z *TableDef) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *TableDef) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 11
+	// map header, size 7
 	// write "Name"
-	err = en.Append(0x8b, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
+	err = en.Append(0x87, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
 	if err != nil {
 		return
 	}
@@ -1022,46 +998,6 @@ func (z *TableDef) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "DefaultTTL")
 		return
 	}
-	// write "MaxRowBytes"
-	err = en.Append(0xab, 0x4d, 0x61, 0x78, 0x52, 0x6f, 0x77, 0x42, 0x79, 0x74, 0x65, 0x73)
-	if err != nil {
-		return
-	}
-	err = en.WriteInt(z.MaxRowBytes)
-	if err != nil {
-		err = msgp.WrapError(err, "MaxRowBytes")
-		return
-	}
-	// write "ExpectedRows"
-	err = en.Append(0xac, 0x45, 0x78, 0x70, 0x65, 0x63, 0x74, 0x65, 0x64, 0x52, 0x6f, 0x77, 0x73)
-	if err != nil {
-		return
-	}
-	err = en.WriteString(z.ExpectedRows)
-	if err != nil {
-		err = msgp.WrapError(err, "ExpectedRows")
-		return
-	}
-	// write "ExpShards"
-	err = en.Append(0xa9, 0x45, 0x78, 0x70, 0x53, 0x68, 0x61, 0x72, 0x64, 0x73)
-	if err != nil {
-		return
-	}
-	err = en.WriteInt(z.ExpShards)
-	if err != nil {
-		err = msgp.WrapError(err, "ExpShards")
-		return
-	}
-	// write "Dimension"
-	err = en.Append(0xa9, 0x44, 0x69, 0x6d, 0x65, 0x6e, 0x73, 0x69, 0x6f, 0x6e)
-	if err != nil {
-		return
-	}
-	err = en.WriteBool(z.Dimension)
-	if err != nil {
-		err = msgp.WrapError(err, "Dimension")
-		return
-	}
 	// write "AutoIncrColumn"
 	err = en.Append(0xae, 0x41, 0x75, 0x74, 0x6f, 0x49, 0x6e, 0x63, 0x72, 0x43, 0x6f, 0x6c, 0x75, 0x6d, 0x6e)
 	if err != nil {
@@ -1088,9 +1024,9 @@ func (z *TableDef) EncodeMsg(en *msgp.Writer) (err error) {
 // MarshalMsg implements msgp.Marshaler
 func (z *TableDef) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 11
+	// map header, size 7
 	// string "Name"
-	o = append(o, 0x8b, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
+	o = append(o, 0x87, 0xa4, 0x4e, 0x61, 0x6d, 0x65)
 	o = msgp.AppendString(o, z.Name)
 	// string "Columns"
 	o = append(o, 0xa7, 0x43, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x73)
@@ -1118,18 +1054,6 @@ func (z *TableDef) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "DefaultTTL"
 	o = append(o, 0xaa, 0x44, 0x65, 0x66, 0x61, 0x75, 0x6c, 0x74, 0x54, 0x54, 0x4c)
 	o = msgp.AppendInt64(o, z.DefaultTTL)
-	// string "MaxRowBytes"
-	o = append(o, 0xab, 0x4d, 0x61, 0x78, 0x52, 0x6f, 0x77, 0x42, 0x79, 0x74, 0x65, 0x73)
-	o = msgp.AppendInt(o, z.MaxRowBytes)
-	// string "ExpectedRows"
-	o = append(o, 0xac, 0x45, 0x78, 0x70, 0x65, 0x63, 0x74, 0x65, 0x64, 0x52, 0x6f, 0x77, 0x73)
-	o = msgp.AppendString(o, z.ExpectedRows)
-	// string "ExpShards"
-	o = append(o, 0xa9, 0x45, 0x78, 0x70, 0x53, 0x68, 0x61, 0x72, 0x64, 0x73)
-	o = msgp.AppendInt(o, z.ExpShards)
-	// string "Dimension"
-	o = append(o, 0xa9, 0x44, 0x69, 0x6d, 0x65, 0x6e, 0x73, 0x69, 0x6f, 0x6e)
-	o = msgp.AppendBool(o, z.Dimension)
 	// string "AutoIncrColumn"
 	o = append(o, 0xae, 0x41, 0x75, 0x74, 0x6f, 0x49, 0x6e, 0x63, 0x72, 0x43, 0x6f, 0x6c, 0x75, 0x6d, 0x6e)
 	o = msgp.AppendString(o, z.AutoIncrColumn)
@@ -1213,30 +1137,6 @@ func (z *TableDef) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "DefaultTTL")
 				return
 			}
-		case "MaxRowBytes":
-			z.MaxRowBytes, bts, err = msgp.ReadIntBytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "MaxRowBytes")
-				return
-			}
-		case "ExpectedRows":
-			z.ExpectedRows, bts, err = msgp.ReadStringBytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ExpectedRows")
-				return
-			}
-		case "ExpShards":
-			z.ExpShards, bts, err = msgp.ReadIntBytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ExpShards")
-				return
-			}
-		case "Dimension":
-			z.Dimension, bts, err = msgp.ReadBoolBytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "Dimension")
-				return
-			}
 		case "AutoIncrColumn":
 			z.AutoIncrColumn, bts, err = msgp.ReadStringBytes(bts)
 			if err != nil {
@@ -1271,6 +1171,6 @@ func (z *TableDef) Msgsize() (s int) {
 	for za0002 := range z.Indexes {
 		s += z.Indexes[za0002].Msgsize()
 	}
-	s += 11 + msgp.Int64Size + 12 + msgp.IntSize + 13 + msgp.StringPrefixSize + len(z.ExpectedRows) + 10 + msgp.IntSize + 10 + msgp.BoolSize + 15 + msgp.StringPrefixSize + len(z.AutoIncrColumn) + 4 + msgp.Uint64Size
+	s += 11 + msgp.Int64Size + 15 + msgp.StringPrefixSize + len(z.AutoIncrColumn) + 4 + msgp.Uint64Size
 	return
 }

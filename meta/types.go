@@ -97,13 +97,13 @@ type TableDef struct {
 	Columns        []ColumnDef `json:"columns"`
 	PK             string      `json:"pk"` // 单列主键（DDL 校验）
 	Indexes        []IndexDef  `json:"indexes,omitempty"`
-	DefaultTTL     int64       `json:"default_ttl,omitempty"`   // 秒；0=无默认
-	MaxRowBytes    int         `json:"max_row_bytes,omitempty"` // 默认 1MB，硬上限 4MB
-	ExpectedRows   string      `json:"expected_rows,omitempty"`
-	ExpShards      int         `json:"exp_shards,omitempty"` // exp 登记册细分（docs/07 §7.2），默认 1
-	Dimension      bool        `json:"dimension,omitempty"`  // 维表标记（docs/04 §4.4 档 2）
-	AutoIncrColumn string      `json:"auto_incr,omitempty"`  // AUTO_INCREMENT 列（限主键、INT，DDL 校验）
-	Ver            uint64      `json:"-"`                    // 表级 _ver（来自 Catalog，不随 def 编码）
+	DefaultTTL     int64       `json:"default_ttl,omitempty"` // 秒；0=无默认（payload 唯一表级语义字段）
+	AutoIncrColumn string      `json:"auto_incr,omitempty"`   // AUTO_INCREMENT 列（限主键、INT，DDL 校验）
+	Ver            uint64      `json:"-"`                     // 表级 _ver（来自 Catalog，不随 def 编码）
+	// 设计原点纪律（docs/01 §1.0）：以下曾是 payload 字段，现已转自动/内置——
+	// max_row_bytes 固定 1MB（tuning.toml txguard.max_row_bytes）；
+	// exp 登记册细分恒 1（自动细分为自治后续项）；维表判定按实时行数；
+	// 字典序副本对字符串等值/唯一索引自动开启。
 }
 
 // Column 按名取列。
@@ -126,20 +126,10 @@ func (t *TableDef) Index(id string) *IndexDef {
 	return nil
 }
 
-// EffectiveExpShards 返回登记册细分片数（默认 1）。
+// EffectiveExpShards 返回登记册细分片数（恒 1——自动细分为自治后续项，
+// 机制（ExpKeyN 分片键）保留在 keycodec，启用时无需格式演进）。
 func (t *TableDef) EffectiveExpShards() int {
-	if t.ExpShards <= 0 {
-		return 1
-	}
-	return t.ExpShards
-}
-
-// EffectiveMaxRowBytes 返回行体积上限（默认 1MB）。
-func (t *TableDef) EffectiveMaxRowBytes() int {
-	if t.MaxRowBytes <= 0 {
-		return 1 << 20
-	}
-	return t.MaxRowBytes
+	return 1
 }
 
 // ValidateReserved 拒绝保留列命名（docs/07 §7.1：`_` 前缀是引擎命名空间）。

@@ -91,16 +91,13 @@ CREATE TABLE sessions (
   token VARCHAR(64) NOT NULL,
   profile JSON,
   PRIMARY KEY (uid)
-) COMMENT 'kidb:{"default_ttl":86400,"max_row_bytes":1048576,"expected_rows":"1e8","exp_shards":16}';
-
-CREATE INDEX idx_token ON sessions (token)
-  COMMENT 'kidb:{"prefix_copy":true}';            -- 前缀搜索字典序副本
+) COMMENT 'kidb:{"default_ttl":86400}';
 
 CREATE INDEX idx_profile ON sessions (uid)
   COMMENT 'kidb:{"covering":["token"],"async":false}';  -- 覆盖索引；异步索引不允许 covering
 ```
 
-payload 字段全集与默认值在 [06](06-元数据与Schema演进.md) §6.1；DDL 校验规则（索引数 ≤16、列数 ≤256、`_` 前缀列拒绝、覆盖索引必须同步、async+unique 互斥等）在执行器内 fail-fast。COMMENT 里非 `kidb:` 前缀的内容视为普通注释，两不干扰。
+**payload 只留语义声明（docs/01 §1.0 设计原点）**：表级仅 `default_ttl`；索引级仅 `covering` / `async`。曾经的调优/容量类字段（`max_row_bytes`/`expected_rows`/`exp_shards`/`dimension`/`prefix_copy`）全部转自动或内置——行体积上限固定 1MB（tuning.toml）、exp 登记册细分自动、维表按实时行数判定、字典序副本对字符串等值/唯一索引自动开启（`LIKE 'abc%'` 开箱即用）。**严格解析：未知字段报错**（不支持直接报错，优于静默忽略）。完整校验规则（索引数 ≤16、列数 ≤256、`_` 前缀列拒绝、覆盖索引必须同步、async+unique 互斥、覆盖列必须 NOT NULL 等）在执行器内 fail-fast。COMMENT 里非 `kidb:` 前缀的内容视为普通注释，两不干扰。
 
 ### DDL 作业化
 

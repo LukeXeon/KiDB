@@ -12,6 +12,7 @@ import (
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 
 	"kidb"
+	"kidb/internal/tuning"
 	"kidb/meta"
 )
 
@@ -117,12 +118,9 @@ func (h *kidbHandler) checkJoinNode(ctx context.Context, j *ast.Join) error {
 	if eqCols[strings.ToLower(def.PK)] {
 		return nil
 	}
-	// 档 2：维表广播（dimension 标记 + 行数 < 10 万）
-	if def.Dimension {
-		n, err := h.s.deps.Exec.RowCount(ctx, def, time.Now().Unix())
-		if err == nil && n < 100000 {
-			return nil
-		}
+	// 档 2：维表广播（实时行数自动判定——docs/01 §1.0：不设 dimension 标记）
+	if n, err := h.s.deps.Exec.RowCount(ctx, def, time.Now().Unix()); err == nil && n < uint64(tuning.Get().Gateway.DimensionMaxRows) {
+		return nil
 	}
 	return fmt.Errorf("%w: %s 非主键等值关联（档 4 无界 JOIN）", kidb.ErrUnsupportedJoin, rightName)
 }
