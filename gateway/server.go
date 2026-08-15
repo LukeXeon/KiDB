@@ -166,6 +166,14 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 	}
 
 	if Classify(query) != RouteDDL {
+		// KiDB 侧物理快速路径（白名单形状：COUNT(*)/MIN/MAX，docs/04 §4.1/§4.5）
+		if fp := matchFastPath(query); fp != nil {
+			if res, hit, err := h.tryFastPath(ctx, fp); err != nil {
+				return sqlErr(err)
+			} else if hit {
+				return callback(res, false)
+			}
+		}
 		return h.Handler.ComQuery(ctx, c, query, callback)
 	}
 

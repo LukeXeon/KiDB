@@ -51,6 +51,7 @@ CREATE TABLE / CREATE [UNIQUE] INDEX / DROP TABLE / DROP INDEX / ALTER TABLE
 | 缓解 | DDL 语法面刻意取两解析器交集（标准 MySQL DDL 子集，§2.4）；差异用例进测试（[12](12-测试方案.md) §12.5） | — |
 
 **纪律**：DDL 路径产出 Catalog 定义后直接落库，绝不把 DDL 文本透传给 gms；DML 路径绝不经过 TiDB parser。两个路径的语法面不追求互相兼容对方全集，只保证各自文档化子集。
+**v5.1 注记**：TiDB parser 在 DML 侧有一处**识别性**使用——网关快速路径（COUNT(*)/MIN/MAX 白名单形状识别，[04](04-查询路径.md) §4.1/§4.5）；它只回答"形状是否命中白名单"，执行语义仍归 gms/内核执行器，判不准一律回退引擎路径。
 
 ## 2.4 DDL 路径（ddl 包）
 
