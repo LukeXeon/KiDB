@@ -57,4 +57,4 @@ go test ./contract/    # 适配器一致性套件（需 docker，真实 Redis Cl
 
 ## 状态与边界
 
-开发中（alpha）。**不适合**：跨 slot 多行事务、大表任意 JOIN、强一致读、对 ~1ms 延迟税极端敏感的超热路径、不提供 EVAL 的 Redis 平台。完整边界见 [docs/14](docs/14-红线局限与检查单.md)。
+开发中（alpha）。未实现清单见 [ROADMAP.md](ROADMAP.md)。**不适合**：跨 slot 多行事务、大表任意 JOIN、强一致读、对 ~1ms 延迟税极端敏感的超热路径、不提供 EVAL 的 Redis 平台。完整边界见 [docs/14](docs/14-红线局限与检查单.md)。
