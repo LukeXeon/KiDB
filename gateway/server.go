@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/dolthub/go-mysql-server/server"
 	"github.com/dolthub/go-mysql-server/sql"
@@ -157,18 +158,36 @@ func (h *kidbHandler) ConnectionClosed(c *mysql.Conn) {
 }
 
 // ComQuery 命令分发：事务拒绝 → ro 执法 → DDL 路径 → 其余委托引擎。
+// 全程计时 → 慢查询日志（docs/10 §10.4：超阈值记录 + 全扫强制告警）。
 func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string, callback mysql.ResultSpoolFn) error {
+	start := time.Now()
+	route, fullscan, rows := "engine", false, 0
+	var qerr error
+	defer func() { h.slowQuery(ctx, query, route, fullscan, rows, time.Since(start), qerr) }()
+	cb := func(res *sqltypes.Result, more bool) error {
+		if res != nil {
+			rows += len(res.Rows)
+		}
+		return callback(res, more)
+	}
+
 	// 事务语句：缓存定位不支持（docs/01 §1.2、docs/02 §2.1）
 	if isTxnStmt(query) {
-		return mysql.NewSQLError(1235, "HY000", "KiDB 不支持事务语句（缓存定位，docs/02 §2.1）")
+		route = "rejected"
+		qerr = mysql.NewSQLError(1235, "HY000", "KiDB 不支持事务语句（缓存定位，docs/02 §2.1）")
+		return qerr
 	}
 	// ro 账号执法（docs/02 §2.9）
 	if rec := h.s.session(c.ConnectionID); rec != nil && rec.role == "ro" && isWriteStmt(query) {
-		return mysql.NewSQLError(1290, "HY000", "只读账号禁止写操作（ERR_READ_ONLY）")
+		route = "rejected"
+		qerr = mysql.NewSQLError(1290, "HY000", "只读账号禁止写操作（ERR_READ_ONLY）")
+		return qerr
 	}
 
 	// 配置管理面（SET GLOBAL / SHOW VARIABLES LIKE，docs/10 §10.2）
-	if handled, err := h.handleConfigStmt(ctx, c, query, callback); handled {
+	if handled, err := h.handleConfigStmt(ctx, c, query, cb); handled {
+		route = "config"
+		qerr = err
 		return err
 	}
 
@@ -176,28 +195,39 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 		// KiDB 侧物理快速路径（白名单形状：COUNT(*)/MIN/MAX，docs/04 §4.1/§4.5）
 		if fp := matchFastPath(query); fp != nil {
 			if res, hit, err := h.tryFastPath(ctx, fp); err != nil {
+				qerr = err
 				return sqlErr(err)
 			} else if hit {
-				return callback(res, false)
+				route = "fastpath:" + fp.table
+				qerr = cb(res, false)
+				return qerr
 			}
 		}
 		// DML 有界性执法：无索引谓词报错 + 档 4 JOIN 报错（docs/04 §4.1/§4.4）
-		if err := h.enforceQueryPolicy(ctx, query); err != nil {
+		fs, err := h.enforceQueryPolicy(ctx, query)
+		if err != nil {
+			qerr = err
 			return sqlErr(err)
 		}
-		return h.Handler.ComQuery(ctx, c, query, callback)
+		fullscan = fs
+		qerr = h.Handler.ComQuery(ctx, c, query, cb)
+		return qerr
 	}
 
 	// DDL 路径：TiDB parser 解析 → 校验 → Catalog 作业
+	route = "ddl"
 	op, err := ddl.Parse(query)
 	if err != nil {
+		qerr = err
 		return sqlErr(err)
 	}
 	sqlCtx := h.sqlCtx(ctx, c, query)
 	if err := ExecDDL(sqlCtx, op, h.s.deps); err != nil {
+		qerr = err
 		return sqlErr(err)
 	}
-	return callback(&sqltypes.Result{}, false)
+	qerr = cb(&sqltypes.Result{}, false)
+	return qerr
 }
 
 // sqlCtx 为 DDL 路径构造 gms 上下文。

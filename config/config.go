@@ -51,6 +51,7 @@ var Vars = map[string]VarDef{
 	"ddl_backfill_rate_limit":      {"10000", nonNegative},
 	"query_allow_fullscan_tables":  {"", tableListValidator},
 	"query_fullscan_rate_limit":    {"10", nonNegative},
+	"slow_query_threshold_ms":      {"500", nonNegative}, // 慢查询日志阈值（docs/10 §10.4）
 }
 
 // Store 是配置读写契约（docs/10 §10.2 ConfigStore）。

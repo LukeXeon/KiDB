@@ -22,22 +22,23 @@ import (
 // 识别用 TiDB parser（与分类器分工：分类器管 DDL/DML 路由，本组件管 DML 有界性）。
 // 判不准一律放行给引擎（引擎通用路径正确，只是可能慢——执法收紧不依赖猜测）。
 
-// enforceQueryPolicy 对引擎路径语句执法；nil = 放行。
-func (h *kidbHandler) enforceQueryPolicy(ctx context.Context, query string) error {
+// enforceQueryPolicy 对引擎路径语句执法；fullscan=true 表示全表遍历被放行
+// （hint/白名单——慢查询日志强制告警的判定来源，docs/10 §10.4）。
+func (h *kidbHandler) enforceQueryPolicy(ctx context.Context, query string) (fullscan bool, err error) {
 	// 快筛：只有 SELECT/UPDATE/DELETE 需要判定
 	words := leadingWords(stripComments(query), 1)
 	if len(words) == 0 {
-		return nil
+		return false, nil
 	}
 	switch words[0] {
 	case "SELECT", "UPDATE", "DELETE":
 	default:
-		return nil
+		return false, nil
 	}
 
 	stmts, _, err := parser.New().Parse(query, "", "")
 	if err != nil || len(stmts) != 1 {
-		return nil // 解析不了交给引擎报错
+		return false, nil // 解析不了交给引擎报错
 	}
 
 	var sel *ast.SelectStmt
@@ -49,21 +50,21 @@ func (h *kidbHandler) enforceQueryPolicy(ctx context.Context, query string) erro
 	case *ast.UpdateStmt:
 		where = s.Where
 		if s.TableRefs != nil && s.TableRefs.TableRefs != nil && s.TableRefs.TableRefs.Right != nil {
-			return fmt.Errorf("%w: 多表 UPDATE", kidb.ErrUnsupported)
+			return false, fmt.Errorf("%w: 多表 UPDATE", kidb.ErrUnsupported)
 		}
 	case *ast.DeleteStmt:
 		where = s.Where
 		if s.IsMultiTable {
-			return fmt.Errorf("%w: 多表 DELETE", kidb.ErrUnsupported)
+			return false, fmt.Errorf("%w: 多表 DELETE", kidb.ErrUnsupported)
 		}
 	default:
-		return nil
+		return false, nil
 	}
 
 	// JOIN 分档（过了档位判定即为有界查询，不再叠加无索引检查——
 	// 档 1/2 的代价上界由档位语义保证，docs/04 §4.4）
 	if sel != nil && sel.From != nil && sel.From.TableRefs != nil && sel.From.TableRefs.Right != nil {
-		return h.checkJoins(ctx, sel)
+		return false, h.checkJoins(ctx, sel)
 	}
 
 	// 无索引谓词执法（无 WHERE = 全表遍历，同纪律）
@@ -147,24 +148,25 @@ func collectOnEqCols(e ast.ExprNode, rightAlias string, out map[string]bool) {
 	}
 }
 
-// checkBoundedScan 无索引谓词执法。
-func (h *kidbHandler) checkBoundedScan(ctx context.Context, stmt ast.StmtNode, where ast.ExprNode, rawQuery string) error {
+// checkBoundedScan 无索引谓词执法。fullscan=true = 全表遍历被放行
+// （hint/白名单——慢查询日志强制告警的判定来源，docs/10 §10.4）。
+func (h *kidbHandler) checkBoundedScan(ctx context.Context, stmt ast.StmtNode, where ast.ExprNode, rawQuery string) (bool, error) {
 	table := tableOf(stmt)
 	if table == "" {
-		return nil
+		return false, nil
 	}
 	def, err := h.s.deps.Cache.Get(ctx, table)
 	if err != nil || def == nil {
-		return err
+		return false, err
 	}
 	if where == nil {
 		// ORDER BY 首个排序列有可用范围索引 → 有界（全局 score 有序流，
 		// LIMIT 早停由引擎停止消费达成，docs/04 §4.1 top-k）
 		if sel, ok := stmt.(*ast.SelectStmt); ok && orderByHasRangeIndex(sel, def) {
-			return nil
+			return false, nil
 		}
 		// 无 WHERE 全表遍历：白名单或 hint 放行
-		return h.allowFullscan(ctx, def, rawQuery)
+		return true, h.allowFullscan(ctx, def, rawQuery)
 	}
 	cols := map[string]bool{}
 	collectPredCols(where, cols)
@@ -175,7 +177,7 @@ func (h *kidbHandler) checkBoundedScan(ctx context.Context, stmt ast.StmtNode, w
 	for c := range cols {
 		switch indexStateOn(def, c) {
 		case 2:
-			return nil // 有可用索引谓词 → 放行
+			return false, nil // 有可用索引谓词 → 放行
 		case 1:
 			building = c
 		}
@@ -183,15 +185,15 @@ func (h *kidbHandler) checkBoundedScan(ctx context.Context, stmt ast.StmtNode, w
 	for c := range prefixCols {
 		switch prefixIndexStateOn(def, c) {
 		case 2:
-			return nil // 有字典序副本 → 前缀搜索路径（docs/04 §4.5）
+			return false, nil // 有字典序副本 → 前缀搜索路径（docs/04 §4.5）
 		case 1:
 			building = c
 		}
 	}
 	if building != "" {
-		return fmt.Errorf("%w: 表 %s 列 %s 的索引建设中，稍后重试（在线回填，docs/06 §6.3）", kidb.ErrNoIndex, def.Name, building)
+		return false, fmt.Errorf("%w: 表 %s 列 %s 的索引建设中，稍后重试（在线回填，docs/06 §6.3）", kidb.ErrNoIndex, def.Name, building)
 	}
-	return h.allowFullscan(ctx, def, rawQuery)
+	return true, h.allowFullscan(ctx, def, rawQuery)
 }
 
 // collectPrefixLikeCols 收集常量前缀 LIKE 的列（`col LIKE 'abc%'`：

@@ -209,6 +209,9 @@ type Executor struct {
 // SetMetrics 接入指标。
 func (e *Executor) SetMetrics(m *metrics.Metrics) { e.m = m }
 
+// Metrics 当前指标（网关慢查询日志等外侧记录点用；nil = no-op）。
+func (e *Executor) Metrics() *metrics.Metrics { return e.m }
+
 // SetClock 注入时钟（测试与写入侧共享可推进的钟——miniredis TIME 不随
 // FastForward 走，TTL 语义断言须全链路同钟）。
 func (e *Executor) SetClock(c func() time.Time) { e.clock = c }

@@ -8,9 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"kidb"
 	"kidb/adapter/goredis"
@@ -19,6 +22,7 @@ import (
 	"kidb/exec"
 	"kidb/gateway"
 	"kidb/meta"
+	"kidb/metrics"
 	"kidb/txguard"
 )
 
@@ -31,6 +35,7 @@ func main() {
 		writeTimeout = flag.Duration("write-timeout", 3*time.Second, "写超时")
 		rwOnly       = flag.Bool("read-write-only", false, "纯读写节点：不启动后台角色循环（docs/08 §8.5 豁免）")
 		replicaRead  = flag.Bool("replica-read", false, "声明副本读能力（docs/09 §9.4：适配器构造 ReadOnly 副本客户端；运行时还需 SET GLOBAL replica_read=true 才进读路径）")
+		metricsAddr  = flag.String("metrics-addr", "", "Prometheus /metrics HTTP 监听地址（如 :9100；空 = 不暴露）")
 		accounts     = flag.String("accounts", "root:%:kidb:rw", "账号表：user:host:pass:role，逗号分隔")
 	)
 	flag.Parse()
@@ -70,12 +75,25 @@ func main() {
 
 	store := meta.NewCatalogStore(cli, k.Scripts())
 	bm := bucketmap.New(cli, k.Scripts())
+	ex := exec.New(cli, k.Scripts())
+	// 指标装配（docs/10 §10.3：默认 prometheus registry；-metrics-addr 暴露 /metrics）
+	m := metrics.New(nil)
+	ex.SetMetrics(m)
+	if *metricsAddr != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
+			if err := http.ListenAndServe(*metricsAddr, mux); err != nil {
+				slog.Error("metrics 端点退出", "err", err)
+			}
+		}()
+	}
 	deps := engine.Deps{
 		Client: cli,
 		Reg:    k.Scripts(),
 		Store:  store,
 		Cache:  meta.NewCatalogCache(store),
-		Exec:   exec.New(cli, k.Scripts()),
+		Exec:   ex,
 		Guard:  txguard.New(cli, k.Scripts(), bm),
 	}
 	srv, err := gateway.NewServer(deps, boot)
