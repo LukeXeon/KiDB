@@ -18,7 +18,7 @@ import (
 
 // L4Manager 管理热桶副本。
 type L4Manager struct {
-	cli     kidb.Store
+	cli     kidb.KvClient
 	reg     *script.Registry
 	maxRep  int           // hotkey_replica_max（默认 8）
 	ttlMs   int64         // 副本 TTL（60s 滚动）
@@ -26,7 +26,7 @@ type L4Manager struct {
 }
 
 // NewL4 构造。
-func NewL4(cli kidb.Store, reg *script.Registry) *L4Manager {
+func NewL4(cli kidb.KvClient, reg *script.Registry) *L4Manager {
 	return &L4Manager{cli: cli, reg: reg, maxRep: 8, ttlMs: 60000, refresh: time.Second}
 }
 

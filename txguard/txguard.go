@@ -23,9 +23,9 @@ import (
 // maxStaleRetries 是 BucketMap/行版本冲突的整体重试上限（docs/05 §5.5）。
 const maxStaleRetries = 3
 
-// Guard 编排单行写入。通过 kidb.Store 下发命令，满足契约 R1~R7。
+// Guard 编排单行写入。通过 kidb.KvClient 下发命令，满足契约 R1~R7。
 type Guard struct {
-	cli   kidb.Store
+	cli   kidb.KvClient
 	reg   *script.Registry
 	bm    *bucketmap.Store // 桶路由（分裂状态），nil = 永远 ACTIVE 单桶
 	m     *metrics.Metrics // 指标（nil = no-op）
@@ -33,7 +33,7 @@ type Guard struct {
 }
 
 // New 构造 Guard（bm 供分裂状态路由；传 nil 退化为 ACTIVE 单桶模式）。
-func New(cli kidb.Store, reg *script.Registry, bm *bucketmap.Store) *Guard {
+func New(cli kidb.KvClient, reg *script.Registry, bm *bucketmap.Store) *Guard {
 	return &Guard{cli: cli, reg: reg, bm: bm, clock: time.Now}
 }
 

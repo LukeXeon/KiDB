@@ -17,12 +17,12 @@ import (
 
 // Indexer 消费一个 (表, 索引, slot) 的日志。
 type Indexer struct {
-	cli   kidb.Store
+	cli   kidb.KvClient
 	batch int
 }
 
 // New 构造。
-func New(cli kidb.Store) *Indexer { return &Indexer{cli: cli, batch: 500} }
+func New(cli kidb.KvClient) *Indexer { return &Indexer{cli: cli, batch: 500} }
 
 // ConsumeLog 消费一批日志条目（LTRIM 截断已消费前缀），返回消费条数。
 // 消费语义：条目 pk\x1f旧值\x1f新值\x1fver；旧值非空 → ZREM 旧桶，新值非空 → ZADD 新桶。

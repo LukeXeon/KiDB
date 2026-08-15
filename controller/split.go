@@ -22,7 +22,7 @@ import (
 
 // Splitter 是分裂协议执行器。
 type Splitter struct {
-	cli   kidb.Store
+	cli   kidb.KvClient
 	reg   *script.Registry
 	bm    *bucketmap.Store
 	m     *metrics.Metrics // 指标（nil = no-op）
@@ -30,7 +30,7 @@ type Splitter struct {
 }
 
 // NewSplitter 构造（batch 默认 500，docs/08 §8.3）。
-func NewSplitter(cli kidb.Store, reg *script.Registry, bm *bucketmap.Store) *Splitter {
+func NewSplitter(cli kidb.KvClient, reg *script.Registry, bm *bucketmap.Store) *Splitter {
 	return &Splitter{cli: cli, reg: reg, bm: bm, batch: 500}
 }
 

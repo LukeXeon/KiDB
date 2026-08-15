@@ -18,7 +18,7 @@ import (
 
 // JobRunner 执行 DDL 作业。
 type JobRunner struct {
-	cli       kidb.Store
+	cli       kidb.KvClient
 	store     *meta.CatalogStore
 	cache     *meta.CatalogCache
 	exec      *exec.Executor
@@ -27,7 +27,7 @@ type JobRunner struct {
 }
 
 // NewJobRunner 构造。
-func NewJobRunner(cli kidb.Store, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store) *JobRunner {
+func NewJobRunner(cli kidb.KvClient, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store) *JobRunner {
 	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: 256}
 }
 

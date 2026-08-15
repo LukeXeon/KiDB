@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"testing"
 	"time"
 
@@ -97,6 +96,5 @@ func TestFastPathFallback(t *testing.T) {
 	// DISTINCT 回退
 	rows, err := db.QueryContext(ctx, "SELECT DISTINCT v FROM t")
 	require.NoError(t, err)
-	defer rows.Close()
-	fmt.Sprint(rows)
+	rows.Close()
 }

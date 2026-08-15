@@ -14,7 +14,7 @@ import (
 
 // Manager 是自治决策器（由选举产生的 Controller 驱动 Tick）。
 type Manager struct {
-	cli      kidb.Store
+	cli      kidb.KvClient
 	bm       *bucketmap.Store
 	splitter *Splitter
 	l4       *L4Manager
@@ -24,7 +24,7 @@ type Manager struct {
 }
 
 // NewManager 构造。
-func NewManager(cli kidb.Store, bm *bucketmap.Store, splitter *Splitter, l4 *L4Manager) *Manager {
+func NewManager(cli kidb.KvClient, bm *bucketmap.Store, splitter *Splitter, l4 *L4Manager) *Manager {
 	return &Manager{cli: cli, bm: bm, splitter: splitter, l4: l4, SplitMembers: 50000, HotQPS: 4000}
 }
 

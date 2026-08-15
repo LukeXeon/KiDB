@@ -1,5 +1,5 @@
 // Package kidb 是 KiDB 内核的根包：内核组装（Kernel/Querier）、
-// 后端可替换契约（Store）、引导配置（Bootstrap）与错误码。
+// 后端可替换契约（KvClient）、引导配置（Bootstrap）与错误码。
 //
 // 设计文档：docs/01-定位架构与TiDB对齐.md、docs/02-SQL服务器.md、
 // docs/09-后端契约与适配器.md。文档即接口契约，代码与文档一一对应。
@@ -28,7 +28,7 @@ type Querier interface {
 
 // Kernel 是内核组装体。构造见 NewKernel。
 type Kernel struct {
-	cli      Store
+	cli      KvClient
 	boot     Bootstrap
 	logger   *slog.Logger
 	scripts  *script.Registry
@@ -44,16 +44,16 @@ func WithLogger(h slog.Handler) Option {
 	return func(k *Kernel) { k.logger = slog.New(h) }
 }
 
-// NewKernel 注入 Store 与进程级引导配置，组装内核。
+// NewKernel 注入 KvClient 与进程级引导配置，组装内核。
 //
 // 启动期执行（docs/09 §9.4、docs/05 §5.7）：
 //  1. Lua 资产加载与静态校验（script.Load，fail-fast）；
 //  2. 能力探测：EVAL 必须，缺失返回 ErrCapability；
 //  3. TODO(impl)：元数据恢复（meta 包）→ 挂载配置系统表（config 包）
 //     → 启动后台角色循环（ReadWriteOnly 豁免，docs/08 §8.5）。
-func NewKernel(cli Store, boot Bootstrap, opts ...Option) (*Kernel, error) {
+func NewKernel(cli KvClient, boot Bootstrap, opts ...Option) (*Kernel, error) {
 	if cli == nil {
-		return nil, errors.New("kidb: nil Store")
+		return nil, errors.New("kidb: nil KvClient")
 	}
 	reg, err := script.Load()
 	if err != nil {

@@ -1,5 +1,5 @@
 // Package goredis 是 KiDB 的参考适配器：基于 go-redis/v9 ClusterClient
-// 实现 kidb.Store 契约（docs/09 §9.3 R1~R7）。
+// 实现 kidb.KvClient 契约（docs/09 §9.3 R1~R7）。
 //
 // 路由说明：go-redis ClusterClient 对内建命令表中的命令按首 key 路由
 // （其 CRC16 与 keycodec 同为 XMODEM 规范，一致性由契约测试在真实集群校验，
@@ -25,7 +25,7 @@ import (
 	"kidb/script"
 )
 
-// Adapter 在 *redis.ClusterClient 上实现 kidb.Store。
+// Adapter 在 *redis.ClusterClient 上实现 kidb.KvClient。
 type Adapter struct {
 	cli         *redis.ClusterClient
 	replicaRead bool
@@ -47,7 +47,7 @@ type Options struct {
 	ClusterSlots func(context.Context) ([]redis.ClusterSlot, error)
 }
 
-// New 构造适配器。返回的对象可直接作为 kidb.Store 使用。
+// New 构造适配器。返回的对象可直接作为 kidb.KvClient 使用。
 func New(addrs []string, opt Options) *Adapter {
 	cli := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:        addrs,
@@ -187,4 +187,4 @@ func (a *Adapter) DoReplica(ctx context.Context, cmd string, args ...any) (any, 
 }
 
 // 编译期接口断言。
-var _ kidb.Store = (*Adapter)(nil)
+var _ kidb.KvClient = (*Adapter)(nil)

@@ -50,7 +50,7 @@ func startClusterNode(t *testing.T) (string, func()) {
 	return fmt.Sprintf("%s:%s", host, mapped.Port()), func() { _ = c.Terminate(ctx) }
 }
 
-func setup(t *testing.T) (kidb.Store, context.Context, func()) {
+func setup(t *testing.T) (kidb.KvClient, context.Context, func()) {
 	t.Helper()
 	if !dockerAvailable() {
 		t.Skip("docker 不可用——契约套件在 CI（带 docker）运行，docs/12 §12.9")
