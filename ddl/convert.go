@@ -1,0 +1,238 @@
+// Package ddl 是 KiDB 的 DDL 语义层（docs/02 §2.4）：
+// 把 gms 的 DDL 计划产物（PrimaryKeySchema/IndexDef/COMMENT 串）转换为
+// KiDB Catalog 定义并执行全部校验。**类型语义以 gms 为准**（VARCHAR→
+// gms StringType 即字符串列，不再经第二个解析器的类型系统）——
+// 双解析器时代结束，分析面与执行面同一语法（docs/13 §13.6 决策记录）。
+package ddl
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
+
+	"kidb"
+	"kidb/meta"
+)
+
+// kidbCommentPrefix 是 KiDB 扩展在 COMMENT 中的前缀。
+// 非此前缀的 COMMENT 视为普通注释，两不干扰。
+const kidbCommentPrefix = "kidb:"
+
+// ==== COMMENT payload（docs/02 §2.4：只留语义声明，严格解析）====
+
+// tableOpts 表级 payload：仅 default_ttl（行级 TTL 是缓存定位的核心语义）。
+// 未知字段报错（"不支持直接报错"优于静默忽略，docs/01 §1.0）。
+type tableOpts struct {
+	DefaultTTL int64 `json:"default_ttl"`
+}
+
+// indexOpts 索引级 payload：仅 covering / async。
+type indexOpts struct {
+	Covering []string `json:"covering"` // 覆盖列（docs/03 §3.5；列须 NOT NULL）
+	Async    bool     `json:"async"`    // 异步索引（docs/05 §5.2；与唯一索引互斥）
+}
+
+// ParseTableComment 解析表级 COMMENT（非 kidb: 前缀 = 无选项）。
+func ParseTableComment(comment string) (int64, error) {
+	v, ok := strings.CutPrefix(comment, kidbCommentPrefix)
+	if !ok {
+		return 0, nil
+	}
+	var to tableOpts
+	dec := json.NewDecoder(strings.NewReader(v))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&to); err != nil {
+		return 0, fmt.Errorf("kidb 表选项 JSON 非法: %w", err)
+	}
+	if to.DefaultTTL < 0 {
+		return 0, fmt.Errorf("default_ttl 不能为负")
+	}
+	return to.DefaultTTL, nil
+}
+
+// ParseIndexComment 解析索引级 COMMENT。
+func ParseIndexComment(comment string) (indexOpts, error) {
+	var io indexOpts
+	v, ok := strings.CutPrefix(comment, kidbCommentPrefix)
+	if !ok {
+		return io, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(v))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&io); err != nil {
+		return io, fmt.Errorf("kidb 索引选项 JSON 非法: %w", err)
+	}
+	return io, nil
+}
+
+// ==== 类型映射：gms sql.Type → meta.ColumnType（docs/02 §2.4 白名单）====
+
+// ColumnTypeOf 列类型映射（类型语义以 gms 为准）。
+// 白名单：整数/浮点/字符串/二进制/时间戳/JSON；DECIMAL/DATE/TIME/枚举等
+// 明确报错（范围索引 score 语义与编码精度不担保的类型不放行）。
+func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
+	switch {
+	case types.IsInteger(ct):
+		return meta.ColInt, nil
+	case types.IsFloat(ct):
+		return meta.ColFloat, nil
+	case types.IsDecimal(ct):
+		return 0, fmt.Errorf("%w: DECIMAL 不支持（score 精度纪律，docs/03 §3.4）", kidb.ErrUnsupported)
+	case types.IsJSON(ct): // 先于二进制：gms IsBinaryType 把 TypeJSON 也算在内
+		return meta.ColJSON, nil
+	case types.IsBinaryType(ct):
+		return meta.ColBytes, nil
+	case types.IsText(ct):
+		return meta.ColString, nil
+	case types.IsDatetimeType(ct) || types.IsTimestampType(ct):
+		return meta.ColTimestamp, nil
+	}
+	return 0, fmt.Errorf("%w: 不支持的列类型 %v", kidb.ErrUnsupported, ct)
+}
+
+// ==== CREATE TABLE：gms PrimaryKeySchema → TableDef ====
+
+// TableFromSchema 由 gms 主键 schema 与表 COMMENT 构造表定义（校验全规则）。
+func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*meta.TableDef, error) {
+	if len(sch.Schema) == 0 || len(sch.Schema) > 256 {
+		return nil, fmt.Errorf("%w: 列数 %d 超出 [1,256]", kidb.ErrUnsupported, len(sch.Schema))
+	}
+	if len(sch.PkOrdinals) != 1 {
+		return nil, fmt.Errorf("%w: 必须显式单列主键（%d 个）", kidb.ErrUnsupported, len(sch.PkOrdinals))
+	}
+	ttl, err := ParseTableComment(comment)
+	if err != nil {
+		return nil, err
+	}
+	def := &meta.TableDef{Name: name, DefaultTTL: ttl}
+	seen := map[string]bool{}
+	for i, c := range sch.Schema {
+		if err := meta.ValidateReserved(c.Name); err != nil {
+			return nil, fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
+		}
+		if seen[strings.ToLower(c.Name)] {
+			return nil, fmt.Errorf("列 %q 重复", c.Name)
+		}
+		seen[strings.ToLower(c.Name)] = true
+		ct, err := ColumnTypeOf(c.Type)
+		if err != nil {
+			return nil, fmt.Errorf("列 %q: %w", c.Name, err)
+		}
+		def.Columns = append(def.Columns, meta.ColumnDef{
+			Name: c.Name, Type: ct, NotNull: !c.Nullable,
+		})
+		if c.AutoIncrement {
+			def.AutoIncrColumn = c.Name
+		}
+		if i == sch.PkOrdinals[0] {
+			def.PK = c.Name
+		}
+	}
+	return def, validateTable(def)
+}
+
+// validateTable 表级校验（docs/02 §2.4 + docs/06 §6.1）。
+func validateTable(t *meta.TableDef) error {
+	if t.PK == "" {
+		return fmt.Errorf("%w: 必须显式主键", kidb.ErrUnsupported)
+	}
+	pkCol, ok := t.Column(t.PK)
+	if !ok {
+		return fmt.Errorf("%w: 主键列 %q 不在列定义中", kidb.ErrUnsupported, t.PK)
+	}
+	if pkCol.Type != meta.ColInt && pkCol.Type != meta.ColString {
+		return fmt.Errorf("%w: 主键类型限 INT/STRING", kidb.ErrUnsupported)
+	}
+	if t.AutoIncrColumn != "" && (t.AutoIncrColumn != t.PK || pkCol.Type != meta.ColInt) {
+		return fmt.Errorf("%w: AUTO_INCREMENT 限 INT 主键列（docs/05 §5.4）", kidb.ErrUnsupported)
+	}
+	if len(t.Indexes) > 16 {
+		return fmt.Errorf("%w: 单表索引数 %d > 16", kidb.ErrUnsupported, len(t.Indexes))
+	}
+	seen := map[string]bool{}
+	for i := range t.Indexes {
+		idx := &t.Indexes[i]
+		if err := meta.ValidateReserved(idx.ID); err != nil {
+			return fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
+		}
+		if seen[strings.ToLower(idx.ID)] {
+			return fmt.Errorf("索引名 %q 重复", idx.ID)
+		}
+		seen[strings.ToLower(idx.ID)] = true
+		if err := ValidateIndexForTable(idx, t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ==== 索引：gms sql.IndexDef → meta.IndexDef ====
+
+// IndexFromDef 由 gms 索引定义构造（内联索引/ALTER ADD INDEX/CREATE INDEX 统一入口；
+// IndexDef.Comment 携带 kidb payload，Constraint 携带 UNIQUE）。
+func IndexFromDef(idxDef sql.IndexDef) (*meta.IndexDef, error) {
+	if len(idxDef.Columns) != 1 {
+		return nil, fmt.Errorf("%w: 索引限单列（%s 有 %d 列）", kidb.ErrUnsupported, idxDef.Name, len(idxDef.Columns))
+	}
+	idx := &meta.IndexDef{ID: idxDef.Name, Columns: []string{idxDef.Columns[0].Name}}
+	if idxDef.Constraint == sql.IndexConstraint_Unique {
+		idx.Kind = meta.IndexUnique
+	}
+	opts, err := ParseIndexComment(idxDef.Comment)
+	if err != nil {
+		return nil, err
+	}
+	idx.Covering = opts.Covering
+	idx.Async = opts.Async
+	return idx, validateIndexShape(idx)
+}
+
+// validateIndexShape 索引形态校验（不依赖表定义的部分）。
+func validateIndexShape(idx *meta.IndexDef) error {
+	if len(idx.Columns) != 1 {
+		return fmt.Errorf("%w: 索引限单列（%s 有 %d 列）", kidb.ErrUnsupported, idx.ID, len(idx.Columns))
+	}
+	if idx.Async && idx.Kind == meta.IndexUnique {
+		return fmt.Errorf("%w: 唯一索引必须同步模式（%s）", kidb.ErrUnsupported, idx.ID)
+	}
+	if idx.Async && len(idx.Covering) > 0 {
+		return fmt.Errorf("%w: 异步索引不允许 COVERING（docs/03 §3.5，%s）", kidb.ErrUnsupported, idx.ID)
+	}
+	return nil
+}
+
+// ValidateIndexForTable 索引对表校验（类型相关 + 形态推导）。
+func ValidateIndexForTable(idx *meta.IndexDef, t *meta.TableDef) error {
+	if err := validateIndexShape(idx); err != nil {
+		return err
+	}
+	col, ok := t.Column(idx.Columns[0])
+	if !ok {
+		return fmt.Errorf("索引列 %q 不存在", idx.Columns[0])
+	}
+	// 形态推导（docs/02 §2.4）：唯一=UNIQUE；数值/时间戳=RANGE；其余=等值。
+	if idx.Kind != meta.IndexUnique {
+		if col.Type.RangeIndexable() {
+			idx.Kind = meta.IndexRange
+		} else {
+			idx.Kind = meta.IndexEq
+		}
+	}
+	// 字典序副本自动开启（docs/01 §1.0：前缀搜索开箱即用，无需声明）。
+	if idx.Kind != meta.IndexRange && col.Type == meta.ColString {
+		idx.PrefixCopy = true
+	}
+	for _, cc := range idx.Covering {
+		cdef, ok := t.Column(cc)
+		if !ok {
+			return fmt.Errorf("覆盖列 %q 不存在", cc)
+		}
+		if !cdef.NotNull {
+			return fmt.Errorf("%w: 覆盖列 %q 必须 NOT NULL（member 编码 NULL 不保真，docs/03 §3.5）", kidb.ErrUnsupported, cc)
+		}
+	}
+	return nil
+}

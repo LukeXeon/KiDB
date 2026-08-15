@@ -18,7 +18,6 @@ import (
 	"kidb"
 	"kidb/config"
 	"kidb/controller"
-	"kidb/ddl"
 	"kidb/engine"
 	"kidb/internal/tuning"
 )
@@ -200,7 +199,9 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 		return err
 	}
 
-	if Classify(query) != RouteDDL {
+	// DDL 不再单独路由：全量走 gms 引擎（sql.TableCreator/IndexAlterableTable
+	// 由 engine 包实现，docs/02 §2.4）；此处只分流 KiDB 侧拦截面。
+	{
 		// EXPLAIN 接管（docs/02 §2.8：KiDB 计划展示；必须在快速路径之前——
 		// EXPLAIN SELECT COUNT(*) 不得真的执行）
 		if handled, err := h.explainQuery(ctx, query, cb); handled {
@@ -284,21 +285,8 @@ func (h *kidbHandler) ComQuery(ctx context.Context, c *mysql.Conn, query string,
 		return qerr
 	}
 
-	// DDL 路径：TiDB parser 解析 → 校验 → Catalog 作业
-	route = "ddl"
-	op, err := ddl.Parse(query)
-	if err != nil {
-		qerr = err
-		return sqlErr(err)
-	}
-	sqlCtx := h.sqlCtx(ctx, c, query)
-	if err := ExecDDL(sqlCtx, op, h.s.deps); err != nil {
-		qerr = err
-		return sqlErr(err)
-	}
-	qerr = cb(&sqltypes.Result{}, false)
-	return qerr
 }
+
 
 // ComPrepare 预处理：与 ComQuery 同套的执法面（此前为缺口——预处理语句
 // 绕过事务拒绝/ro/守卫直达引擎）。分类/事务/ro/守卫在 PREPARE 期判定；
@@ -311,8 +299,12 @@ func (h *kidbHandler) ComPrepare(ctx context.Context, c *mysql.Conn, query strin
 	if rec := h.s.session(c.ConnectionID); rec != nil && rec.role == "ro" && isWriteStmt(query) {
 		return nil, mysql.NewSQLError(1290, "HY000", "只读账号禁止写操作（ERR_READ_ONLY）")
 	}
-	if Classify(query) == RouteDDL {
-		return nil, mysql.NewSQLError(1235, "HY000", "DDL 不支持预处理协议（低频管理面，走文本协议）")
+	// DDL 走文本协议（预处理协议不承载管理面）
+	if w := leadingWords(stripComments(query), 1); len(w) > 0 {
+		switch w[0] {
+		case "CREATE", "DROP", "ALTER", "TRUNCATE", "RENAME":
+			return nil, mysql.NewSQLError(1235, "HY000", "DDL 不支持预处理协议（低频管理面，走文本协议）")
+		}
 	}
 	// 守卫判定（模板含 ? 占位符：TiDB parser 解析为 ParamMarkerExpr——
 	// 列名收集不受影响；LIKE 参数模式保守按无索引处理，见 docs/04 §4.5 注记）
