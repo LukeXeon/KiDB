@@ -10,7 +10,7 @@
 |---|---|---|
 | `c:table:{table}` | Hash | 表定义：列（名/类型/默认值）、主键、索引定义（含 COMMENT 载体解析出的 KiDB 选项）、`default_ttl`、`max_row_bytes`、`expected_rows`、`exp_shards`、`dimension` 标记；`_ver`（表级版本，INCR）、`_job`（进行中的 DDL 作业，无则空） |
 | `ver:schema` | String | 全局 schema 版本：任何 DDL 完成一步即 INCR——plan cache 失效锚点与 lease 刷新信号 |
-| `bm:{table}:{idx}` | Hash | BucketMap（稀疏存储，[03](03-数据模型与编码.md) §3.1）+ `version` 字段 |
+| `bm:{table}:{idx}:{stag}` | Hash | BucketMap 分片（稀疏 + 每 slot 分片，[03](03-数据模型与编码.md) §3.1 修订注记）+ `version` 字段 |
 | `cfg:global` | Hash | 集群配置（[10](10-配置与可观测.md) §10.2）——与元数据共用同一套版本校验刷新循环 |
 
 表级 DDL payload 字段全集（CREATE TABLE COMMENT `kidb:{...}`）：`default_ttl`（秒，0=无）、`max_row_bytes`（默认 1MB，硬上限 4MB）、`expected_rows`（量级声明，驱动 exp 分片预设）、`exp_shards`（默认 1，>10 亿行表 ≥16）、`dimension`（维表标记）。索引级 payload：`covering`（数组）、`async`（bool，唯一索引互斥）、`prefix_copy`（字典序副本）。

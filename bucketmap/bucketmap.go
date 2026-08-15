@@ -28,21 +28,21 @@ import (
 type State string
 
 const (
-	Active    State = "ACTIVE"
-	Splitting State = "SPLITTING"
-	Draining  State = "DRAINING"      // 分裂排水：写仅子桶、读仅子桶
-	Merging   State = "MERGING"       // 合并双写：写目标+旧桶、读全集
-	MergeDrain State = "MERGE_DRAIN"  // 合并排水：写仅目标桶、读仅目标桶
-	Deleted   State = "DELETED"
+	Active     State = "ACTIVE"
+	Splitting  State = "SPLITTING"
+	Draining   State = "DRAINING"    // 分裂排水：写仅子桶、读仅子桶
+	Merging    State = "MERGING"     // 合并双写：写目标+旧桶、读全集
+	MergeDrain State = "MERGE_DRAIN" // 合并排水：写仅目标桶、读仅目标桶
+	Deleted    State = "DELETED"
 )
 
 // SplitInfo 分裂/合并中间态（SPLITTING/DRAINING/MERGING）。
 // 分裂：Parents=旧桶集，Children=新桶集（2×）；
 // 合并：Parents=合并目标桶集（½），Children=被合并的旧桶集（镜像协议）。
 type SplitInfo struct {
-	State    State  `json:"st"`
-	Parents  []int  `json:"p"`
-	Children []int  `json:"c"`
+	State    State `json:"st"`
+	Parents  []int `json:"p"`
+	Children []int `json:"c"`
 }
 
 // EqEntry 等值桶条目（field `e:{encVal}`，稀疏）。
@@ -64,17 +64,17 @@ type RangeBucket struct {
 // Shard 是一个 (表, 索引, slot) 的 BucketMap 分片。
 type Shard struct {
 	Version uint64
-	Next    int                      // 桶下标分配器
-	Eq      map[string]*EqEntry      // 等值/字典序副本条目（"l" 为字典序副本）
-	Ranges  []RangeBucket            // 范围桶区间列表（默认单桶 [{0,-inf,+inf}]）
+	Next    int                 // 桶下标分配器
+	Eq      map[string]*EqEntry // 等值/字典序副本条目（"l" 为字典序副本）
+	Ranges  []RangeBucket       // 范围桶区间列表（默认单桶 [{0,-inf,+inf}]）
 	loaded  bool
 }
 
 // DefaultShard 空分片（规则推导的默认形态）。
 func DefaultShard() *Shard {
 	return &Shard{
-		Next: 1,
-		Eq:   map[string]*EqEntry{},
+		Next:   1,
+		Eq:     map[string]*EqEntry{},
 		Ranges: []RangeBucket{{Idx: 0, Lo: "-inf", Hi: "+inf", State: Active}},
 		loaded: true,
 	}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -163,19 +164,39 @@ type Executor struct {
 	reg           *script.Registry // 谓词下推脚本（nil = 不下推）
 	nc            L1Cache          // L1 近缓存（nil = 关闭，docs/08 §8.4）
 	bm            *bucketmap.Store // 桶路由（分裂状态）；nil = 永远默认单桶
+	l4            L4Resolver       // L4 热桶副本（nil = 关闭）
+	telemetry     TelemetrySink    // 遥测采样（nil = 关闭）
 	batch         int
 	slotsPerRound int
 }
 
+// SetL4 接入 L4 热桶副本解析。
+func (e *Executor) SetL4(r L4Resolver) { e.l4 = r }
+
+// SetTelemetry 接入遥测采样。
+func (e *Executor) SetTelemetry(t TelemetrySink) { e.telemetry = t }
+
 // SetBucketMap 接入 BucketMap（分裂状态感知读路径，docs/08 §8.3）。
 func (e *Executor) SetBucketMap(bm *bucketmap.Store) { e.bm = bm }
 
-// L1Cache 是谓词指纹→pk 列表的近缓存接口（nearcache.Cache[string, []string] 满足）。
+// L1Cache 是谓词指纹→pk 列表的近缓存接口（nearcache.ShardedCache[[]string] 满足）。
 // 正确性纪律：缓存只存 pk 列表，回表 + 谓词校验照常执行——陈旧列表至多
 // 漏掉 TTL 窗口内的新行（3s，文档化语义），绝不会出错行。
 type L1Cache interface {
 	Get(key string) ([]string, bool)
 	Add(key string, val []string)
+}
+
+// L4Resolver 是热桶副本解析接口（controller.L4Manager 满足，docs/08 §8.4）：
+// 若值有 L4 副本，返回一个随机副本 key（异 slot）。
+type L4Resolver interface {
+	ReplicaFor(ctx context.Context, table, idxID, encVal, srcBucketKey string, randFn func(int) int) (string, bool)
+}
+
+// TelemetrySink 是遥测采样出口（telemetry.Recorder 满足，docs/08 §8.1）：
+// 1/64 概率采样命中时上报桶 key。
+type TelemetrySink interface {
+	Sample(ctx context.Context, bucketKey string)
 }
 
 // New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
@@ -398,7 +419,17 @@ func (s *RowStream) buildGroup(from, to int) []bucketScan {
 		case EqLookup:
 			for _, v := range s.req.Values {
 				for _, b := range s.eqBucketsAt(s16, v) {
-					out = append(out, bucketScan{key: keycodec.EqBucketKey(t.Name, s.req.Index.ID, v, s16, b)})
+					bk := keycodec.EqBucketKey(t.Name, s.req.Index.ID, v, s16, b)
+					// L4：热值副本替换源桶读（异 slot 摊开读 QPS，docs/08 §8.4）
+					if s.exec.l4 != nil && b == 0 {
+						if rep, ok := s.exec.l4.ReplicaFor(s.ctx, t.Name, s.req.Index.ID, keycodec.EscapeValue(v), bk, func(n int) int { return rand.Intn(n) }); ok {
+							bk = rep
+						}
+					}
+					if s.exec.telemetry != nil {
+						s.exec.telemetry.Sample(s.ctx, bk)
+					}
+					out = append(out, bucketScan{key: bk})
 				}
 			}
 		case RangeLookup:

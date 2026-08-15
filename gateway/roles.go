@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"time"
 
+	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/indexer"
 	"kidb/keycodec"
 	"kidb/sweeper"
+	"kidb/telemetry"
 )
 
 // roles.go：后台角色的装配与驱动（docs/08 §8.5）：
@@ -30,13 +32,23 @@ func (s *Server) startRoles(ctx context.Context) {
 	s.roleCancel = cancel
 	s.elector = controller.CtrlLock(s.deps.Client, s.deps.Reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano()))
 
+	// 自治链路：遥测采样 → 候选登记 → Controller 复核分裂/L4
+	rec := telemetry.New(s.deps.Client)
+	s.deps.Exec.SetTelemetry(rec)
+	bm := bucketmap.New(s.deps.Client, s.deps.Reg)
+	s.deps.Exec.SetBucketMap(bm)
+	spl := controller.NewSplitter(s.deps.Client, s.deps.Reg, bm)
+	l4 := controller.NewL4(s.deps.Client, s.deps.Reg)
+	s.deps.Exec.SetL4(l4)
+	s.manager = controller.NewManager(s.deps.Client, bm, spl, l4)
+
 	go s.elector.Campaign(roleCtx, s.controllerRole)
 	go s.sweeperLoop(roleCtx)
 	go s.indexerLoop(roleCtx)
 }
 
-// controllerRole 控制循环（分裂/合并 + DDL 作业巡检随下一批落地桶状态机后接活；
-// 当前为保活的占位 tick——选举/故障迁移语义本身已生效）。
+// controllerRole 控制循环：遥测候选复核 → 分裂/L4 决策（docs/08 §8.1/§8.2）。
+// 仅锁持有者干活；失约由 watchdog 立即 cancel（docs/08 §8.5）。
 func (s *Server) controllerRole(ctx context.Context) error {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -45,7 +57,7 @@ func (s *Server) controllerRole(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			// TODO(impl)：桶分裂/合并决策 + DDL 作业巡检（docs/08 §8.2/§8.3、docs/06 §6.3）
+			_ = s.manager.Tick(ctx) // 错误不致命：下轮再来（故障安全）
 		}
 	}
 }

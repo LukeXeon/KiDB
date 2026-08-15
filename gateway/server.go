@@ -31,6 +31,7 @@ type Server struct {
 	// 后台角色（docs/08 §8.5；ReadWriteOnly 豁免）
 	roleCancel context.CancelFunc
 	elector    *controller.Elector
+	manager    *controller.Manager
 }
 
 type sessRec struct {

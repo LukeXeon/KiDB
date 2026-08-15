@@ -136,3 +136,66 @@ func EscapeValue(v string) string {
 func HasDigestPrefix(escaped string) bool {
 	return strings.HasPrefix(escaped, "~x")
 }
+
+// ParseRangeBucketKey 反解范围桶 key（`i:{table}:{idx}:{stag}#r{n}`）。
+func ParseRangeBucketKey(key string) (table, idx string, slot uint16, sub int, ok bool) {
+	if !strings.HasPrefix(key, "i:") {
+		return "", "", 0, 0, false
+	}
+	rest := key[2:]
+	colon := strings.IndexByte(rest, ':')
+	if colon < 0 {
+		return "", "", 0, 0, false
+	}
+	table = rest[:colon]
+	rest = rest[colon+1:]
+	tagPos := strings.IndexByte(rest, '{')
+	if tagPos < 0 {
+		return "", "", 0, 0, false
+	}
+	idx = rest[:tagPos-1] // 去尾 ':'
+	end := strings.IndexByte(rest, '}')
+	if end < 0 {
+		return "", "", 0, 0, false
+	}
+	slot = Slot(rest[tagPos : end+1])
+	sub = 0
+	if h := strings.Index(rest[end:], "#r"); h >= 0 {
+		fmt.Sscanf(rest[end+h:], "#r%d", &sub)
+	}
+	return table, idx, slot, sub, true
+}
+
+// ParseEqBucketKey 反解等值桶 key（`i:{table}:{idx}={value}:{stag}#b{n}`）：
+// 遥测/Controller 从桶 key 还原定位信息用（桶 key 只由 keycodec 生成，
+// value 段经 EscapeValue 转义，不含结构分隔符）。
+func ParseEqBucketKey(key string) (table, idx, encVal string, slot uint16, sub int, ok bool) {
+	if !strings.HasPrefix(key, "i:") {
+		return "", "", "", 0, 0, false
+	}
+	rest := key[2:]
+	colon := strings.IndexByte(rest, ':')
+	if colon < 0 {
+		return "", "", "", 0, 0, false
+	}
+	table = rest[:colon]
+	rest = rest[colon+1:]
+	eqPos := strings.IndexByte(rest, '=')
+	tagPos := strings.IndexByte(rest, '{')
+	if eqPos < 0 || tagPos < 0 || eqPos > tagPos {
+		return "", "", "", 0, 0, false
+	}
+	idx = rest[:eqPos]
+	encVal = rest[eqPos+1 : tagPos-1] // tag 前一字是 ':' 分隔符（value 内 ':' 已被转义）
+	end := strings.IndexByte(rest, '}')
+	if end < 0 {
+		return "", "", "", 0, 0, false
+	}
+	tag := rest[tagPos : end+1]
+	slot = Slot(tag)
+	sub = 0
+	if h := strings.Index(rest[end:], "#b"); h >= 0 {
+		fmt.Sscanf(rest[end+h:], "#b%d", &sub)
+	}
+	return table, idx, encVal, slot, sub, true
+}

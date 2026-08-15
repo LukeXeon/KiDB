@@ -29,9 +29,9 @@
 
 ## 8.3 在线分裂协议（无停写、无读空洞、无 CROSSSLOT）
 
-> **v1 实现状态**：Controller 选举 + watchdog 闭环已落地（controller 包，含故障迁移测试）；
-> 本节的分裂/合并状态机（写路径 SPLITTING 双写 + 搬迁）是下一批——
-> 落地前写路径一律 ACTIVE 单桶（桶超阈值暂由 key 体积监控告警兜底，功能正确性不受影响）。
+> **实现状态**：全协议已落地（controller 包）：SplitEq/SplitRange/MergeEq/MergeRange +
+> 遥测采样（telemetry 包，候选登记）+ Manager 自动复核 + L4 副本生命周期；
+> 写路径双写与读路径双读去重经 PBT P1（rapid 随机交错）验证。
 
 子桶与父桶同 slot（stag 不变），全程单 slot Lua 原子步进（脚本资产见 [05](05-写入路径.md) §5.7）：
 
@@ -61,7 +61,7 @@
 
 L4 细节：
 
-- 副本带 `@ver` 版本戳（Hash 副字段），读者校验，戳旧则回退源桶；
+- 副本带 `@ver` 版本戳（伴生 String key `...副本key...@ver`——副本本体是 ZSet，单 key 单类型，"Hash 副字段"物理不可达；v5.0 实现期修订），读者校验，戳旧则回退源桶；
 - 写路径不变只写源桶——无多副本写一致性问题；
 - 刷新 = `ZRANGE 源桶` 全量读 + 副本 slot 内 Lua 原子重建（`DEL`+`ZADD`+`PEXPIRE 60s`），读者要么见旧副本要么见新副本；
 - 触发信号：信号源 A（采样）或 B（热 key 事件流）任一命中 + Controller `ZCARD` 复核；

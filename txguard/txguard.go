@@ -25,7 +25,7 @@ const maxStaleRetries = 3
 type Guard struct {
 	cli   kidb.Client
 	reg   *script.Registry
-	bm    *bucketmap.Store  // 桶路由（分裂状态），nil = 永远 ACTIVE 单桶
+	bm    *bucketmap.Store // 桶路由（分裂状态），nil = 永远 ACTIVE 单桶
 	clock func() time.Time // 测试可注入
 }
 
