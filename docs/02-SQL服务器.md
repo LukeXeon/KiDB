@@ -45,10 +45,24 @@ CREATE TABLE / CREATE [UNIQUE] INDEX / DROP TABLE / DROP INDEX / ALTER TABLE
 | | DDL 路径 | DML 路径 |
 |---|---|---|
 | 解析器 | `github.com/pingcap/tidb/pkg/parser`（独立 module，go.mod 锁版本） | go-mysql-server 内建 parser |
-| 原因 | 需要 MySQL 保真的建表/建索引语法 + KiDB 扩展载体 | 需要分析器/执行器/wire/sysvar 全家桶，gms 一站提供 |
+| 原因 | 要的是**纯 AST、零执行绑定**：gms 的 DDL 解析后会强制进入它自己的执行管道（TableCreator/AlterTable 接口 + 它的 plan 节点语义），而 KiDB 的 DDL 语义（COMMENT 载体、Catalog CAS、_job 作业化）与之不对应；另有 `NormalizeDigest` 指纹能力（plan cache 键，gms/vitess 无等价物）；MySQL DDL 边缘语法保真度更高 | 需要分析器/执行器/wire/sysvar 全家桶，gms 一站提供 |
 | 频率 | 低频（管理面） | 高频（数据面） |
 | 一致性风险 | 两解析器语法覆盖不完全一致（如某边缘语法一边能过一边报错） | — |
 | 缓解 | DDL 语法面刻意取两解析器交集（标准 MySQL DDL 子集，§2.4）；差异用例进测试（[12](12-测试方案.md) §12.5） | — |
+
+**接线事实（经常被误读的一点）**：两个解析器**从不接线**——没有"TiDB AST → gms AST"的翻译。数据流是并行路径：
+
+```
+ComQuery(sql)
+  → 前置分类器（剥注释 + 首关键字）
+  → DDL 白名单命中 → ddl.Parse（TiDB parser）→ 校验 → ExecDDL 直写 Redis Catalog → 回 OK 包
+      （gms 从头到尾没见过这条语句）
+  → 其余 → 原文透传 gms Handler（gms 用自己的 parser 解析执行）
+```
+
+gms 认识一张表的时刻是**查询期**：SELECT 进来，gms analyzer 解析表引用 → 调我们的 `Database.GetTableInsensitive` → 我们从 Catalog 读出 TableDef 返回 Table 对象。DDL 期 gms 完全不知情——这就是"两个引擎互不感知对方存在"的确切含义。
+
+实证记录（v5.1）：gms/vitess parser 对 KiDB DDL 形态**语法层可解析、COMMENT 载体可提取**（表选项 `TableOpts`、索引选项 `IndexOption` 均可达）——所以不选它不是"做不到"，是代价结构：用它就要接受它的执行绑定与调用约定，且 plan cache 指纹需自研；DDL 是低频管理面，为它选语法面最强的解析器成本为零。
 
 **纪律**：DDL 路径产出 Catalog 定义后直接落库，绝不把 DDL 文本透传给 gms；DML 路径绝不经过 TiDB parser。两个路径的语法面不追求互相兼容对方全集，只保证各自文档化子集。
 **v5.1 注记**：TiDB parser 在 DML 侧有一处**识别性**使用——网关快速路径（COUNT(*)/MIN/MAX 白名单形状识别，[04](04-查询路径.md) §4.1/§4.5）；它只回答"形状是否命中白名单"，执行语义仍归 gms/内核执行器，判不准一律回退引擎路径。
