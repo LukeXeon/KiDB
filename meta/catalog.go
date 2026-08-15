@@ -17,11 +17,11 @@ import (
 // （格式版本号内嵌，迁移走 docs/06 §6.4 演进纪律）。
 // TODO(impl): Save 的 CAS 当前为读-改-写，实现期改 config_set 风格 Lua 原子 CAS。
 type CatalogStore struct {
-	cli kidb.Client
+	cli kidb.Store
 }
 
 // NewCatalogStore 构造存储。
-func NewCatalogStore(cli kidb.Client) *CatalogStore { return &CatalogStore{cli: cli} }
+func NewCatalogStore(cli kidb.Store) *CatalogStore { return &CatalogStore{cli: cli} }
 
 // Load 读取表定义；表不存在返回 (nil, 0, nil)。
 func (s *CatalogStore) Load(ctx context.Context, table string) (*TableDef, error) {

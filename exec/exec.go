@@ -166,7 +166,7 @@ type Request struct {
 
 // Executor 执行 Request，产出流式行。
 type Executor struct {
-	cli           kidb.Client
+	cli           kidb.Store
 	reg           *script.Registry // 谓词下推脚本（nil = 不下推）
 	nc            L1Cache          // L1 近缓存（nil = 关闭，docs/08 §8.4）
 	bm            *bucketmap.Store // 桶路由（分裂状态）；nil = 永远默认单桶
@@ -210,7 +210,7 @@ type TelemetrySink interface {
 }
 
 // New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
-func New(cli kidb.Client, reg *script.Registry) *Executor {
+func New(cli kidb.Store, reg *script.Registry) *Executor {
 	return &Executor{cli: cli, reg: reg, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound}
 }
 

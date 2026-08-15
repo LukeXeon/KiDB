@@ -19,7 +19,7 @@ import (
 
 // Deps 是引擎层对内核的依赖面。
 type Deps struct {
-	Client kidb.Client
+	Client kidb.Store
 	Reg    *script.Registry
 	Cache  *meta.CatalogCache
 	Store  *meta.CatalogStore

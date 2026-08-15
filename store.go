@@ -6,12 +6,12 @@ import (
 	"kidb/script"
 )
 
-// Client 是内核与底层 Redis 集群客户端之间的唯一接口
+// Store 是内核与底层 Redis 集群客户端之间的唯一接口
 // （docs/09 §9.3：实现方必须满足契约 R1~R7）。
 //
 // 参考实现：adapter/goredis（go-redis/v9 ClusterClient）。
 // 私有客户端在各自仓库实现本接口，通过一致性测试套件（docs/12 §12.4）后接入。
-type Client interface {
+type Store interface {
 	// Do 执行单条命令。命令必须携带 key（契约 R2）。
 	Do(ctx context.Context, cmd string, args ...any) (any, error)
 

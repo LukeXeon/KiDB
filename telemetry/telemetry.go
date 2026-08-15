@@ -18,13 +18,13 @@ const CandKey = "hotcand"
 
 // Recorder 是采样记录器。
 type Recorder struct {
-	cli   kidb.Client
+	cli   kidb.Store
 	ratio int // 采样率 1/ratio（默认 64，telemetry_sample_ratio）
 	rnd   *rand.Rand
 }
 
 // New 构造。
-func New(cli kidb.Client) *Recorder {
+func New(cli kidb.Store) *Recorder {
 	return &Recorder{cli: cli, ratio: 64, rnd: rand.New(rand.NewSource(rand.Int63()))}
 }
 
@@ -51,7 +51,7 @@ func (r *Recorder) Sample(ctx context.Context, bucketKey string) {
 }
 
 // Candidates 取候选桶列表（Controller 复核入口）。
-func Candidates(ctx context.Context, cli kidb.Client) ([]string, error) {
+func Candidates(ctx context.Context, cli kidb.Store) ([]string, error) {
 	res, err := cli.Do(ctx, "HKEYS", CandKey)
 	if err != nil {
 		return nil, err
@@ -69,7 +69,7 @@ func Candidates(ctx context.Context, cli kidb.Client) ([]string, error) {
 }
 
 // Confirm 精确复核：返回桶成员数（ZCARD）并摘除候选。
-func Confirm(ctx context.Context, cli kidb.Client, bucketKey string) (int64, error) {
+func Confirm(ctx context.Context, cli kidb.Store, bucketKey string) (int64, error) {
 	res, err := cli.Do(ctx, "ZCARD", bucketKey)
 	if err != nil {
 		return 0, err

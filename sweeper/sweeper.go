@@ -21,7 +21,7 @@ import (
 // Sweeper 执行清扫。
 type Sweeper struct {
 	m          *metrics.Metrics // 指标（nil = no-op）
-	cli        kidb.Client
+	cli        kidb.Store
 	reg        *script.Registry
 	batch      int              // 每 tick 每 slot 到期批大小（docs/10 sweeper_batch）
 	maxBatches int              // 每 tick 每 slot 批数上限（sweeper_max_batches_per_tick）
@@ -29,7 +29,7 @@ type Sweeper struct {
 }
 
 // New 构造（参数即 docs/10 §10.2 变量默认值）。
-func New(cli kidb.Client, reg *script.Registry) *Sweeper {
+func New(cli kidb.Store, reg *script.Registry) *Sweeper {
 	return &Sweeper{cli: cli, reg: reg, batch: 512, maxBatches: 4}
 }
 

@@ -82,7 +82,7 @@ func DefaultShard() *Shard {
 
 // Store 是 BucketMap 的读写存储（版本 CAS 经 bucket_state_cas.lua）。
 type Store struct {
-	cli kidb.Client
+	cli kidb.Store
 	reg *script.Registry
 
 	mu    sync.RWMutex
@@ -92,7 +92,7 @@ type Store struct {
 }
 
 // New 构造（缓存 TTL 1s——分裂中间态读侧容忍见 docs/08 §8.3）。
-func New(cli kidb.Client, reg *script.Registry) *Store {
+func New(cli kidb.Store, reg *script.Registry) *Store {
 	return &Store{cli: cli, reg: reg, cache: map[string]*Shard{}, since: time.Now(), ttl: time.Second}
 }
 
