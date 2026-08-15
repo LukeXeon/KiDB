@@ -14,8 +14,8 @@
 - **MySQL 协议/语法的单表 SQL**，以网关形态交付（任意语言/驱动/GUI 直连）：
   - SELECT：等值 / 范围 / AND / OR / ORDER BY / LIMIT / OFFSET / COUNT / GROUP BY / MIN / MAX / 前缀 LIKE / TTL 自省（见 [04](04-查询路径.md)）；
   - INSERT / UPDATE / DELETE / UPSERT（见 [05](05-写入路径.md)）；
-  - DDL：CREATE/DROP TABLE、CREATE/DROP INDEX、ALTER TABLE 受限子集，TiDB `pkg/parser` 解析（见 [02](02-SQL服务器.md) §2.4）；
-- 兼容性：AUTO_INCREMENT、Prepared Statements、客户端工具握手应答（见 [02](02-SQL服务器.md) §2.10）；
+  - DDL：CREATE/DROP TABLE、CREATE/DROP INDEX（gms 引擎托管，KiDB 扩展经 COMMENT 载体，见 [02](02-SQL服务器.md) §2.3）；
+- 兼容性：AUTO_INCREMENT、Prepared Statements、客户端工具握手应答（见 [02](02-SQL服务器.md) §2.9）；
 - 二级索引：同步（默认）与异步（写热点字段）两种模式，在线构建；
 - 行级 TTL：过期 = 行不存在，查询表现为查不到，不报错；
 - 大 key / 热 key 自动治理：桶在线分裂合并、热桶值复制（见 [08](08-自治治理与热Key.md)）；
@@ -56,7 +56,6 @@ KiDB 与 TiDB 在架构形状上同构——**无状态 SQL 计算层 + 共享 K
 | schema lease + 版本校验（`pkg/domain`） | Catalog/BucketMap `_ver` + lease 纪律 | 元数据演进协议（[06](06-元数据与Schema演进.md) §6.2） |
 | `SHARD_ROW_ID_BITS`/`AUTO_RANDOM` 打散写热点 | 异步索引 pk 全局散列 + `ver`/`seq` 分片 | 写热点摊平（[05](05-写入路径.md) §5.2、[08](08-自治治理与热Key.md) §8.6） |
 | `mysql.*` 系统表 / `SHOW VARIABLES` | `cfg:global` 内置系统表 + `SET GLOBAL` | 配置即数据（[10](10-配置与可观测.md) §10.2） |
-| plan cache（schema 版本绑定失效） | plan cache（fingerprint + schema/bm 版本绑定） | 计划缓存失效纪律（[02](02-SQL服务器.md) §2.6） |
 
 **结论**：方向正确。差异全部来自 KV 层能力差（§1.4），不是设计偏差。每个机制章开头都有 "TiDB 参照 → Redis 约束 → KiDB 设计" 的推导块；三条整体路线（直接用 TiDB / 搬 SQL 层伪装 TiKV / 翻译式复用）的评估与尸检见 [13](13-TiDB复用清单.md)。
 

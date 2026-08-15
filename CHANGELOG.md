@@ -2,7 +2,7 @@
 
 所有显著的变更、修正与设计裁决记录于此。docs/ 内只保留当前设计与实现状态，不写历史。
 
-## v6.0（架构收敛，破坏性变更，进行中）
+## v6.0（架构收敛，破坏性变更，✅ 已落地 2026-08-16）
 
 > 总原则（用户裁决）：**gms → 我们的转换层 → Redis**——在 gms 框架内实现数据库，
 > 不是把它包装一层；网关不做任何 SQL 文本解析；该删的删、该改的改，不留过渡形态。
@@ -10,7 +10,7 @@
 > 双格式并存）——预发布阶段变更直接演进。
 > 完整任务清单与完成判据见 ROADMAP「v6.0 架构收敛」节。
 
-已裁决的拆除/改造（文档已按目标态重写，代码随之）：
+已裁决并全部落地的拆除/改造（代码与文档同步完成）：
 
 - **网关纯装配化**：handler 包装层全灭。事务拒绝改由自定义 `engine.Session`（`TransactionSession` 全显式报错——gms 对无该接口的会话静默 no-op BEGIN，是隐性部分提交陷阱，实证）；ro 执法进引擎写入口/DDL 接口/SET GLOBAL 钩子；逐语句慢日志退役（指标 + 全扫告警承接）；
 - **系统变量 gms 原生**：3 个语义开关注册为 `sql.MysqlSystemVariable`，`NotifyChanged` 经 `Session.Cfg` 持久化 `cfg:global`；配置面正则拦截删除；
@@ -21,6 +21,13 @@
 - **工具包收敛**：`ds/` 通用工具包——自研泛型优先队列（container/heap 封装）替代并移除 `gopkg.in/dnaeon/go-priorityqueue.v1`；重复工具函数归拢；`internal/` 平铺（`internal/tuning`→`tuning`、`internal/redistest`→`testutil`——独立进程非库，internal 约束无对象）；
 - **i18n**：引入 `github.com/nicksnyder/go-i18n/v2`——用户面向消息全部走消息目录（en 默认 + zh）；**消息不得含技术文档引用**（docs 引用只留代码注释）；
 - **泛型使用点审计**：扫描结果与库推荐见审计记录（ROADMAP v6.0 第 8 项）。
+
+落地期追加发现（实现实证，已入代码与文档）：
+
+- **gms autocommit 事务生命周期**：engine 对每条语句自动 StartTransaction（`beginTransaction`），语句收尾经 TransactionCommittingIter 提交——TransactionSession 全报错会杀死所有语句。正解 = 占位 tx + 调用序判别（显式 BEGIN 入口 GetTransaction()!=nil，gms v0.20 实证），BEGIN/SAVEPOINT 显式 1235，隐式 autocommit 零开销放行；
+- **错误码映射唯一落点** = engine/sqlerr.go（无网关包装层后）：gms `CastSQLError` 对 *mysql.SQLError 透传、对 go-errors kind 自识别；唯一冲突必须保留 gms 原生错误结构（Existing 行是 INSERT IGNORE/ODKU 分流的输入）；
+- **忠实类型重建**走白名单文本解析（columnTypeFromText，往返恒等测试钉死）而非 gms ParseColumnTypeString（每次全量 vitess 解析，过重）；列级 DEFAULT/ON UPDATE/COLLATE 一并显式拒绝（静默丢弃 = 与用户声明不符的行为，设计原点红线）；
+- **metrics 系列同步摘除**（plan_cache_*/slow_queries_total），tuning.toml 摘除 slow_query_threshold_ms/plan_cache_capacity 死参数。
 
 ## v5.1（实现期，进行中）
 

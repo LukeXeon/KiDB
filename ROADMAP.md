@@ -3,7 +3,7 @@
 > 本清单是唯一权威的"还没做什么"记录；每项标注性质与去向。完成即划走。
 > 排序即建议优先级。
 
-## v6.0 架构收敛（进行中，破坏性变更）
+## v6.0 架构收敛（✅ 已完成，2026-08-16；破坏性变更）
 
 > 总原则（用户裁决，2026-08-16）：**gms → 我们的转换层 → Redis**——
 > 在 gms 框架内实现数据库，不是把它包装一层；网关不做任何 SQL 文本解析；
@@ -26,7 +26,14 @@
 | 9 | i18n | `github.com/nicksnyder/go-i18n/v2`：用户面向消息（错误/提示）全部走消息目录（en 默认 + zh 可选）；**消息不得含技术文档引用**（docs/xx §x.y 不进用户文本，留内部注释） |
 | 10 | 测试与文档对齐 | 网关薄壳相关测试重写；P5 分类器对拍退役（已落 docs/12）；docs 01/02/04/07/10/13 已按 v6.0 重写 |
 
-完成判据：全测试绿 + `go.mod` 无 TiDB parser/priorityqueue + gateway 无 SQL 文本处理 + wire_gen.go 装配全组件 + i18n 消息目录落位。
+完成判据（全部达成）：全测试绿 ✅ + `go.mod` 无 TiDB parser/dnaeon ✅ + gateway 无 SQL 文本处理 ✅（handler 包装层全灭，session/引擎扩展点承接执法）+ wire_gen.go 装配全组件 ✅ + i18n 消息目录落位 ✅（en 默认 + zh，`--lang` 开关；消息零 docs 引用，目录 parity 测试钉死）。
+
+落地注记（实现期发现，docs 相应处已对齐）：
+
+- **显式 BEGIN 判别式**：gms 对每条语句 autocommit 自动 StartTransaction——全部报错会杀死所有语句；实证调用序后采用"占位 tx + GetTransaction()!=nil ⟺ 显式 BEGIN"判别（engine/session.go）；
+- **错误码映射落点**：无包装层后移入 engine/sqlerr.go（gms CastSQLError 透传 *mysql.SQLError，gms 原生 kind 错误原样放行——唯一冲突的 Existing 行结构是 IGNORE/ODKU 分流依赖）；
+- **忠实类型往返**：columnTypeFromText 白名单文本解析（非 gms ParseColumnTypeString——后者每次全量 vitess 解析过重）；DEFAULT/ON UPDATE/列级 COLLATE 同步显式拒绝（静默丢弃违背设计原点）；
+- **DDL COMMENT payload 内联多索引**：CREATE TABLE 内联索引经 plan.AlterIndex 逐索引调 CreateIndex（gms 路径实证），空表快速通道绕开单 _job 槽位。
 
 ## A. 正确性执法缺口——**已完成（v5.1 批次）**
 

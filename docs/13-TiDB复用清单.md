@@ -13,13 +13,9 @@
 | **Y. 搬 TiDB SQL 层，Redis 伪装 TiKV**（实现 `kv.Storage`/`kv.Transaction` 接口） | 复用 parser+planner+executor 全套 | ❌ 死在三个接口语义上（尸检见 §13.2）；为填洞会把桶模型/hash tag/Lua 全部重新发明一遍，还多背整个 TiDB 的代码与运维面 |
 | **Z. 翻译式设计 + 模块化复用（本方案）** | 约束推导机制（[09](09-后端契约与适配器.md) 为 forcing function），模块边界允许的代码直接依赖 | ✅ 采用 |
 
-> **常被问起：为什么同时依赖 go-mysql-server 和 TiDB parser？**
-> 两者给的答案不同且互不替代：gms 给的是**运行时**（DML 分析器/执行器 + MySQL 协议服务器 + 系统变量），
-> 它的 parser 不作为独立的 MySQL 高保真 DDL 解析器暴露；TiDB parser 给的是**纯解析**
-> （DDL 语法保真 + `NormalizeDigest` 指纹 + 快速路径形状识别），它没有我们能用的执行引擎
-> （其执行层焊死在 TiKV 事务模型上，§13.2）。用 gms 的 parser 做 DDL 是降级（语法面窄、
-> 扩展载体不可控）；用 TiDB parser 做 DML 是空转（gms 只认自己的 AST，仍要再解析一次）。
-> 所以职责切分是：**gms = 引擎+协议；TiDB parser = 解析器**。
+> **历史注记（v5.x）**：曾双解析器并存——gms 管 DML 运行时，TiDB parser 管 DDL 解析
+> 与指纹。v6.0 单引擎纪律终结该分工（§13.3）：DDL 经 gms 扩展点直达，
+> 指纹随网关侧解析一并拆除，gms 原生系统变量/预处理注册表承接其余用途。
 
 ## 13.2 路线 Y 尸检：为什么 SQL 层搬不动
 
@@ -51,7 +47,6 @@ fork 禁令与版本基线等纪律随之失效（无对象）。
 | TiDB 模块 | 移植到 KiDB | 移植内容 | 不能直接依赖的原因 |
 |---|---|---|---|
 | `pkg/domain` SchemaValidator | [06](06-元数据与Schema演进.md) §6.2 | schema lease：租约内信任本地快照、越界必检、版本校验才是正确性（lease 只是优化） | 焊在 etcd/PD 会话与 TiDB 的全局 schema 版本协议上 |
-| `pkg/planner/core/plan_cache*` | [02](02-SQL服务器.md) §2.6 | plan cache 条目绑定 schema 版本，命中前比对，惰性失效 | 依赖 TiDB 的 infoschema 与计划结构 |
 | `pkg/owner/manager.go` | [08](08-自治治理与热Key.md) §8.5 | owner 语义闭环：抢锁任职 → watchdog 盯续约 → **续约失败立即退出角色** → 重新竞选 | 基于 etcd session；KiDB 用 Redis `SET NX PX` + Lua 续约，语义照抄载体自研（~30 行薄层） |
 | `pkg/kv/kv.go` Request 形状 | [04](04-查询路径.md) §4.3 | 单请求对象贯穿执行器→存储：范围集 + 并发 + 保序 + 副本读 + 预算 | TiDB 的 Request 面向 coprocessor 与 region；KiDB 面向桶与 slot |
 | client-go `Backoffer` | [09](09-后端契约与适配器.md) §9.6 | 按错误类型分派退避策略与上限，不一律重试 | client-go 处理的是 region 错误族；KiDB 处理 Redis 错误族（MOVED/ASK/CLUSTERDOWN/LOADING/READONLY/TRYAGAIN），分类思想照抄 |
@@ -81,5 +76,5 @@ fork 禁令与版本基线等纪律随之失效（无对象）。
 ## 13.6 复用纪律与版本基线
 
 - **零依赖后**：版本基线/fork 禁令纪律无对象（§13.3）；
-- **跟踪上游**：TiDB 的语义演进（owner/schema lease/plan cache 等移植项的源头语义）每季度回访一次——移植的是语义，语义有源头；
+- **跟踪上游**：TiDB 的语义演进（owner/schema lease 等移植项的源头语义）每季度回访一次——移植的是语义，语义有源头；
 - **升级纪律**：go-mysql-server / go-redis / miniredis 任一升级触发全量回归（[12](12-测试方案.md) §12.9）。

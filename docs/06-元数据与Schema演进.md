@@ -9,7 +9,7 @@
 | Key | 类型 | 内容 |
 |---|---|---|
 | `c:table:{table}` | Hash | 表定义：列（名/类型/默认值）、主键、索引定义（含 COMMENT 载体解析出的 KiDB 选项）、`default_ttl`、`max_row_bytes`、`expected_rows`、`exp_shards`、`dimension` 标记；`_ver`（表级版本，INCR）、`_job`（进行中的 DDL 作业，无则空） |
-| `ver:schema` | String | 全局 schema 版本：任何 DDL 完成一步即 INCR——plan cache 失效锚点与 lease 刷新信号 |
+| `ver:schema` | String | 全局 schema 版本：任何 DDL 完成一步即 INCR——lease 刷新信号 |
 | `bm:{table}:{idx}:{stag}` | Hash | BucketMap 分片（稀疏 + 每 slot 分片，[03](03-数据模型与编码.md) §3.1 注记）+ `version` 字段 |
 | `cfg:global` | Hash | 集群配置（[10](10-配置与可观测.md) §10.2）——与元数据共用同一套版本校验刷新循环 |
 
@@ -26,7 +26,6 @@
 3. **越界必检**：距上次校验超过 lease 的实例，下一次元数据使用前必须先比对 `ver:schema`（一次 `GET`，经逻辑 pipeline 与业务命令合流，不占独立连接）；版本不变 → 重置租约计时；版本变 → 全量刷新 Catalog/BucketMap 快照；
 4. **写路径独立兜底**：写 Lua 内对 BucketMap version 做 CAS（[05](05-写入路径.md) §5.1 第 4 步）——即使 lease 窗口内写者拿到旧桶布局，脚本内 CAS 也会返回 stale 强制刷新重试。**正确性从不依赖 lease 守约，lease 只是性能优化**（对齐 TiDB：lease 是优化，schema 版本校验才是正确性）；
 5. **读路径容忍窗口**：lease 窗口内读到旧布局（如桶刚分裂），后果只是多扫一个父桶/旧桶——回表校验兜底中间态（[04](04-查询路径.md) §4.3），不会出错行；
-6. **plan cache 联动**：缓存条目携带 schema/bm 版本，命中前比对（[02](02-SQL服务器.md) §2.6）——DDL 后旧计划惰性失效，无需主动广播。
 
 与 TiDB 的差异（有意为之）：TiDB lease 违约会阻塞/失败 SQL（强 schema 一致）；KiDB lease 违约最坏走旧桶布局多扫一点、写路径 stale 重试——**缓存定位下"短暂性能退化"优于"可用性阻断"**。
 
