@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"log/slog"
-	"strconv"
 	"time"
 
 	"github.com/pingcap/tidb/pkg/parser"
@@ -13,10 +12,13 @@ import (
 // 语句指纹（NormalizeDigest）、路由、行数、耗时、是否全扫。
 // 无索引谓词走了全扫放行的（hint/白名单）**强制告警**（与阈值无关）+
 // fullscan_fallback_total 计数。
+//
+// 阈值是进程级配置（Server.slowQueryThreshold，默认 500ms）——
+// 不是共享变量（docs/01 §1.0：调优参数不设 SQL 变量）。
 
 // slowQuery 在 ComQuery 结束时统一判定（defer 调用）。
 func (h *kidbHandler) slowQuery(ctx context.Context, query, route string, fullscan bool, rows int, dur time.Duration, qerr error) {
-	threshold := h.slowThreshold(ctx)
+	threshold := h.s.slowQueryThreshold
 	slow := dur > threshold
 	if !slow && !fullscan {
 		return
@@ -45,17 +47,4 @@ func (h *kidbHandler) slowQuery(ctx context.Context, query, route string, fullsc
 		m.SlowQueries.WithLabelValues(route).Inc()
 	}
 	slog.Warn("kidb 慢查询", attrs...)
-}
-
-// slowThreshold 读 slow_query_threshold_ms 变量（默认 500ms；本地缓存秒级）。
-func (h *kidbHandler) slowThreshold(ctx context.Context) time.Duration {
-	v, _, err := h.s.cfg.Get(ctx, "slow_query_threshold_ms")
-	if err != nil {
-		return 500 * time.Millisecond
-	}
-	ms, err := strconv.Atoi(v)
-	if err != nil || ms < 0 {
-		return 500 * time.Millisecond
-	}
-	return time.Duration(ms) * time.Millisecond
 }

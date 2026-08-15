@@ -128,7 +128,7 @@ DDL 不是一条命令的结束，而是一个作业的开始：校验 → Catal
 - **指纹**：`parser.NormalizeDigest(sql)`（lexer 级归一，不出 AST，~µs 级）作为缓存键——同指纹必同列名集合，守卫判定在指纹内稳定（索引存在性不随字面量变化）；
 - **条目绑定版本**：条目记录生成时的全局 schema 版本（`CatalogCache.SchemaVersion`，租约内零 RTT）；命中前比对，不一致即弃用重建——**DDL 上线、索引可见后旧判定绝不复用**（惰性精确失效，对齐 TiDB plan cache 的 schema-version 校验）；
 - **有意不缓存**：全扫依赖判定（hint/白名单放行与 ERR_NO_INDEX 拒绝）——它们随 `query_allow_fullscan_tables` 漂移而配置变更不走 schema 版本，保守每次现算；
-- 容器：LRU `plan_cache_capacity`（默认 1024，热更）；
+- 容器：LRU 1024 条（内置常量，docs/01 §1.0 调优不设变量）；
 - 防注入标准姿势：引导业务一律 Prepared Statements。
 
 ## 2.7 系统变量（配置即数据的 SQL 面）

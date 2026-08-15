@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"kidb/bucketmap"
@@ -45,65 +44,35 @@ func (s *Server) startRoles(ctx context.Context) {
 	s.manager = controller.NewManager(s.deps.Client, bm, spl, l4)
 	s.jobrunner = controller.NewJobRunner(s.deps.Client, s.deps.Store, s.deps.Cache, s.deps.Exec, bm)
 
-	// L1 近缓存装配（docs/08 §8.4）：otter 底座；nearcache_ttl/_capacity
-	// 热更新经轮询换装（换装即丢弃旧缓存——版本校验语义外的进程内缓存，
-	// 重建代价 = 一次冷启动窗口，可接受）。L2 随 L1 生效（exec 内 singleflight）。
-	// 同一轮询协程驱动 L3 副本读开关（replica_read 变量 × 适配器能力位）。
-	s.attachReadPathSwitches(roleCtx)
+	// 读路径开关装配（docs/01 §1.0：变量只承载语义开关——replica_read /
+	// hotkey_row_cache；L1/L2 常量装配一次到位：3s/10000，调优参数不设变量）。
+	s.deps.Exec.SetNearCache(nearcache.NewSharded[[]string](10000, 3*time.Second))
+	s.attachSemanticSwitches(roleCtx)
 
 	go s.elector.Campaign(roleCtx, s.controllerRole)
 	go s.sweeperLoop(roleCtx)
 	go s.indexerLoop(roleCtx)
 }
 
-// attachReadPathSwitches 读路径近端开关装配 + 轮询（1s，与 schema lease 同节奏）：
-// L1 近缓存（变量变化换装）、L3 副本读（replica_read × 能力位）、
-// 行级近缓存（hotkey_row_cache；默认关闭——陈旧窗口语义见 docs/08 §8.4）。
-func (s *Server) attachReadPathSwitches(ctx context.Context) {
-	var cur *nearcache.ShardedCache[[]string]
+// attachSemanticSwitches 语义开关轮询（1s，与 schema lease 同节奏）：
+// L3 副本读（replica_read × 适配器能力位）与行级近缓存（hotkey_row_cache，
+// 默认关闭——陈旧窗口语义见 docs/08 §8.4）。容量/TTL 用内置常量（3s/10000）。
+func (s *Server) attachSemanticSwitches(ctx context.Context) {
 	var curRow *nearcache.RowCache
-	var curTTL time.Duration
-	var curCap int
 	apply := func() {
-		ttl, capN := s.l1Config(ctx)
-		if cur == nil || ttl != curTTL || capN != curCap {
-			nc := nearcache.NewSharded[[]string](capN, ttl)
-			s.deps.Exec.SetNearCache(nc)
-			if cur != nil {
-				_ = cur.Close()
-			}
-			cur, curTTL, curCap = nc, ttl, capN
-		}
 		// L3：能力位缺失时变量无效（自动降级，docs/09 §9.4）
-		on := s.deps.Client.Capabilities().ReplicaRead && s.replicaReadEnabled(ctx)
+		on := s.deps.Client.Capabilities().ReplicaRead && s.boolVar(ctx, "replica_read")
 		s.deps.Exec.SetReplicaRead(on)
-		// 行级近缓存（默认关闭；容量/TTL 随 nearcache_* 变量）
-		if s.rowCacheEnabled(ctx) {
+		// 行级近缓存（默认关闭）
+		if s.boolVar(ctx, "hotkey_row_cache") {
 			if curRow == nil {
-				curRow = nearcache.NewRowCache(curCap, curTTL)
+				curRow = nearcache.NewRowCache(10000, 3*time.Second)
 				s.deps.Exec.SetRowCache(curRow)
 			}
 		} else if curRow != nil {
 			s.deps.Exec.SetRowCache(nil)
 			_ = curRow.Close()
 			curRow = nil
-		}
-		// plan cache 容量热更（plan_cache_capacity，docs/02 §2.6）
-		if v, _, err := s.cfg.Get(ctx, "plan_cache_capacity"); err == nil {
-			if n, perr := strconv.Atoi(v); perr == nil {
-				s.plans.resize(n)
-			}
-		}
-		// 限流通道热更（docs/07 §7.4 + docs/06 §6.3）
-		if v, _, err := s.cfg.Get(ctx, "query_fullscan_rate_limit"); err == nil {
-			if n, perr := strconv.Atoi(v); perr == nil {
-				s.deps.Exec.SetFullscanLimit(n)
-			}
-		}
-		if v, _, err := s.cfg.Get(ctx, "ddl_backfill_rate_limit"); err == nil {
-			if n, perr := strconv.Atoi(v); perr == nil {
-				s.jobrunner.SetBackfillRate(n)
-			}
 		}
 	}
 	apply()
@@ -113,9 +82,6 @@ func (s *Server) attachReadPathSwitches(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				if cur != nil {
-					_ = cur.Close()
-				}
 				if curRow != nil {
 					_ = curRow.Close()
 				}
@@ -127,34 +93,10 @@ func (s *Server) attachReadPathSwitches(ctx context.Context) {
 	}()
 }
 
-// replicaReadEnabled 读 replica_read 变量（默认 false）。
-func (s *Server) replicaReadEnabled(ctx context.Context) bool {
-	v, _, err := s.cfg.Get(ctx, "replica_read")
+// boolVar 读布尔语义开关（默认 false）。
+func (s *Server) boolVar(ctx context.Context, name string) bool {
+	v, _, err := s.cfg.Get(ctx, name)
 	return err == nil && v == "true"
-}
-
-// rowCacheEnabled 读 hotkey_row_cache 变量（默认 false，docs/08 §8.4 覆盖边界）。
-func (s *Server) rowCacheEnabled(ctx context.Context) bool {
-	v, _, err := s.cfg.Get(ctx, "hotkey_row_cache")
-	return err == nil && v == "true"
-}
-
-// l1Config 读取 nearcache_ttl/_capacity 变量（解析失败回落默认——
-// 变量校验在 SET 时 fail-fast，这里是防御）。
-func (s *Server) l1Config(ctx context.Context) (time.Duration, int) {
-	ttl := 3 * time.Second
-	capN := 10000
-	if v, _, err := s.cfg.Get(ctx, "nearcache_ttl"); err == nil {
-		if d, perr := time.ParseDuration(v); perr == nil {
-			ttl = d
-		}
-	}
-	if v, _, err := s.cfg.Get(ctx, "nearcache_capacity"); err == nil {
-		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
-			capN = n
-		}
-	}
-	return ttl, capN
 }
 
 // controllerRole 控制循环：遥测候选复核 → 分裂/L4 决策（docs/08 §8.1/§8.2）。

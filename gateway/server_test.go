@@ -161,12 +161,12 @@ func TestGatewaySmoke(t *testing.T) {
 	}
 
 	// 配置管理面（docs/10 §10.2：SET GLOBAL → cfg:global；SHOW LIKE 读回）
-	execSQL("SET GLOBAL bucket_split_members = 60000")
+	execSQL("SET GLOBAL query_allow_fullscan_tables = 'users'")
 	var varName, varValue string
-	if err := db.QueryRowContext(ctx, "SHOW GLOBAL VARIABLES LIKE 'bucket\\_split\\_members'").Scan(&varName, &varValue); err != nil {
+	if err := db.QueryRowContext(ctx, "SHOW GLOBAL VARIABLES LIKE 'query\\_allow\\_fullscan\\_tables'").Scan(&varName, &varValue); err != nil {
 		t.Fatalf("SHOW VARIABLES: %v", err)
 	}
-	if varName != "bucket_split_members" || varValue != "60000" {
+	if varName != "query_allow_fullscan_tables" || varValue != "users" {
 		t.Fatalf("SHOW = %s=%s", varName, varValue)
 	}
 

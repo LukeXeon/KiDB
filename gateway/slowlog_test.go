@@ -3,7 +3,9 @@ package gateway
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,13 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
+
+	"kidb"
+	"kidb/engine"
+	"kidb/exec"
+	"kidb/internal/redistest"
+	"kidb/meta"
+	"kidb/txguard"
 )
 
 // slogCapture 测试用日志捕获 Handler。
@@ -41,7 +50,7 @@ func (c *slogCapture) contains(sub string) bool {
 }
 
 // TestSlowQueryLog 慢查询日志（docs/10 §10.4）：
-// 阈值 0 → 任意查询落日志（指纹/路由/行数/耗时字段齐全）；
+// 超阈值（进程级阈值，测试设为 ~0）查询落日志（指纹/路由/行数/耗时）；
 // 全扫放行 → 与阈值无关的强制告警。
 func TestSlowQueryLog(t *testing.T) {
 	cap_ := &slogCapture{}
@@ -49,9 +58,28 @@ func TestSlowQueryLog(t *testing.T) {
 	slog.SetDefault(slog.New(cap_))
 	defer slog.SetDefault(prev)
 
-	dsn, _, cleanup := newTestServer(t)
-	defer cleanup()
-	db, err := sql.Open("mysql", dsn)
+	cli, reg, _ := redistest.New(t)
+	store := meta.NewCatalogStore(cli, reg)
+	deps := engine.Deps{
+		Client: cli,
+		Reg:    reg,
+		Store:  store,
+		Cache:  meta.NewCatalogCache(store),
+		Exec:   exec.New(cli, reg),
+		Guard:  txguard.New(cli, reg, nil),
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := newServerWithListener(deps, kidb.Bootstrap{
+		Accounts: []kidb.Account{{User: "root", Host: "%", Password: "", Role: "rw"}},
+	}, l)
+	require.NoError(t, err)
+	srv.slowQueryThreshold = time.Nanosecond // 全量记录
+	go srv.Start()
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	db, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(%s)/kidb", l.Addr().String()))
 	require.NoError(t, err)
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -64,18 +92,15 @@ func TestSlowQueryLog(t *testing.T) {
 	}
 	execSQL("CREATE TABLE sl (id BIGINT NOT NULL, v INT, PRIMARY KEY (id)) COMMENT 'kidb:{}'")
 	execSQL("INSERT INTO sl VALUES (1, 10), (2, 20)")
-	execSQL("SET GLOBAL slow_query_threshold_ms = 0")
-	time.Sleep(1200 * time.Millisecond) // 等配置轮询/缓存传播
 
 	var n int
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sl").Scan(&n))
 	require.Equal(t, 2, n)
 	require.Eventually(t, func() bool { return cap_.contains("慢查询") }, 3*time.Second, 50*time.Millisecond,
-		"阈值 0 下任意查询必须落慢查询日志")
+		"超阈值查询必须落慢查询日志")
 
-	// 全扫放行（hint）→ 强制告警（慢查询阈值恢复后也应告警）
-	execSQL("SET GLOBAL slow_query_threshold_ms = 3600000")
-	time.Sleep(1200 * time.Millisecond)
+	// 全扫放行（hint）→ 强制告警（阈值恢复默认后也应告警）
+	srv.slowQueryThreshold = time.Hour
 	rows, err := db.QueryContext(ctx, "SELECT /*+ FULLSCAN */ v FROM sl")
 	require.NoError(t, err)
 	for rows.Next() {

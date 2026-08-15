@@ -15,35 +15,37 @@ func TestConfigStore(t *testing.T) {
 	s := New(cli, reg, "test")
 
 	// 默认值（未显式设置）
-	v, set, err := s.Get(ctx, "bucket_split_members")
+	v, set, err := s.Get(ctx, "replica_read")
 	require.NoError(t, err)
-	require.Equal(t, "50000", v)
+	require.Equal(t, "false", v)
 	require.False(t, set)
 
 	// SET + 读回
-	require.NoError(t, s.Set(ctx, "bucket_split_members", "60000"))
-	v, set, err = s.Get(ctx, "bucket_split_members")
+	require.NoError(t, s.Set(ctx, "replica_read", "true"))
+	v, set, err = s.Get(ctx, "replica_read")
 	require.NoError(t, err)
-	require.Equal(t, "60000", v)
+	require.Equal(t, "true", v)
 	require.True(t, set)
 
 	ver1, err := s.Version(ctx)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, ver1)
 
-	// 校验拒绝：超 16MB 红线（docs/10 §10.2 校验规则）
-	require.Error(t, s.Set(ctx, "bucket_split_bytes", "33554432"))
-	// 未知变量拒绝
+	// 校验拒绝：bool 变量只收 true/false
+	require.Error(t, s.Set(ctx, "replica_read", "maybe"))
+	// 表白名单格式校验
+	require.Error(t, s.Set(ctx, "query_allow_fullscan_tables", "t1,,t2"))
+	require.NoError(t, s.Set(ctx, "query_allow_fullscan_tables", "t1,t2"))
+	// 未知变量拒绝（被杀的调优变量即未知变量——配置面收缩纪律）
 	require.Error(t, s.Set(ctx, "no_such_var", "1"))
-	// 枚举校验
-	require.Error(t, s.Set(ctx, "hotkey_source", "bogus"))
-	require.NoError(t, s.Set(ctx, "hotkey_source", "both"))
+	require.Error(t, s.Set(ctx, "bucket_split_members", "60000"), "调优参数已转内置常量")
 
 	// All（SHOW GLOBAL VARIABLES 数据源）
 	all, err := s.All(ctx)
 	require.NoError(t, err)
-	require.Equal(t, "60000", all["bucket_split_members"])
-	require.Equal(t, "both", all["hotkey_source"])
+	require.Equal(t, "true", all["replica_read"])
+	require.Equal(t, "t1,t2", all["query_allow_fullscan_tables"])
+	require.Len(t, all, 3, "变量表个位数纪律（docs/01 §1.0）")
 	require.NotContains(t, all, "_ver", "内部字段不外露")
 
 	ver2, _ := s.Version(ctx)

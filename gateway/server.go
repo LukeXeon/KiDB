@@ -31,6 +31,8 @@ type Server struct {
 
 	plans *planCache // 判定缓存（指纹 + schema 版本绑定，docs/02 §2.6）
 
+	slowQueryThreshold time.Duration // 慢查询阈值（进程级，默认 500ms，非 SQL 变量）
+
 	mu       sync.Mutex
 	sessions map[uint32]*sessRec // connID → 会话状态
 
@@ -71,10 +73,11 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 	}
 
 	s := &Server{
-		deps:     deps,
-		sessions: map[uint32]*sessRec{},
-		cfg:      config.New(deps.Client, deps.Reg, "kidb-server"),
-		plans:    newPlanCache(1024),
+		deps:               deps,
+		sessions:           map[uint32]*sessRec{},
+		cfg:                config.New(deps.Client, deps.Reg, "kidb-server"),
+		plans:              newPlanCache(1024),
+		slowQueryThreshold: 500 * time.Millisecond,
 	}
 
 	// 会话构造：BaseSession + 角色登记

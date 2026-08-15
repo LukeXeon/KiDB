@@ -22,36 +22,15 @@ type VarDef struct {
 }
 
 // Vars 是 KiDB 变量注册表（docs/10 §10.2 变量表）。
+//
+// 纪律（docs/01 §1.0 设计原点）：变量只承载**改变语义**的选择——
+// 全扫放行（逃生门）、副本读、行级近缓存（一致性取舍开关）。
+// 一切调优参数（阈值/批大小/退避/限速）是内置常量，不是变量——
+// 配置面以个位数为纪律，运维心智对标 Redis 原生。
 var Vars = map[string]VarDef{
-	"schema_lease_ms":              {"1000", rangeValidator(100, 10000)},
-	"bucket_split_members":         {"50000", nonNegative},
-	"bucket_split_bytes":           {"8388608", rangeValidator(0, 16<<20)}, // ≤16MB rebalance 红线
-	"bucket_split_qps_ratio":       {"0.4", nil},
-	"bucket_merge_members":         {"12500", nonNegative},
-	"bucket_merge_sustain_periods": {"3", nonNegative},
-	"hotkey_replica_max":           {"8", rangeValidator(1, 8)},
-	"hotkey_refresh_interval":      {"1s", nil},
-	"hotkey_source":                {"telemetry", enumValidator("telemetry", "events", "both")},
-	"hotkey_row_cache":             {"false", boolValidator},
-	"replica_read":                 {"false", boolValidator}, // L3 副本读（适配器能力位缺失时自动无效）
-	"nearcache_ttl":                {"3s", nil},
-	"nearcache_capacity":           {"10000", nonNegative},
-	"sweeper_batch":                {"512", nonNegative},
-	"sweeper_max_batches_per_tick": {"4", nonNegative},
-	"receipt_grace_period":         {"300s", nil},
-	"telemetry_sample_ratio":       {"0.015625", nil}, // 1/64
-	"scatter_concurrency":          {"64", nonNegative},
-	"scatter_row_batch":            {"512", nonNegative},
-	"scatter_deadline_headroom":    {"0.8", nil},
-	"retry_backoff_base_ms":        {"50", nonNegative},
-	"retry_backoff_max_ms":         {"2000", nonNegative},
-	"plan_cache_capacity":          {"1024", nonNegative},
-	"async_log_capacity":           {"100000", nonNegative},
-	"async_log_alert_ratio":        {"0.8", nil},
-	"ddl_backfill_rate_limit":      {"10000", nonNegative},
-	"query_allow_fullscan_tables":  {"", tableListValidator},
-	"query_fullscan_rate_limit":    {"10", nonNegative},
-	"slow_query_threshold_ms":      {"500", nonNegative}, // 慢查询日志阈值（docs/10 §10.4）
+	"query_allow_fullscan_tables": {"", tableListValidator},
+	"replica_read":                {"false", boolValidator}, // L3 副本读（适配器能力位缺失时自动无效）
+	"hotkey_row_cache":            {"false", boolValidator}, // 行级近缓存（陈旧窗口语义，docs/08 §8.4）
 }
 
 // Store 是配置读写契约（docs/10 §10.2 ConfigStore）。
@@ -152,35 +131,6 @@ func (s *Store) All(ctx context.Context) (map[string]string, error) {
 		}
 	}
 	return out, nil
-}
-
-func nonNegative(s string) error {
-	n, err := strconv.ParseFloat(s, 64)
-	if err != nil || n < 0 {
-		return fmt.Errorf("需为非负数")
-	}
-	return nil
-}
-
-func rangeValidator(lo, hi float64) func(string) error {
-	return func(s string) error {
-		n, err := strconv.ParseFloat(s, 64)
-		if err != nil || n < lo || n > hi {
-			return fmt.Errorf("需在 [%v,%v]", lo, hi)
-		}
-		return nil
-	}
-}
-
-func enumValidator(allowed ...string) func(string) error {
-	return func(s string) error {
-		for _, a := range allowed {
-			if s == a {
-				return nil
-			}
-		}
-		return fmt.Errorf("需为 %v 之一", allowed)
-	}
 }
 
 func boolValidator(s string) error {
