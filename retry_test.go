@@ -12,14 +12,14 @@ import (
 func TestClassifyError(t *testing.T) {
 	cases := map[string]ErrClass{
 		"ERR Error compiling script: CROSSSLOT Keys in request": ClassFatal,
-		"MOVED 1234 127.0.0.1:7001":      ClassRedirect,
-		"ASK 1234 ...":                   ClassRedirect,
-		"CLUSTERDOWN Hash slot not served": ClassClusterDown,
-		"LOADING Redis is loading the dataset in memory": ClassLoading,
-		"READONLY You can't write against a read only replica": ClassReadOnly,
-		"TRYAGAIN Multiple keys request": ClassTryAgain,
-		"dial tcp: i/o timeout":        ClassTransient,
-		"context deadline exceeded":    ClassUnknown, // 内核语境不归类为可重试
+		"MOVED 1234 127.0.0.1:7001":                             ClassRedirect,
+		"ASK 1234 ...":                                          ClassRedirect,
+		"CLUSTERDOWN Hash slot not served":                      ClassClusterDown,
+		"LOADING Redis is loading the dataset in memory":        ClassLoading,
+		"READONLY You can't write against a read only replica":  ClassReadOnly,
+		"TRYAGAIN Multiple keys request":                        ClassTryAgain,
+		"dial tcp: i/o timeout":                                 ClassTransient,
+		"context deadline exceeded":                             ClassUnknown, // 内核语境不归类为可重试
 	}
 	for msg, want := range cases {
 		if got := ClassifyError(errors.New(msg)); got != want {

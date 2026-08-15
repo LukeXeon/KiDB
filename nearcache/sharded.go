@@ -1,147 +1,46 @@
 // Package nearcache — L1 进程内近缓存（docs/08 §8.4）。
 //
-// 自研理由：L1 的第一纪律是"过期正确性由读路径兜底"（Get 时一次整数比较，
-// 超 TTL 不返回）——现成库的过期语义普遍不满足；且 L1 热路径要求分片并发。
-// 结构：128 分片 × RWMutex+map，值内 deadline，周期清扫协程在分片写锁内删过期项
-// （与 Add 同锁，无 TOCTOU）。淘汰：容量超限随机驱逐（TTL 主导，极少触发）。
+// v3：底座换 maypok86/otter（v2）。选型裁决（替换自研分片 map）：
+//   - 第一纪律"过期正确性由读路径兜底"——otter getNode 在读路径做
+//     HasExpired(nowNano) 判定，过期值绝不返回（cache_impl.go 实证）；
+//   - 内部分片并发 + W-TinyLFU 抗扫描（对全扫指纹更友好）+ 内置命中率统计；
+//   - 删掉自研组件 = 维护面 -1（能用库的用库，docs/10 §10.1 纪律）。
 package nearcache
 
 import (
-	"hash/fnv"
-	"sync"
 	"time"
+
+	"github.com/maypok86/otter/v2"
 )
 
-// entry 是缓存值包装（deadline 供读路径校验 + 清扫删除判定）。
-type entry[V any] struct {
-	val      V
-	deadline int64 // UnixNano
-}
-
-// shardCount 分片数（2 的幂，取模即掩码）。
-const shardCount = 128
-
-type shard[V any] struct {
-	mu sync.RWMutex
-	m  map[string]entry[V]
-}
-
-// ShardedCache 是 v2 L1 缓存（string key 特化——谓词指纹）。
+// ShardedCache 是 L1 缓存（string key 特化——谓词指纹）。
+// 类型名保留以兼容既有调用点；底座为 otter。
 type ShardedCache[V any] struct {
-	shards      [shardCount]shard[V]
-	ttl         time.Duration
-	capPerShard int
-	now         func() time.Time
-	stop        chan struct{}
-	done        chan struct{}
+	c *otter.Cache[string, V]
 }
 
-// NewSharded 构造（capacity 总上限按分片均摊；启动清扫协程）。
+// NewSharded 构造（capacity 条目上限；ttl 过期时间）。
 func NewSharded[V any](capacity int, ttl time.Duration) *ShardedCache[V] {
-	c := &ShardedCache[V]{
-		ttl:         ttl,
-		capPerShard: max(1, capacity/shardCount),
-		now:         time.Now,
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
-	}
-	for i := range c.shards {
-		c.shards[i].m = make(map[string]entry[V])
-	}
-	go c.sweeper()
-	return c
+	c := otter.Must(&otter.Options[string, V]{
+		MaximumSize:      capacity,
+		ExpiryCalculator: otter.ExpiryWriting[string, V](ttl),
+	})
+	return &ShardedCache[V]{c: c}
 }
 
-func (c *ShardedCache[V]) shardOf(key string) *shard[V] {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return &c.shards[h.Sum32()&(shardCount-1)]
-}
-
-// Get 取缓存：读锁 + deadline 校验（过期即未命中，不等清扫）。
+// Get 取缓存（读路径过期判定在 otter 内完成，超 TTL 不返回）。
 func (c *ShardedCache[V]) Get(key string) (V, bool) {
-	var zero V
-	sh := c.shardOf(key)
-	sh.mu.RLock()
-	e, ok := sh.m[key]
-	sh.mu.RUnlock()
-	if !ok {
-		return zero, false
-	}
-	if c.now().UnixNano() > e.deadline {
-		return zero, false
-	}
-	return e.val, true
+	return c.c.GetIfPresent(key)
 }
 
-// Add 写入（写锁内完成；超限随机驱逐——Go map range 首元素即伪随机）。
-func (c *ShardedCache[V]) Add(key string, val V) {
-	sh := c.shardOf(key)
-	dl := c.now().Add(c.ttl).UnixNano()
-	sh.mu.Lock()
-	sh.m[key] = entry[V]{val: val, deadline: dl}
-	for len(sh.m) > c.capPerShard {
-		for k := range sh.m {
-			delete(sh.m, k) // 随机驱逐一个
-			break
-		}
-	}
-	sh.mu.Unlock()
-}
+// Add 写入缓存。
+func (c *ShardedCache[V]) Add(key string, val V) { c.c.Set(key, val) }
 
 // Remove 删除。
-func (c *ShardedCache[V]) Remove(key string) {
-	sh := c.shardOf(key)
-	sh.mu.Lock()
-	delete(sh.m, key)
-	sh.mu.Unlock()
-}
+func (c *ShardedCache[V]) Remove(key string) { c.c.Invalidate(key) }
 
-// Len 当前总条数（诊断用，逐分片加总）。
-func (c *ShardedCache[V]) Len() int {
-	n := 0
-	for i := range c.shards {
-		sh := &c.shards[i]
-		sh.mu.RLock()
-		n += len(sh.m)
-		sh.mu.RUnlock()
-	}
-	return n
-}
+// Len 估算容量（otter 口径，含待清理过期项）。
+func (c *ShardedCache[V]) Len() int { return c.c.EstimatedSize() }
 
-// sweeper 周期清扫：逐分片持写锁删过期项——与 Add 同锁，无 TOCTOU。
-// 间隔 min(ttl/4, 100ms)；到期正确性由读路径兜底，此处只争释放时机。
-func (c *ShardedCache[V]) sweeper() {
-	defer close(c.done)
-	interval := c.ttl / 4
-	if interval <= 0 || interval > 100*time.Millisecond {
-		interval = 100 * time.Millisecond
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-c.stop:
-			return
-		case now := <-t.C:
-			deadline := now.UnixNano()
-			for i := range c.shards {
-				sh := &c.shards[i]
-				sh.mu.Lock()
-				for k, e := range sh.m {
-					if e.deadline <= deadline {
-						delete(sh.m, k)
-					}
-				}
-				sh.mu.Unlock()
-			}
-		}
-	}
-}
-
-// Close 停清扫协程（生命周期随内核 Close）。
-func (c *ShardedCache[V]) Close() error {
-	close(c.stop)
-	<-c.done
-	return nil
-}
+// Close 关闭（停止 otter 后台维护协程）。
+func (c *ShardedCache[V]) Close() error { c.c.StopAllGoroutines(); return nil }

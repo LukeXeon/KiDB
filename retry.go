@@ -13,13 +13,13 @@ import (
 type ErrClass int
 
 const (
-	ClassFatal     ErrClass = iota // 不重试（CROSSSLOT 等契约违例 = 内核 bug）
-	ClassRedirect                  // MOVED/ASK（适配器已跟随；耗尽后整体可重试）
-	ClassClusterDown               // CLUSTERDOWN：集群不可用，指数退避
-	ClassLoading                   // LOADING：节点加载数据集，退避上限放宽
-	ClassReadOnly                  // READONLY：failover 窗口，退避 + 拓扑刷新
-	ClassTryAgain                  // TRYAGAIN：短退避
-	ClassTransient                 // 超时/连接断开（读安全重试；写靠幂等）
+	ClassFatal       ErrClass = iota // 不重试（CROSSSLOT 等契约违例 = 内核 bug）
+	ClassRedirect                    // MOVED/ASK（适配器已跟随；耗尽后整体可重试）
+	ClassClusterDown                 // CLUSTERDOWN：集群不可用，指数退避
+	ClassLoading                     // LOADING：节点加载数据集，退避上限放宽
+	ClassReadOnly                    // READONLY：failover 窗口，退避 + 拓扑刷新
+	ClassTryAgain                    // TRYAGAIN：短退避
+	ClassTransient                   // 超时/连接断开（读安全重试；写靠幂等）
 	ClassUnknown
 )
 
