@@ -3,9 +3,11 @@ package di
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	"kidb"
+	"kidb/metrics"
 	"kidb/testutil"
 )
 
@@ -13,7 +15,8 @@ import (
 // 默认参与。DI 图的语义分支钉死。
 func TestProvideRolesRWOnly(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
-	ex := ProvideExecutor(cli, reg, ProvideMetrics(), ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache())
+	m := metrics.New(prometheus.NewRegistry())
+	ex := ProvideExecutor(cli, reg, m, ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache())
 	require.NotNil(t, ex)
 
 	store := ProvideCatalogStore(cli, reg)
@@ -36,8 +39,9 @@ func TestProvideRolesRWOnly(t *testing.T) {
 func TestProvideEngineDepsGate(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
 	store := ProvideCatalogStore(cli, reg)
+	m := metrics.New(prometheus.NewRegistry())
 	deps := ProvideEngineDeps(cli, reg, store, ProvideCatalogCache(store),
-		ProvideExecutor(cli, reg, ProvideMetrics(), ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache()),
-		ProvideGuard(cli, reg, ProvideBucketMap(cli, reg)), ProvideMetrics())
+		ProvideExecutor(cli, reg, m, ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache()),
+		ProvideGuard(cli, reg, ProvideBucketMap(cli, reg)), m)
 	require.NotNil(t, deps.FullscanGate)
 }
