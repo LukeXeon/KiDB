@@ -9,6 +9,7 @@ import (
 
 	"kidb"
 	"kidb/keycodec"
+	"kidb/meta"
 )
 
 // topk.go：RangeLookup 的全局 score 有序流（docs/04 §4.1：ORDER BY num LIMIT k
@@ -104,11 +105,15 @@ func (om *orderedMerger) step() error {
 	}
 
 	// 弹出批：≤batch 个候选（堆空且无待补页 = 本区间耗尽）
-	var cand []topkItem
+	type scored struct {
+		it    topkItem
+		score float64
+	}
+	var cand []scored
 	var refill []int
 	for !om.pq.IsEmpty() && len(cand) < e.batch {
 		it := om.pq.Get()
-		cand = append(cand, it.Value)
+		cand = append(cand, scored{it.Value, it.Priority})
 		w := &om.ways[it.Value.way]
 		w.inHeap--
 		if w.inHeap == 0 && !w.done {
@@ -129,22 +134,36 @@ func (om *orderedMerger) step() error {
 		return nil // 纯补页轮（极端：上批全部命中同一桶），下轮再弹
 	}
 
-	// 回表校验（去重在取 pk 时完成，分裂窗口/多区间重读共用 s.seen）
-	pks := make([]string, 0, len(cand))
+	// 回表/覆盖分发（去重在取 pk 时完成，分裂窗口/多区间重读共用 s.seen）；
+	// val = score 反编码（覆盖路径重建索引列字段用，docs/03 §3.5）
+	col, _ := s.req.Table.Column(s.req.Index.Columns[0])
+	items := make([]candItem, 0, len(cand))
 	for _, c := range cand {
-		pk := s.stripCovering(c.member)
+		pk := s.stripCovering(c.it.member)
 		if s.seen != nil {
 			if _, dup := s.seen[pk]; dup {
 				continue
 			}
 			s.seen[pk] = struct{}{}
 		}
-		pks = append(pks, pk)
+		items = append(items, candItem{member: c.it.member, pk: pk, val: scoreEnc(col.Type, c.score)})
 	}
-	if len(pks) == 0 {
+	if len(items) == 0 {
 		return nil
 	}
-	return s.fetchRows(pks)
+	return s.fetchItems(items)
+}
+
+// scoreEnc score 反编码为列存储形态（float64→int64 在 ≤2^53 精确——
+// DDL 限定范围索引列界内；float 最短表示往返无损）。
+func scoreEnc(ct meta.ColumnType, score float64) string {
+	switch ct {
+	case meta.ColInt, meta.ColTimestamp:
+		return strconv.FormatInt(int64(score), 10)
+	case meta.ColFloat:
+		return strconv.FormatFloat(score, 'g', -1, 64)
+	}
+	return ""
 }
 
 // seed 种子轮：全部 slot 的覆盖桶端点各取 1 成员（WITHSCORES）。

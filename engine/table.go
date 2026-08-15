@@ -2,6 +2,7 @@ package engine
 
 import (
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,11 +13,16 @@ import (
 )
 
 // Table 实现 gms 的 Table/IndexedTable/IndexAddressable/PrimaryKey/Statistics/
-// Insertable/Updatable/Deletable/Replaceable/AutoIncrement 组合接口，
+// Insertable/Updatable/Deletable/Replaceable/AutoIncrement/ProjectedTable 组合接口，
 // 全部落在 Catalog 定义 + exec 执行器 + txguard 写入上（docs/02 §2.5 DML 路径）。
 type Table struct {
 	def  *meta.TableDef
 	deps Deps
+
+	// proj 投影列（gms pruneTables 下推，schema 序子集；projected=false 时无意义）。
+	// 契约：Schema() 只含投影列，行与投影同宽同序（exec.DecodeRowCols）。
+	proj      []string
+	projected bool
 
 	statsMu    sync.Mutex
 	statsAt    time.Time
@@ -33,7 +39,22 @@ func (t *Table) Name() string { return t.def.Name }
 func (t *Table) String() string { return t.def.Name }
 
 // Schema 由 Catalog 定义生成 gms schema（pk 列打 PrimaryKey 标记）。
+// 投影态下只含投影列（ProjectedTable 契约，列序保持表 schema 序）。
 func (t *Table) Schema() sql.Schema {
+	if !t.projected {
+		return t.fullSchema()
+	}
+	sch := make(sql.Schema, 0, len(t.proj))
+	for _, c := range t.fullSchema() {
+		if t.inProjection(c.Name) {
+			sch = append(sch, c)
+		}
+	}
+	return sch
+}
+
+// fullSchema 全量 schema（投影无关）。
+func (t *Table) fullSchema() sql.Schema {
 	sch := make(sql.Schema, 0, len(t.def.Columns))
 	for _, c := range t.def.Columns {
 		gt, err := goType(c.Type)
@@ -52,12 +73,51 @@ func (t *Table) Schema() sql.Schema {
 	return sch
 }
 
+// inProjection 列是否在投影内（大小写不敏感——gms 列名大小写不保证与 DDL 一致）。
+func (t *Table) inProjection(name string) bool {
+	for _, p := range t.proj {
+		if strings.EqualFold(p, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// WithProjections 投影下推（sql.ProjectedTable）：行/Schema 只含指定列。
+// 空切片合法（零宽行，COUNT 类只数行）；nil 不会传入（gms 契约）。
+func (t *Table) WithProjections(colNames []string) sql.Table {
+	nt := *t
+	nt.proj = colNames
+	nt.projected = true
+	return &nt
+}
+
+// Projections 当前投影（nil = 未投影）。
+func (t *Table) Projections() []string {
+	if !t.projected {
+		return nil
+	}
+	return t.proj
+}
+
+// projectionForExec 传给 exec 的输出列（nil = 全列）。
+func (t *Table) projectionForExec() []string {
+	if !t.projected {
+		return nil
+	}
+	return t.proj
+}
+
 // Collation 默认 utf8mb4 排序规则。
 func (t *Table) Collation() sql.CollationID { return sql.Collation_Default }
 
-// PrimaryKeySchema 主键 schema（供引擎主键点查优化）。
+// PrimaryKeySchema 主键 schema（**恒为全量 schema**，投影也不例外）：
+// gms coster（uniformDistStatisticsForIndex 的 indexFds）要求索引列在
+// PrimaryKeySchema().Schema 中——投影窄 schema 会让 PRIMARY 索引列缺失、
+// 统计构造返回 nil stat 后在 gms 内部 panic（实证）；且 fix_exec_indexes.go:648
+// 显式兼容 PrimaryKeySchema 比节点 schema 宽的情形（dolt 同形）。
 func (t *Table) PrimaryKeySchema() sql.PrimaryKeySchema {
-	sch := t.Schema()
+	sch := t.fullSchema()
 	for i, c := range sch {
 		if c.PrimaryKey {
 			return sql.NewPrimaryKeySchema(sch, i)
@@ -85,7 +145,7 @@ func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter
 	if lp, ok := part.(lookupPartition); ok {
 		return t.streamFor(ctx, lp.req), nil
 	}
-	req := &exec.Request{Table: t.def, Kind: exec.FullScan}
+	req := &exec.Request{Table: t.def, Kind: exec.FullScan, Projection: t.projectionForExec()}
 	return &streamIter{s: t.deps.Exec.Run(ctx, req)}, nil
 }
 
@@ -221,6 +281,7 @@ var (
 	_ sql.DeletableTable        = (*Table)(nil)
 	_ sql.ReplaceableTable      = (*Table)(nil)
 	_ sql.AutoIncrementTable    = (*Table)(nil)
+	_ sql.ProjectedTable        = (*Table)(nil)
 )
 
 // IndexedAccess 返回绑定指定 lookup 的索引访问视图（sql.IndexAddressable）。

@@ -163,6 +163,44 @@ func DecodeRow(t *meta.TableDef, pk string, raw map[string]string) []any {
 	return row
 }
 
+// DecodeRowCols 按指定列序解码（投影下推，docs/04 §4.3：gms ProjectedTable
+// 契约要求行与投影后的 Schema 同宽同序）。
+// cols == nil = 全 schema 列序；空非 nil = 零宽行（COUNT 类只数行不读列）。
+func DecodeRowCols(t *meta.TableDef, pk string, raw map[string]string, cols []string) []any {
+	if cols == nil {
+		return DecodeRow(t, pk, raw)
+	}
+	row := make([]any, 0, len(cols))
+	for _, name := range cols {
+		col, ok := t.Column(name)
+		if !ok {
+			row = append(row, nil)
+			continue
+		}
+		if col.Name == t.PK {
+			v, err := Decode(col.Type, pk)
+			if err != nil {
+				row = append(row, nil)
+			} else {
+				row = append(row, v)
+			}
+			continue
+		}
+		s, ok := raw[col.Name]
+		if !ok {
+			row = append(row, nil)
+			continue
+		}
+		v, err := Decode(col.Type, s)
+		if err != nil {
+			row = append(row, nil)
+			continue
+		}
+		row = append(row, v)
+	}
+	return row
+}
+
 // ==== 桶 member 编码（docs/03 §3.4/§3.5）====
 // 无覆盖列：member = 原始 pk（零序列化红利）。
 // 有覆盖列：member = msgp 数组 [pk, cover1, ...]（代码生成级格式，二进制安全——

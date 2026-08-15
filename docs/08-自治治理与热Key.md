@@ -54,8 +54,8 @@
 
 | 层 | 机制 | 实现 |
 |---|---|---|
-| L1 | 近缓存 | **otter/v2**（v3 裁决，见下注）：谓词指纹→pk 列表 + BucketMap 缓存，TTL 3s；**全扫结果的指纹不入缓存**（W-TinyLFU 自带抗扫描）；回表校验兜底陈旧 |
-| L2 | 请求合并 | `singleflight` 合并同指纹并发查询 |
+| L1 | 近缓存 | **otter/v2**（v3 裁决，见下注）：谓词指纹→pk 列表 + BucketMap 缓存，TTL 3s；**全扫结果的指纹不入缓存**（W-TinyLFU 自带抗扫描）；回表校验兜底陈旧。网关装配经 `nearcache_ttl/_capacity` 变量，变更轮询换装 |
+| L2 | 请求合并 | `singleflight`（golang.org/x/sync）合并同指纹并发查询：leader 物化 pk 列表（上限 2^20，超出各调用方退回独立流式——有界性优先），followers 共享后各自回表校验；随 L1 装配生效 |
 | L3 | 副本读 | 经 `Client.DoReplica`（可选能力，[09](09-后端契约与适配器.md) §9.4）：适配器把只读命令路由到 slave/只读集群。适配器不支持则该层自动关闭。回表校验兜底副本滞后 |
 | L4 | 热桶值复制 | 超阈自动建 K=⌈热QPS/单节点安全QPS⌉（≤8）个**异 slot** 只读副本（副本 key = 源桶 key 的 stag 步进替换为 `SlotTag((源slot + k×1820) % 16384)`——确定性寻址、k∈[1,8] 互不撞 slot），随机读其一，1s 滚动刷新（`replica_refresh.lua`），热度回落自动 `UNLINK` 回收 |
 

@@ -103,7 +103,7 @@ func (s *RowStream) parsePushdownReply(out any) ([][]any, error) {
 			raw[fmt.Sprint(arr[i+2*j])] = fmt.Sprint(arr[i+2*j+1])
 		}
 		i += 2 * nf
-		rows = append(rows, rowcodec.DecodeRow(s.req.Table, pk, raw))
+		rows = append(rows, rowcodec.DecodeRowCols(s.req.Table, pk, raw, s.req.Projection))
 	}
 	return rows, nil
 }

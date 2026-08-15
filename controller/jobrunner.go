@@ -135,12 +135,18 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		}
 		var pk string
 		var ci int
+		coverIdx := make([]int, 0, len(idx.Covering))
 		for i, c := range def.Columns {
 			if c.Name == def.PK {
 				pk = sprintOf(row[i])
 			}
 			if c.Name == col {
 				ci = i
+			}
+			for _, cc := range idx.Covering {
+				if c.Name == cc {
+					coverIdx = append(coverIdx, i)
+				}
 			}
 		}
 		if row[ci] == nil {
@@ -150,6 +156,20 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		if err != nil {
 			return err
 		}
+		// 覆盖列随 member 编码（docs/03 §3.5；漏写会让覆盖读路径全灭回退）
+		var covers []string
+		for _, ci2 := range coverIdx {
+			cv := ""
+			if row[ci2] != nil {
+				ct, _ := def.Column(def.Columns[ci2].Name)
+				cv, err = rowcodec.Encode(ct.Type, row[ci2])
+				if err != nil {
+					return err
+				}
+			}
+			covers = append(covers, cv)
+		}
+		member := rowcodec.EncodeMember(pk, covers)
 		slot := keycodec.Slot(keycodec.RowKey(def.Name, pk))
 		switch idx.Kind {
 		case meta.IndexRange:
@@ -157,9 +177,9 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 			if err != nil {
 				return err
 			}
-			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, 0), score, pk}})
+			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, 0), score, member}})
 		default:
-			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, slot, 0), 0, pk}})
+			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, slot, 0), 0, member}})
 		}
 		if len(cmds) >= 512 {
 			if err := flush(); err != nil {

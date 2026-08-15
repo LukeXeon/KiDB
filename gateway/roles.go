@@ -3,12 +3,14 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/indexer"
 	"kidb/keycodec"
+	"kidb/nearcache"
 	"kidb/sweeper"
 	"kidb/telemetry"
 )
@@ -43,9 +45,67 @@ func (s *Server) startRoles(ctx context.Context) {
 	s.manager = controller.NewManager(s.deps.Client, bm, spl, l4)
 	s.jobrunner = controller.NewJobRunner(s.deps.Client, s.deps.Store, s.deps.Cache, s.deps.Exec, bm)
 
+	// L1 近缓存装配（docs/08 §8.4）：otter 底座；nearcache_ttl/_capacity
+	// 热更新经轮询换装（换装即丢弃旧缓存——版本校验语义外的进程内缓存，
+	// 重建代价 = 一次冷启动窗口，可接受）。L2 随 L1 生效（exec 内 singleflight）。
+	s.attachNearCache(roleCtx)
+
 	go s.elector.Campaign(roleCtx, s.controllerRole)
 	go s.sweeperLoop(roleCtx)
 	go s.indexerLoop(roleCtx)
+}
+
+// attachNearCache 按当前配置装配 L1，并起轮询协程跟踪变量变化换装。
+func (s *Server) attachNearCache(ctx context.Context) {
+	var cur *nearcache.ShardedCache[[]string]
+	var curTTL time.Duration
+	var curCap int
+	apply := func() {
+		ttl, capN := s.l1Config(ctx)
+		if cur != nil && ttl == curTTL && capN == curCap {
+			return
+		}
+		nc := nearcache.NewSharded[[]string](capN, ttl)
+		s.deps.Exec.SetNearCache(nc)
+		if cur != nil {
+			_ = cur.Close()
+		}
+		cur, curTTL, curCap = nc, ttl, capN
+	}
+	apply()
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				if cur != nil {
+					_ = cur.Close()
+				}
+				return
+			case <-t.C:
+				apply()
+			}
+		}
+	}()
+}
+
+// l1Config 读取 nearcache_ttl/_capacity 变量（解析失败回落默认——
+// 变量校验在 SET 时 fail-fast，这里是防御）。
+func (s *Server) l1Config(ctx context.Context) (time.Duration, int) {
+	ttl := 3 * time.Second
+	capN := 10000
+	if v, _, err := s.cfg.Get(ctx, "nearcache_ttl"); err == nil {
+		if d, perr := time.ParseDuration(v); perr == nil {
+			ttl = d
+		}
+	}
+	if v, _, err := s.cfg.Get(ctx, "nearcache_capacity"); err == nil {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			capN = n
+		}
+	}
+	return ttl, capN
 }
 
 // controllerRole 控制循环：遥测候选复核 → 分裂/L4 决策（docs/08 §8.1/§8.2）。

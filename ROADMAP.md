@@ -18,12 +18,12 @@
 已完成（本批）：
 
 - **top-k 归并下推**（exec/topk.go：RangeLookup 一律 16384 路 k 路归并产出全局 score 序，`go-priorityqueue` 泛型堆；顺带修复 gms `replace_sort` 删 Sort 导致的 ORDER BY 乱序隐患——探针复现后钉死；`OrderedIndex`/`CanSupport` 收紧为契约防御面；guard 补 IN/BETWEEN 列收集与 ORDER BY 范围列放行）；
-- **keyset 分页优化**（`WHERE num > ? ORDER BY num LIMIT k` 翻译为区间起点 + 归并早停，随 top-k 一并达成）。
+- **keyset 分页优化**（`WHERE num > ? ORDER BY num LIMIT k` 翻译为区间起点 + 归并早停，随 top-k 一并达成）；
+- **投影下推 + 覆盖索引读路径**（gms `ProjectedTable` 落地：回表 HMGET 子集；覆盖命中跳回表 = member 解码 + exp ZSCORE 活性校验；回填路径同步修 member 覆盖编码；DDL 覆盖列必须 NOT NULL——msgp 字符串数组 NULL 不保真；**`PrimaryKeySchema()` 恒全量**——gms coster 统计构造对窄 schema panic 的实证修复）。
+- **L2 请求合并**（singleflight：EqLookup 同指纹并发合并，leader 物化 pk 列表（2^20 上限）+ 填充 L1，followers 共享后各自回表；同时补上 L1 的网关装配缺口——`nearcache_ttl/_capacity` 变量驱动 + 轮询换装，此前 L1 只在测试内接线）。
 
 | 项 | 说明 |
 |---|---|
-| 覆盖索引读路径 | member 已携带 msgp 覆盖列（rowcodec.MemberCovers 就绪），exec 命中时跳过回表未实现 |
-| L2 请求合并（同指纹并发合并） | docs/08 §8.4；落地时引入 `golang.org/x/sync`（singleflight） |
 | L3 副本读（`DoReplica` 进读路径） | 适配器能力已声明，exec 未消费 |
 | 并发扇出池 | 当前顺序 pipeline 批 + 批大小 bulkhead 已够用；需要结构化并发时引入 `sourcegraph/conc` / errgroup |
 | 后台任务池 | 后台角色为常驻循环，无任务池负载；需要时引入 `panjf2000/ants` |

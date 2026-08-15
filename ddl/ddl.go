@@ -380,8 +380,15 @@ func validateIndexAgainstTable(idx *meta.IndexDef, t *meta.TableDef) error {
 		return fmt.Errorf("%w: prefix_copy 限字符串列（%s.%s）", kidb.ErrUnsupported, t.Name, col.Name)
 	}
 	for _, cc := range idx.Covering {
-		if _, ok := t.Column(cc); !ok {
+		cdef, ok := t.Column(cc)
+		if !ok {
 			return fmt.Errorf("覆盖列 %q 不存在", cc)
+		}
+		// 覆盖列必须 NOT NULL：member 是 msgp 字符串数组，NULL 无法保真
+		// （读路径会把 NULL 返回成空串——静默错值，违反结果精确纪律）。
+		// 需要可空覆盖列的场景：回表路径本就正确，不声明 covering 即可。
+		if !cdef.NotNull {
+			return fmt.Errorf("%w: 覆盖列 %q 必须 NOT NULL（member 编码 NULL 不保真，docs/03 §3.5）", kidb.ErrUnsupported, cc)
 		}
 	}
 	return nil

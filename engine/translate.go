@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -56,7 +57,9 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 		values = t.dedupSortValues(col, values, lookup.IsReverse)
 		return &exec.Request{
 			Table: t.def, Kind: exec.EqLookup, Index: idx, Values: values,
-			Pred: &exec.Predicate{Column: col, Eq: values},
+			Pred:       &exec.Predicate{Column: col, Eq: values},
+			Projection: t.projectionForExec(),
+			Covering:   t.coveringOK(idx, col),
 		}, nil
 
 	case meta.IndexRange:
@@ -73,11 +76,50 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 		sortRangeBounds(bounds, lookup.IsReverse)
 		return &exec.Request{
 			Table: t.def, Kind: exec.RangeLookup, Index: idx, Ranges: bounds,
-			Pred: &exec.Predicate{Column: col, Ranges: bounds},
-			Desc: lookup.IsReverse,
+			Pred:       &exec.Predicate{Column: col, Ranges: bounds},
+			Desc:       lookup.IsReverse,
+			Projection: t.projectionForExec(),
+			Covering:   t.coveringOK(idx, col),
 		}, nil
 	}
 	return nil, fmt.Errorf("%w: 未知索引形态 %v", kidb.ErrUnsupported, idx.Kind)
+}
+
+// coveringOK 覆盖索引命中判定（docs/03 §3.5）：投影 ∪ 谓词列 ⊆
+// {索引列} ∪ 覆盖列 ∪ {pk} 时读路径跳过回表（member 自带覆盖列，
+// 活性经 exp 登记册 ZSCORE 校验——同步索引 member 与行原子一致）。
+// 异步索引不允许 covering（DDL 校验），此处无需再查。
+func (t *Table) coveringOK(idx *meta.IndexDef, predCol string) bool {
+	if len(idx.Covering) == 0 {
+		return false
+	}
+	covered := map[string]bool{}
+	for _, c := range idx.Covering {
+		covered[strings.ToLower(c)] = true
+	}
+	covered[strings.ToLower(idx.Columns[0])] = true
+	covered[strings.ToLower(t.def.PK)] = true
+	need := func(c string) bool {
+		return c != "" && !covered[strings.ToLower(c)]
+	}
+	if need(predCol) {
+		return false
+	}
+	if !t.projected {
+		// 未投影 = 全列（SELECT * 或裁剪未触发）：全部列都须被覆盖
+		for _, c := range t.def.Columns {
+			if need(c.Name) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, c := range t.proj {
+		if need(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // translatePKLookup 主键：全部点 → PointGet；含非点范围 → 全扫 + 校验。
@@ -95,7 +137,7 @@ func (t *Table) translatePKLookup(ranges []sql.Range, isReverse bool) (*exec.Req
 		pks = append(pks, v)
 	}
 	pks = t.dedupSortValues(t.def.PK, pks, isReverse)
-	return &exec.Request{Table: t.def, Kind: exec.PointGet, Pks: pks}, nil
+	return &exec.Request{Table: t.def, Kind: exec.PointGet, Pks: pks, Projection: t.projectionForExec()}, nil
 }
 
 // dedupSortValues 去重并按列类型解码值排序（编码串的字典序 ≠ 数值序，如 "10"<"2"）。

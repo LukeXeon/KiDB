@@ -8,6 +8,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -16,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"kidb"
 	"kidb/bucketmap"
@@ -163,6 +166,13 @@ type Request struct {
 	// RangeLookup 始终产出全局 score 有序流（topk.go 头注：gms 删 Sort 契约）。
 	Desc bool
 
+	// Projection 输出列（gms ProjectedTable 下推；nil = 全列，空非 nil = 零宽行）。
+	// 回表只取 投影 ∪ 谓词列（HMGET 替代 HGETALL，docs/04 §4.3 投影下推）。
+	Projection []string
+	// Covering：索引覆盖 投影∪谓词 全部列（translate 判定，docs/03 §3.5）——
+	// 跳过回表：member 解码覆盖列 + exp 登记册 ZSCORE 活性校验。
+	Covering bool
+
 	// SlotLo/SlotHi：FullScan 的 slot 区间限定（DDL 回填分批游标用；
 	// 0 值 = 全量 [0, 16384)）。
 	SlotLo, SlotHi int
@@ -177,12 +187,18 @@ type Executor struct {
 	l4            L4Resolver       // L4 热桶副本（nil = 关闭）
 	telemetry     TelemetrySink    // 遥测采样（nil = 关闭）
 	m             *metrics.Metrics // 指标（nil = no-op，docs/10 §10.3）
+	clock         func() time.Time // 覆盖读路径活性判定时钟（测试可注入，与写入侧共钟）
+	sf            singleflight.Group // L2 请求合并（docs/08 §8.4：同指纹并发合并；随 L1 装配生效）
 	batch         int
 	slotsPerRound int
 }
 
 // SetMetrics 接入指标。
 func (e *Executor) SetMetrics(m *metrics.Metrics) { e.m = m }
+
+// SetClock 注入时钟（测试与写入侧共享可推进的钟——miniredis TIME 不随
+// FastForward 走，TTL 语义断言须全链路同钟）。
+func (e *Executor) SetClock(c func() time.Time) { e.clock = c }
 
 // SetL4 接入 L4 热桶副本解析。
 func (e *Executor) SetL4(r L4Resolver) { e.l4 = r }
@@ -215,7 +231,7 @@ type TelemetrySink interface {
 
 // New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
 func New(cli kidb.KvClient, reg *script.Registry) *Executor {
-	return &Executor{cli: cli, reg: reg, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound}
+	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound}
 }
 
 // SetNearCache 接入 L1（nearcache_ttl 变量热更新的挂点）。
@@ -241,6 +257,7 @@ type RowStream struct {
 	ncCached  []string // 缓存命中的 pk 列表（ncCachedOff 分页消费）
 	ncOff     int
 	ncCollect []string // 散取路径收集的 pk（完全排空后才写缓存）
+	pkOnly    bool     // L2 收集模式：只收集 pk 不回表（collectEqPKs）
 
 	// 分裂窗口双读去重（SPLITTING 父子桶同 member 各一份）；
 	// RangeLookup 多区间时跨区间去重（重叠区间谓词的防御，gms 理论上已合并）
@@ -257,24 +274,70 @@ type RowStream struct {
 
 type bucketScan struct {
 	key    string
-	cursor int // ZRANGE/ZRANGEBYSCORE LIMIT 的偏移游标
+	cursor int    // ZRANGE/ZRANGEBYSCORE LIMIT 的偏移游标
+	val    string // EqLookup：该桶的等值编码值（覆盖索引读路径重建 raw 用）
+}
+
+// candItem 一个散取/归并候选：桶 member + 提取的 pk + 索引列编码值。
+// val：等值桶 = 桶值；范围桶 = score 反编码（覆盖读路径重建索引列字段用）。
+type candItem struct {
+	member string
+	pk     string
+	val    string
 }
 
 // Run 启动流式执行。
 func (e *Executor) Run(ctx context.Context, req *Request) *RowStream {
 	s := &RowStream{req: req, exec: e, ctx: ctx}
-	// L1：等值查询查指纹缓存（命中 → 跳过散取直接回表；陈旧由校验兜底）
-	if req.Kind == EqLookup && e.nc != nil && req.Index != nil {
+	// L1：等值查询查指纹缓存（命中 → 跳过散取直接回表；陈旧由校验兜底）。
+	// 覆盖索引请求不走 L1——member 自带覆盖列，缓存 pk 列表反而丢覆盖红利。
+	if req.Kind == EqLookup && e.nc != nil && req.Index != nil && !req.Covering {
 		s.ncFP = l1Fingerprint(req)
 		if pks, ok := e.nc.Get(s.ncFP); ok {
 			s.ncCached = pks
 			if e.m != nil {
 				e.m.NearcacheHits.Inc()
 			}
-		} else if e.m != nil {
-			e.m.NearcacheMiss.Inc()
+		} else {
+			if e.m != nil {
+				e.m.NearcacheMiss.Inc()
+			}
+			// L2 请求合并（docs/08 §8.4）：同指纹并发查询共享一次散取的
+			// pk 列表物化（leader 收集，followers 经 singleflight 共享；
+			// 回表校验各调用方独立执行——共享语义与 L1 完全一致）。
+			// leader 物化带 cap（l2MaxCollect）：超大值域各调用方退回独立流式。
+			s.initRoutes(ctx)
+			ch := e.sf.DoChan(s.ncFP, func() (any, error) {
+				// WithoutCancel：leader 客户端断开不连坐 followers；
+				// 收集有界（cap）保证孤儿工作可弃
+				pks, err := e.collectEqPKs(context.WithoutCancel(ctx), req)
+				if err != nil {
+					return nil, err
+				}
+				e.nc.Add(s.ncFP, pks) // leader 填充 L1（docs/08 §8.4 L1/L2 接力）
+				return pks, nil
+			})
+			select {
+			case r := <-ch:
+				if r.Err == nil {
+					s.ncCached = r.Val.([]string)
+				} else if !errors.Is(r.Err, errL2Overflow) {
+					s.err = r.Err // leader 失败共享给同指纹 followers（重试语义一致）
+				} // errL2Overflow：退回普通流式散取（s.ncCached 保持 nil）
+			case <-ctx.Done():
+				s.err = ctx.Err()
+			}
+			return s
 		}
 	}
+	s.initRoutes(ctx)
+	return s
+}
+
+// initRoutes bm 路由判定与去重集合初始化（Run 与 L2 收集共用）。
+func (s *RowStream) initRoutes(ctx context.Context) {
+	e := s.exec
+	req := s.req
 	// bm 路由判定（热值注册表一次解析；稀疏原则——无分裂零额外读，docs/03 §3.1）
 	if e.bm != nil && req.Index != nil {
 		switch req.Kind {
@@ -299,7 +362,30 @@ func (e *Executor) Run(ctx context.Context, req *Request) *RowStream {
 	if req.Kind == RangeLookup && len(req.Ranges) > 1 && s.seen == nil {
 		s.seen = map[string]struct{}{}
 	}
-	return s
+}
+
+// errL2Overflow L2 收集上限（等值值域成员数不可由桶上限约束——
+// 50k 上限是"每值每 slot"，全集群同值成员可超百万；超出即放弃共享物化，
+// 各调用方退回独立流式散取，有界性优先）。
+var errL2Overflow = errors.New("exec: L2 collect overflow")
+
+// l2MaxCollect L2 leader 物化上限（pk 数）。
+const l2MaxCollect = 1 << 20
+
+// collectEqPKs L2 leader 的全量散取收集（只取 pk 不回表；与 fillScatter
+// 同一分页循环，pkOnly 模式）。
+func (e *Executor) collectEqPKs(ctx context.Context, req *Request) ([]string, error) {
+	s := &RowStream{req: req, exec: e, ctx: ctx, pkOnly: true}
+	s.initRoutes(ctx)
+	for {
+		err := s.fillScatter()
+		if err == io.EOF {
+			return s.ncCollect, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 }
 
 // l1Fingerprint 谓词指纹（table|idx|values 排序后拼接）。
@@ -432,7 +518,7 @@ func (s *RowStream) fillScatter() error {
 		if err != nil {
 			return fmt.Errorf("exec: scatter page: %w", err)
 		}
-		var pks []string
+		var items []candItem
 		rest := s.pending[:0]
 		for i, b := range s.pending {
 			members := asStrings(results[i])
@@ -444,7 +530,7 @@ func (s *RowStream) fillScatter() error {
 					}
 					s.seen[pk] = struct{}{}
 				}
-				pks = append(pks, pk)
+				items = append(items, candItem{member: m, pk: pk, val: b.val})
 			}
 			if len(members) == e.batch { // 满页 = 可能还有
 				b.cursor += len(members)
@@ -452,13 +538,21 @@ func (s *RowStream) fillScatter() error {
 			}
 		}
 		s.pending = rest
-		if len(pks) == 0 {
+		if len(items) == 0 {
 			continue
 		}
-		if s.ncFP != "" {
-			s.ncCollect = append(s.ncCollect, pks...)
+		if s.ncFP != "" || s.pkOnly {
+			for _, it := range items {
+				s.ncCollect = append(s.ncCollect, it.pk)
+			}
+			if s.pkOnly && len(s.ncCollect) > l2MaxCollect {
+				return errL2Overflow
+			}
 		}
-		if err := s.fetchRows(pks); err != nil {
+		if s.pkOnly {
+			continue // L2 收集模式：不回表，跑到 EOF
+		}
+		if err := s.fetchItems(items); err != nil {
 			return err
 		}
 		return nil
@@ -485,7 +579,7 @@ func (s *RowStream) buildGroup(from, to int) []bucketScan {
 					if s.exec.telemetry != nil {
 						s.exec.telemetry.Sample(s.ctx, bk)
 					}
-					out = append(out, bucketScan{key: bk})
+					out = append(out, bucketScan{key: bk, val: v})
 				}
 			}
 		case FullScan:
@@ -531,7 +625,113 @@ func rangeBound(v float64, open bool) string {
 	return s
 }
 
-// fetchRows 批量回表（pipeline HGETALL，512 批）→ 空行跳过 → 谓词校验 → 解码入队。
+// fetchItems 候选取行分发：覆盖索引走 member 解码 + 活性校验（跳回表），
+// 其余走回表（投影下推 HMGET，docs/04 §4.3）。
+func (s *RowStream) fetchItems(items []candItem) error {
+	if s.req.Covering {
+		return s.fetchCovered(items)
+	}
+	pks := make([]string, 0, len(items))
+	for _, it := range items {
+		pks = append(pks, it.pk)
+	}
+	return s.fetchRows(pks)
+}
+
+// fetchColumns 回表取列集合：投影 ∪ 谓词列（谓词重校验不可省，docs/04 §4.3）。
+// nil = 全列（HGETALL）；空非 nil = 零投影且无谓词（EXISTS 活性判定即可）。
+func (s *RowStream) fetchColumns() []string {
+	if s.req.Projection == nil {
+		return nil
+	}
+	set := map[string]bool{}
+	var cols []string
+	add := func(c string) {
+		if c != "" && !strings.EqualFold(c, s.req.Table.PK) && !set[c] {
+			set[c] = true
+			cols = append(cols, c)
+		}
+	}
+	for _, c := range s.req.Projection {
+		add(c)
+	}
+	if s.req.Pred != nil {
+		add(s.req.Pred.Column)
+	}
+	// 取列集合覆盖全部非主键列时 HGETALL 更省（一次取回免字段列表传输；
+	// 主键列本就不在 Hash 字段里——editors.splitRow 把 pk 提出到 key 侧）
+	if len(cols) > 0 {
+		nonPK := 0
+		for _, c := range s.req.Table.Columns {
+			if !strings.EqualFold(c.Name, s.req.Table.PK) {
+				nonPK++
+			}
+		}
+		if len(cols) >= nonPK {
+			return nil
+		}
+	}
+	return cols
+}
+
+// fetchCovered 覆盖索引读路径（docs/03 §3.5）：member 自带覆盖列，跳过回表。
+// 活性校验 = exp 登记册 ZSCORE（每行必登记，docs/07 §7.2）：score > now 即活
+// （+inf 无 TTL；≤now 已过期未清扫；member 缺失 = 已清扫/从未存在）——
+// 这是无回表世界"过期行绝不返回"的落实点。同步索引的 member 与行原子一致
+// （写 Lua 同事务撤旧建新），覆盖列值即当前值。
+func (s *RowStream) fetchCovered(items []candItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	t := s.req.Table
+	idx := s.req.Index
+	now := s.exec.clock().Unix()
+	shards := t.EffectiveExpShards()
+
+	cmds := make([]kidb.Cmd, 0, len(items))
+	for _, it := range items {
+		slot := keycodec.Slot(keycodec.RowKey(t.Name, it.pk))
+		cmds = append(cmds, kidb.Cmd{Name: "ZSCORE", Args: []any{
+			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(it.pk, shards), shards), it.pk,
+		}})
+	}
+	results, err := s.exec.cli.Pipeline(s.ctx, cmds)
+	if err != nil {
+		return fmt.Errorf("exec: covered liveness: %w", err)
+	}
+
+	var fallback []string // member 解码失败（防御）→ 回表
+	for i, it := range items {
+		sc, serr := strconv.ParseFloat(fmt.Sprint(results[i]), 64)
+		if serr != nil || sc <= float64(now) {
+			continue // 已过期/已清扫
+		}
+		covers := rowcodec.MemberCovers(it.member, true)
+		if covers == nil || len(covers) != len(idx.Covering) {
+			fallback = append(fallback, it.pk)
+			continue
+		}
+		raw := make(map[string]string, len(covers)+1)
+		raw[idx.Columns[0]] = it.val
+		for j, c := range idx.Covering {
+			raw[c] = covers[j]
+		}
+		if !s.req.Pred.Match(raw) {
+			if s.exec.m != nil {
+				s.exec.m.RowsFiltered.Inc()
+			}
+			continue
+		}
+		s.rows = append(s.rows, rowcodec.DecodeRowCols(t, it.pk, raw, s.req.Projection))
+	}
+	if len(fallback) > 0 {
+		return s.fetchRows(fallback)
+	}
+	return nil
+}
+
+// fetchRows 批量回表（pipeline，512 批；投影子集用 HMGET，零投影用 EXISTS）→
+// 空行跳过 → 谓词校验 → 解码入队。
 // 这是"回表校验"纪律的落实点（docs/04 §4.3）：一切索引路径的输出都经此过滤。
 // 谓词为白名单形态且开启 Pushdown 时，校验在服务端 Lua 完成（网络只传命中行）。
 func (s *RowStream) fetchRows(pks []string) error {
@@ -539,20 +739,45 @@ func (s *RowStream) fetchRows(pks []string) error {
 		return s.fetchRowsPushdown(s.ctx, pks)
 	}
 	t := s.req.Table
+	cols := s.fetchColumns()
 	for i := 0; i < len(pks); i += s.exec.batch {
 		batch := pks[i:min(i+s.exec.batch, len(pks))]
 		cmds := make([]kidb.Cmd, 0, len(batch))
 		for _, pk := range batch {
-			cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{keycodec.RowKey(t.Name, pk)}})
+			rk := keycodec.RowKey(t.Name, pk)
+			switch {
+			case cols == nil:
+				cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{rk}})
+			case len(cols) == 0:
+				cmds = append(cmds, kidb.Cmd{Name: "EXISTS", Args: []any{rk}})
+			default:
+				args := make([]any, 0, len(cols)+1)
+				args = append(args, rk)
+				for _, c := range cols {
+					args = append(args, c)
+				}
+				cmds = append(cmds, kidb.Cmd{Name: "HMGET", Args: args})
+			}
 		}
 		results, err := s.exec.cli.Pipeline(s.ctx, cmds)
 		if err != nil {
 			return fmt.Errorf("exec: fetch rows: %w", err)
 		}
 		for j, res := range results {
-			raw := asStringMap(res)
-			if len(raw) == 0 {
-				continue // 空 Hash = 行过期/不存在 → 静默跳过
+			var raw map[string]string
+			switch {
+			case cols == nil:
+				raw = asStringMap(res)
+				if len(raw) == 0 {
+					continue // 空 Hash = 行过期/不存在 → 静默跳过
+				}
+			case len(cols) == 0:
+				if fmt.Sprint(res) != "1" {
+					continue // EXISTS=0
+				}
+				raw = map[string]string{}
+			default:
+				raw = hmgetMap(cols, res)
 			}
 			if !s.req.Pred.Match(raw) {
 				if s.exec.m != nil {
@@ -560,10 +785,26 @@ func (s *RowStream) fetchRows(pks []string) error {
 				}
 				continue
 			}
-			s.rows = append(s.rows, rowcodec.DecodeRow(t, batch[j], raw))
+			s.rows = append(s.rows, rowcodec.DecodeRowCols(t, batch[j], raw, s.req.Projection))
 		}
 	}
 	return nil
+}
+
+// hmgetMap 把 HMGET 的位置式回复（nil = 字段缺失）装配为字段映射。
+func hmgetMap(cols []string, res any) map[string]string {
+	raw := make(map[string]string, len(cols))
+	vals, ok := res.([]any)
+	if !ok {
+		return raw
+	}
+	for k, v := range vals {
+		if k >= len(cols) || v == nil {
+			continue
+		}
+		raw[cols[k]] = fmt.Sprint(v)
+	}
+	return raw
 }
 
 // stripCovering 提取桶 member 的 pk（schema 感知：覆盖列为 msgp 数组编码，

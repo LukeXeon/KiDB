@@ -39,6 +39,8 @@
 ### B 组性能增强（按 ROADMAP 序推进）
 
 - **top-k 归并下推 + ORDER BY 排序正确性修复**：探针复现并修复潜在乱序——gms `replace_sort.go` 在 ORDER BY 列与索引前缀匹配时直接删除 Sort 节点（ASC 不咨询任何接口），而 KiDB 范围桶按 slot 散布、原 slot 组流式产出全局无序。修复 = RangeLookup 一律走 k 路归并（exec/topk.go：16384 路种子建堆 + 按需补页，`gopkg.in/dnaeon/go-priorityqueue.v1` 泛型堆；DESC 走 `ZREVRANGEBYSCORE` + 大顶堆），排序正确性由构造保证；`Index` 实现 `sql.OrderedIndex`（范围=Asc/Reversible，其余=None）+ `CanSupport` 收紧（等值/唯一/主键仅点范围）为契约防御面；LIMIT 早停由引擎停止消费自然达成，keyset 分页（`WHERE num > ? ORDER BY num LIMIT k`）随之成为最优路径。副带修复：sqlguard 收集 IN/BETWEEN 谓词列（`WHERE pk IN (...)` 曾被误拒 ERR_NO_INDEX）、ORDER BY 范围索引列的无 WHERE 查询按有界放行。
+- **投影下推 + 覆盖索引读路径**：`Table` 实现 gms `ProjectedTable`——回表从 HGETALL 降为 HMGET 列子集（零宽投影退化为 EXISTS 活性判定）；覆盖索引命中（投影∪谓词 ⊆ 索引列+覆盖列+pk）时**跳过回表**：member msgp 解码覆盖列 + `ZSCORE exp` 活性校验（过期行绝不返回），解码失败防御性回退回表。配套修复：在线回填（`_job`）补上 member 覆盖列编码（此前回填产裸 pk，覆盖读路径对回填索引全灭）；DDL 覆盖列必须 NOT NULL（msgp 字符串数组无法保真 NULL，防静默错值）。**gms 集成实证**：`PrimaryKeySchema()` 必须恒返全量 schema——投影窄 schema 会让 coster 的 `indexFds` 找不到 PRIMARY 索引列、nil stat 在 `ordinalsForStat` panic；gms `fix_exec_indexes` 显式兼容宽 PrimaryKeySchema（dolt 同形）。
+- **L2 请求合并（singleflight）**：EqLookup 同指纹并发查询共享一次散取——leader 物化 pk 列表（2^20 上限，超出各调用方退回独立流式，有界性优先）并填充 L1，followers 经 `DoChan` 共享（leader 客户端断开不连坐）后各自回表校验。命令量实证：32 路并发冷查询热值，桶读取 ≈1 次散取而非 32 次。配套补上 **L1 网关装配缺口**（此前 `SetNearCache` 只在测试内接线，生产路径 L1 休眠）：装配进 `startRoles`，`nearcache_ttl/_capacity` 变量轮询换装。
 
 ## v5.0（文档全面革新，docs/ 现行版本基线）
 
