@@ -26,9 +26,15 @@ import (
 )
 
 // Adapter 在 *redis.ClusterClient 上实现 kidb.KvClient。
+//
+// 副本读（docs/09 §9.4 可选能力）：ReplicaRead 开启时构造第二个
+// ClusterClient（ReadOnly=true，go-redis 把只读命令路由到从节点）——
+// 主客户端保持主节点路由（元数据/写邻读的主节点纪律不动），
+// DoReplica/PipelineReplica 走副本客户端。注意：设置 ClusterSlots 覆盖时
+// go-redis 会禁用副本路由（其内部约束），测试环境副本读实际仍落主节点。
 type Adapter struct {
-	cli         *redis.ClusterClient
-	replicaRead bool
+	cli     *redis.ClusterClient
+	replica *redis.ClusterClient // 非 nil = 副本读可用
 
 	scriptsMu sync.Mutex
 	scripts   map[string]*redis.Script // sha1 → 预编译脚本（EVALSHA 用）
@@ -39,9 +45,8 @@ type Options struct {
 	PoolSize     int
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
-	// ReplicaRead 声明副本读能力（docs/09 §9.4）；开启后 go-redis 将只读
-	// 命令路由到从节点。注意：设置 ClusterSlots 覆盖时 go-redis 会禁用
-	// 该行为（其内部约束），测试环境 DoReplica 实际仍落主节点。
+	// ReplicaRead 声明副本读能力（docs/09 §9.4）：开启后 DoReplica /
+	// PipelineReplica 经独立 ReadOnly 客户端把只读命令路由到从节点。
 	ReplicaRead bool
 	// ClusterSlots 覆盖拓扑获取（测试用 miniredis / 代理网关场景）；生产为 nil。
 	ClusterSlots func(context.Context) ([]redis.ClusterSlot, error)
@@ -49,23 +54,32 @@ type Options struct {
 
 // New 构造适配器。返回的对象可直接作为 kidb.KvClient 使用。
 func New(addrs []string, opt Options) *Adapter {
-	cli := redis.NewClusterClient(&redis.ClusterOptions{
+	base := &redis.ClusterOptions{
 		Addrs:        addrs,
 		PoolSize:     opt.PoolSize,
 		ReadTimeout:  opt.ReadTimeout,
 		WriteTimeout: opt.WriteTimeout,
-		ReadOnly:     opt.ReplicaRead,
 		ClusterSlots: opt.ClusterSlots,
-	})
-	return &Adapter{
-		cli:         cli,
-		replicaRead: opt.ReplicaRead,
-		scripts:     make(map[string]*redis.Script),
 	}
+	a := &Adapter{
+		cli:     redis.NewClusterClient(base),
+		scripts: make(map[string]*redis.Script),
+	}
+	if opt.ReplicaRead {
+		ro := *base
+		ro.ReadOnly = true // 只读命令路由到从节点（go-redis 内建命令表判定）
+		a.replica = redis.NewClusterClient(&ro)
+	}
+	return a
 }
 
 // Close 关闭底层连接池。
-func (a *Adapter) Close() error { return a.cli.Close() }
+func (a *Adapter) Close() error {
+	if a.replica != nil {
+		_ = a.replica.Close()
+	}
+	return a.cli.Close()
+}
 
 // Do 执行单条命令（契约 R2：命令必须携带 key；适配器做防御性校验）。
 // redis.Nil 统一翻译为 (nil, nil)——"不存在"不是错误。
@@ -171,7 +185,7 @@ func (a *Adapter) cachedScript(s *script.Script) *redis.Script {
 // Capabilities 声明可选能力（docs/09 §9.4）。
 func (a *Adapter) Capabilities() kidb.Capabilities {
 	return kidb.Capabilities{
-		ReplicaRead:  a.replicaRead,
+		ReplicaRead:  a.replica != nil,
 		HotkeyEvents: nil, // 开源参考适配器不提供热 key 事件流
 		ServerTime:   true,
 	}
@@ -180,10 +194,59 @@ func (a *Adapter) Capabilities() kidb.Capabilities {
 // DoReplica 只读命令路由到 slave/只读副本（docs/09 §9.4）。
 // 仅在构造时 ReplicaRead=true 时可用；内核须先查 Capabilities。
 func (a *Adapter) DoReplica(ctx context.Context, cmd string, args ...any) (any, error) {
-	if !a.replicaRead {
+	if a.replica == nil {
 		return nil, fmt.Errorf("%w: DoReplica without ReplicaRead capability", kidb.ErrUnsupported)
 	}
-	return a.Do(ctx, cmd, args...)
+	if len(args) == 0 {
+		return nil, fmt.Errorf("%w: DoReplica(%s) without key", kidb.ErrContractViolation, cmd)
+	}
+	res, err := a.replica.Do(ctx, append([]any{cmd}, args...)...).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	return normalizeReply(res), err
+}
+
+// PipelineReplica 批级副本读（契约 R4 同形，路由到从节点）。
+func (a *Adapter) PipelineReplica(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
+	if a.replica == nil {
+		return nil, fmt.Errorf("%w: PipelineReplica without ReplicaRead capability", kidb.ErrUnsupported)
+	}
+	if len(cmds) == 0 {
+		return nil, nil
+	}
+	pipe := a.replica.Pipeline()
+	cmder := make([]*redis.Cmd, len(cmds))
+	for i, c := range cmds {
+		if len(c.Args) == 0 {
+			return nil, fmt.Errorf("%w: PipelineReplica cmd %s without key", kidb.ErrContractViolation, c.Name)
+		}
+		cmder[i] = pipe.Do(ctx, append([]any{c.Name}, c.Args...)...)
+	}
+	_, execErr := pipe.Exec(ctx)
+	results := make([]any, len(cmds))
+	var firstErr error
+	for i, c := range cmder {
+		v, err := c.Result()
+		switch {
+		case errors.Is(err, redis.Nil):
+			results[i] = nil
+		case err != nil:
+			results[i] = nil
+			if firstErr == nil {
+				firstErr = err
+			}
+		default:
+			results[i] = normalizeReply(v)
+		}
+	}
+	if firstErr != nil {
+		return results, firstErr
+	}
+	if errors.Is(execErr, redis.Nil) {
+		return results, nil
+	}
+	return results, execErr
 }
 
 // 编译期接口断言。

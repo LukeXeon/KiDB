@@ -30,6 +30,7 @@ func main() {
 		readTimeout  = flag.Duration("read-timeout", 3*time.Second, "读超时（scatter 预算 = 读超时 × headroom）")
 		writeTimeout = flag.Duration("write-timeout", 3*time.Second, "写超时")
 		rwOnly       = flag.Bool("read-write-only", false, "纯读写节点：不启动后台角色循环（docs/08 §8.5 豁免）")
+		replicaRead  = flag.Bool("replica-read", false, "声明副本读能力（docs/09 §9.4：适配器构造 ReadOnly 副本客户端；运行时还需 SET GLOBAL replica_read=true 才进读路径）")
 		accounts     = flag.String("accounts", "root:%:kidb:rw", "账号表：user:host:pass:role，逗号分隔")
 	)
 	flag.Parse()
@@ -39,6 +40,7 @@ func main() {
 		PoolSize:      *poolSize,
 		ReadTimeout:   *readTimeout,
 		WriteTimeout:  *writeTimeout,
+		ReplicaRead:   *replicaRead,
 		ReadWriteOnly: *rwOnly,
 		ListenAddr:    *listen,
 	}
@@ -57,6 +59,7 @@ func main() {
 		PoolSize:     boot.PoolSize,
 		ReadTimeout:  boot.ReadTimeout,
 		WriteTimeout: boot.WriteTimeout,
+		ReplicaRead:  boot.ReplicaRead,
 	})
 	k, err := kidb.NewKernel(cli, boot) // 能力探测：EVAL 必须（docs/09 §9.4）
 	if err != nil {

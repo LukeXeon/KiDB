@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -188,6 +189,7 @@ type Executor struct {
 	telemetry     TelemetrySink    // 遥测采样（nil = 关闭）
 	m             *metrics.Metrics // 指标（nil = no-op，docs/10 §10.3）
 	clock         func() time.Time // 覆盖读路径活性判定时钟（测试可注入，与写入侧共钟）
+	replicaRead   atomic.Bool        // L3 副本读开关（SetReplicaRead；docs/08 §8.4）
 	sf            singleflight.Group // L2 请求合并（docs/08 §8.4：同指纹并发合并；随 L1 装配生效）
 	batch         int
 	slotsPerRound int
@@ -202,6 +204,28 @@ func (e *Executor) SetClock(c func() time.Time) { e.clock = c }
 
 // SetL4 接入 L4 热桶副本解析。
 func (e *Executor) SetL4(r L4Resolver) { e.l4 = r }
+
+// SetReplicaRead 开关 L3 副本读（docs/08 §8.4：能力存在且策略允许时，
+// 只读散取/回表分流到副本——回表校验兜底副本滞后，最终一致窗口见文档）。
+// 网关按 `replica_read` 变量 + 适配器能力位驱动本开关。
+func (e *Executor) SetReplicaRead(on bool) { e.replicaRead.Store(on) }
+
+// readPipeline 读路径批命令出口：L3 开启且适配器声明能力时分流到副本
+// （exec 发出的 Pipeline 命令全部是只读族——分流安全；Lua/元数据不经此路）。
+func (e *Executor) readPipeline(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
+	if e.replicaRead.Load() && e.cli.Capabilities().ReplicaRead {
+		return e.cli.PipelineReplica(ctx, cmds)
+	}
+	return e.cli.Pipeline(ctx, cmds)
+}
+
+// readDo 单命令读出口（同 readPipeline 分流语义）。
+func (e *Executor) readDo(ctx context.Context, cmd string, args ...any) (any, error) {
+	if e.replicaRead.Load() && e.cli.Capabilities().ReplicaRead {
+		return e.cli.DoReplica(ctx, cmd, args...)
+	}
+	return e.cli.Do(ctx, cmd, args...)
+}
 
 // SetTelemetry 接入遥测采样。
 func (e *Executor) SetTelemetry(t TelemetrySink) { e.telemetry = t }
@@ -514,7 +538,7 @@ func (s *RowStream) fillScatter() error {
 		for _, b := range s.pending {
 			cmds = append(cmds, s.pageCmd(b))
 		}
-		results, err := e.cli.Pipeline(s.ctx, cmds)
+		results, err := e.readPipeline(s.ctx, cmds)
 		if err != nil {
 			return fmt.Errorf("exec: scatter page: %w", err)
 		}
@@ -695,7 +719,7 @@ func (s *RowStream) fetchCovered(items []candItem) error {
 			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(it.pk, shards), shards), it.pk,
 		}})
 	}
-	results, err := s.exec.cli.Pipeline(s.ctx, cmds)
+	results, err := s.exec.readPipeline(s.ctx, cmds)
 	if err != nil {
 		return fmt.Errorf("exec: covered liveness: %w", err)
 	}
@@ -759,7 +783,7 @@ func (s *RowStream) fetchRows(pks []string) error {
 				cmds = append(cmds, kidb.Cmd{Name: "HMGET", Args: args})
 			}
 		}
-		results, err := s.exec.cli.Pipeline(s.ctx, cmds)
+		results, err := s.exec.readPipeline(s.ctx, cmds)
 		if err != nil {
 			return fmt.Errorf("exec: fetch rows: %w", err)
 		}
@@ -864,7 +888,7 @@ func (e *Executor) RowCount(ctx context.Context, t *meta.TableDef, nowUnixSec in
 			})
 		}
 	}
-	results, err := e.cli.Pipeline(ctx, cmds)
+	results, err := e.readPipeline(ctx, cmds)
 	if err != nil {
 		return 0, err
 	}

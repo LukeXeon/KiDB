@@ -33,6 +33,7 @@ var Vars = map[string]VarDef{
 	"hotkey_refresh_interval":      {"1s", nil},
 	"hotkey_source":                {"telemetry", enumValidator("telemetry", "events", "both")},
 	"hotkey_row_cache":             {"false", boolValidator},
+	"replica_read":                 {"false", boolValidator}, // L3 副本读（适配器能力位缺失时自动无效）
 	"nearcache_ttl":                {"3s", nil},
 	"nearcache_capacity":           {"10000", nonNegative},
 	"sweeper_batch":                {"512", nonNegative},

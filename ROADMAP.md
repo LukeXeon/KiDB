@@ -21,10 +21,10 @@
 - **keyset 分页优化**（`WHERE num > ? ORDER BY num LIMIT k` 翻译为区间起点 + 归并早停，随 top-k 一并达成）；
 - **投影下推 + 覆盖索引读路径**（gms `ProjectedTable` 落地：回表 HMGET 子集；覆盖命中跳回表 = member 解码 + exp ZSCORE 活性校验；回填路径同步修 member 覆盖编码；DDL 覆盖列必须 NOT NULL——msgp 字符串数组 NULL 不保真；**`PrimaryKeySchema()` 恒全量**——gms coster 统计构造对窄 schema panic 的实证修复）。
 - **L2 请求合并**（singleflight：EqLookup 同指纹并发合并，leader 物化 pk 列表（2^20 上限）+ 填充 L1，followers 共享后各自回表；同时补上 L1 的网关装配缺口——`nearcache_ttl/_capacity` 变量驱动 + 轮询换装，此前 L1 只在测试内接线）。
+- **L3 副本读**（`DoReplica` 进读路径 + 契约新增 `PipelineReplica` 批级副本读——单命令副本读无法满足散取 RTT 纪律；参考适配器改为独立 `ReadOnly` 副本客户端（主客户端恒主节点，修正原 `ReadOnly` 主客户端会把内建只读命令全分流的误配）；开关 = `replica_read` 变量 × 能力位轮询热更）。
 
 | 项 | 说明 |
 |---|---|
-| L3 副本读（`DoReplica` 进读路径） | 适配器能力已声明，exec 未消费 |
 | 并发扇出池 | 当前顺序 pipeline 批 + 批大小 bulkhead 已够用；需要结构化并发时引入 `sourcegraph/conc` / errgroup |
 | 后台任务池 | 后台角色为常驻循环，无任务池负载；需要时引入 `panjf2000/ants` |
 | 全扫/回填限流通道 | 落地时引入 `golang.org/x/time/rate` |

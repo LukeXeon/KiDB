@@ -190,7 +190,7 @@ func (om *orderedMerger) seed() error {
 	for _, w := range om.ways {
 		cmds = append(cmds, om.pageCmd(w.key, 0, 1))
 	}
-	results, err := e.cli.Pipeline(s.ctx, cmds)
+	results, err := e.readPipeline(s.ctx, cmds)
 	if err != nil {
 		return err
 	}
@@ -219,7 +219,7 @@ func (om *orderedMerger) refillWays(idxs []int) error {
 		w := &om.ways[wi]
 		cmds = append(cmds, om.pageCmd(w.key, w.cursor, topkRefillPage))
 	}
-	results, err := s.exec.cli.Pipeline(s.ctx, cmds)
+	results, err := s.exec.readPipeline(s.ctx, cmds)
 	if err != nil {
 		return err
 	}

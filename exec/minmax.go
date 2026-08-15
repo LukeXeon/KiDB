@@ -44,7 +44,7 @@ func (e *Executor) MinMax(ctx context.Context, t *meta.TableDef, idx *meta.Index
 			}
 			keys = append(keys, bk)
 		}
-		results, perr := e.cli.Pipeline(ctx, cmds)
+		results, perr := e.readPipeline(ctx, cmds)
 		if perr != nil {
 			return 0, "", false, perr
 		}
@@ -78,7 +78,7 @@ func (e *Executor) MinMax(ctx context.Context, t *meta.TableDef, idx *meta.Index
 		}
 
 		// 回表校验最优候选
-		res, herr := e.cli.Do(ctx, "HGETALL", keycodec.RowKey(t.Name, best.pk))
+		res, herr := e.readDo(ctx, "HGETALL", keycodec.RowKey(t.Name, best.pk))
 		if herr != nil {
 			return 0, "", false, herr
 		}

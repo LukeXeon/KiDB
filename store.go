@@ -29,6 +29,11 @@ type KvClient interface {
 	// DoReplica 仅当 Capabilities().ReplicaRead==true 时可用：
 	// 只读命令路由到 slave/只读集群。
 	DoReplica(ctx context.Context, cmd string, args ...any) (any, error)
+
+	// PipelineReplica Pipeline 的副本读版（同一能力门控）：
+	// 只读命令批路由到 slave/只读集群。读路径散取/回表是批量形态，
+	// 单命令 DoReplica 无法满足 RTT 纪律——批级副本读是 L3 的实际载体。
+	PipelineReplica(ctx context.Context, cmds []Cmd) ([]any, error)
 }
 
 // Cmd 是一条待 pipeline 的命令。

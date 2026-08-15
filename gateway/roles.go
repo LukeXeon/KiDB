@@ -48,29 +48,33 @@ func (s *Server) startRoles(ctx context.Context) {
 	// L1 近缓存装配（docs/08 §8.4）：otter 底座；nearcache_ttl/_capacity
 	// 热更新经轮询换装（换装即丢弃旧缓存——版本校验语义外的进程内缓存，
 	// 重建代价 = 一次冷启动窗口，可接受）。L2 随 L1 生效（exec 内 singleflight）。
-	s.attachNearCache(roleCtx)
+	// 同一轮询协程驱动 L3 副本读开关（replica_read 变量 × 适配器能力位）。
+	s.attachReadPathSwitches(roleCtx)
 
 	go s.elector.Campaign(roleCtx, s.controllerRole)
 	go s.sweeperLoop(roleCtx)
 	go s.indexerLoop(roleCtx)
 }
 
-// attachNearCache 按当前配置装配 L1，并起轮询协程跟踪变量变化换装。
-func (s *Server) attachNearCache(ctx context.Context) {
+// attachReadPathSwitches 读路径近端开关装配 + 轮询（1s，与 schema lease 同节奏）：
+// L1 近缓存（变量变化换装）与 L3 副本读（replica_read × 适配器能力位）。
+func (s *Server) attachReadPathSwitches(ctx context.Context) {
 	var cur *nearcache.ShardedCache[[]string]
 	var curTTL time.Duration
 	var curCap int
 	apply := func() {
 		ttl, capN := s.l1Config(ctx)
-		if cur != nil && ttl == curTTL && capN == curCap {
-			return
+		if cur == nil || ttl != curTTL || capN != curCap {
+			nc := nearcache.NewSharded[[]string](capN, ttl)
+			s.deps.Exec.SetNearCache(nc)
+			if cur != nil {
+				_ = cur.Close()
+			}
+			cur, curTTL, curCap = nc, ttl, capN
 		}
-		nc := nearcache.NewSharded[[]string](capN, ttl)
-		s.deps.Exec.SetNearCache(nc)
-		if cur != nil {
-			_ = cur.Close()
-		}
-		cur, curTTL, curCap = nc, ttl, capN
+		// L3：能力位缺失时变量无效（自动降级，docs/09 §9.4）
+		on := s.deps.Client.Capabilities().ReplicaRead && s.replicaReadEnabled(ctx)
+		s.deps.Exec.SetReplicaRead(on)
 	}
 	apply()
 	go func() {
@@ -88,6 +92,12 @@ func (s *Server) attachNearCache(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// replicaReadEnabled 读 replica_read 变量（默认 false）。
+func (s *Server) replicaReadEnabled(ctx context.Context) bool {
+	v, _, err := s.cfg.Get(ctx, "replica_read")
+	return err == nil && v == "true"
 }
 
 // l1Config 读取 nearcache_ttl/_capacity 变量（解析失败回落默认——
