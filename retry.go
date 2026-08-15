@@ -2,6 +2,7 @@ package kidb
 
 import (
 	"context"
+	"kidb/internal/tuning"
 	"strings"
 	"time"
 )
@@ -57,9 +58,11 @@ type RetryPolicy struct {
 	MaxAttempts int
 }
 
-// DefaultRetryPolicy 默认参数（docs/09 §9.6 表）。
+// DefaultRetryPolicy 默认参数（docs/09 §9.6 表；数值在 tuning.toml [retry]）。
 func DefaultRetryPolicy() RetryPolicy {
-	return RetryPolicy{Base: 50 * time.Millisecond, Max: 2 * time.Second, MaxAttempts: 3}
+	tn := tuning.Get()
+	return RetryPolicy{Base: time.Duration(tn.Retry.BackoffBaseMs) * time.Millisecond,
+		Max: time.Duration(tn.Retry.BackoffMaxMs) * time.Millisecond, MaxAttempts: tn.Retry.MaxAttempts}
 }
 
 // WithRetry 按类别退避重试 fn。ClassFatal/Unknown 不重试；

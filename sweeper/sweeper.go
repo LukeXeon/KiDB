@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"kidb"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
@@ -30,7 +31,7 @@ type Sweeper struct {
 
 // New 构造（参数即 docs/10 §10.2 变量默认值）。
 func New(cli kidb.KvClient, reg *script.Registry) *Sweeper {
-	return &Sweeper{cli: cli, reg: reg, batch: 512, maxBatches: 4}
+	return &Sweeper{cli: cli, reg: reg, batch: tuning.Get().Sweeper.Batch, maxBatches: tuning.Get().Sweeper.MaxBatchesPerTick}
 }
 
 // SetClock 注入时钟（测试用：与写入侧共享可推进的钟）。

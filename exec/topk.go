@@ -8,6 +8,7 @@ import (
 	pq "gopkg.in/dnaeon/go-priorityqueue.v1"
 
 	"kidb"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/meta"
 )
@@ -27,12 +28,8 @@ import (
 // 弹出赢家后按需补页（pageK 成员/次）；每批候选照常回表校验（docs/04 §4.3）。
 // LIMIT 早停由引擎 Limit 节点停止消费自然达成——归并器只被拉取，从不预取全量。
 
-const (
-	// topkRefillPage 归并补页大小（每 way 每次补页取回的成员数）。
-	// 权衡：1 = 每弹出一个成员就多一条补页命令；过大 = 全表遍历场景的瞬时缓冲
-	// （16384 桶 × pageK 成员）膨胀。16 使命令放大 ≤1/16、缓冲上限 ~6MB。
-	topkRefillPage = 16
-)
+// 归并补页大小取 tuning.Exec.TopkRefillPage（权衡：1 = 每弹出一个成员就多一条
+// 补页命令；过大 = 全表遍历场景的瞬时缓冲膨胀）。
 
 // topkItem 堆条目（comparable：member 在单桶内唯一，way 区分跨桶同 member 的
 // 分裂窗口双读——去重由 RowStream.seen 在回表前完成）。
@@ -217,7 +214,7 @@ func (om *orderedMerger) refillWays(idxs []int) error {
 	cmds := make([]kidb.Cmd, 0, len(idxs))
 	for _, wi := range idxs {
 		w := &om.ways[wi]
-		cmds = append(cmds, om.pageCmd(w.key, w.cursor, topkRefillPage))
+		cmds = append(cmds, om.pageCmd(w.key, w.cursor, tuning.Get().Exec.TopkRefillPage))
 	}
 	results, err := s.exec.readPipeline(s.ctx, cmds)
 	if err != nil {
@@ -240,7 +237,7 @@ func (om *orderedMerger) refillWays(idxs []int) error {
 			w.inHeap++
 		}
 		w.cursor += n
-		if n < topkRefillPage {
+		if n < tuning.Get().Exec.TopkRefillPage {
 			w.done = true
 		}
 	}

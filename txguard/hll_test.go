@@ -40,7 +40,7 @@ func TestHLLSampling(t *testing.T) {
 	require.NoError(t, err)
 	sampled, err := strconv.ParseUint(fmt.Sprint(res), 10, 64)
 	require.NoError(t, err)
-	est := sampled * HLLCompensation
+	est := sampled * HLLCompensation()
 	lo, hi := uint64(float64(distinct)*0.5), uint64(float64(distinct)*2.0)
 	require.GreaterOrEqual(t, est, lo, "估算 %d 低于下界 %d", est, lo)
 	require.LessOrEqual(t, est, hi, "估算 %d 高于上界 %d", est, hi)

@@ -6,6 +6,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"kidb"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 )
 
@@ -22,17 +23,14 @@ import (
 // 已知漂移（诚实声明）：UPDATE 新值累积、DELETE 不回收——基数估值向上漂移，
 // 与 HLL 自身误差同属"统计可近似"纪律。
 
-// hllSampleRate 采样率分母（1/64）。
-const hllSampleRate = 64
-
 // HLLSampledValue 按值确定性采样（同 idx+value 恒同结果——重放/回填/增量同规则，
-// 复制安全）。JobRunner 回填共用。
+// 复制安全）。JobRunner 回填共用。采样率 = tuning.hll.sample_rate。
 func HLLSampledValue(idxID, encVal string) bool {
-	return xxhash.Sum64String(idxID+"\x00"+encVal)%hllSampleRate == 0
+	return xxhash.Sum64String(idxID+"\x00"+encVal)%uint64(tuning.Get().HLL.SampleRate) == 0
 }
 
 // HLLCompensation 采样回补倍数（读侧 PFCOUNT 乘此值）。
-const HLLCompensation = hllSampleRate
+func HLLCompensation() uint64 { return uint64(tuning.Get().HLL.SampleRate) }
 
 // hllSample 写入成功后的采样 PFADD（尽力而为，失败仅损统计精度）。
 func (g *Guard) hllSample(ctx context.Context, req WriteReq) {

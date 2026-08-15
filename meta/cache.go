@@ -2,6 +2,8 @@ package meta
 
 import (
 	"context"
+
+	"kidb/internal/tuning"
 	"sync"
 	"time"
 )
@@ -22,7 +24,7 @@ type CatalogCache struct {
 func NewCatalogCache(store *CatalogStore) *CatalogCache {
 	return &CatalogCache{
 		store:  store,
-		lease:  NewLeaseTracker(time.Second),
+		lease:  NewLeaseTracker(tuning.Get().SchemaLease()),
 		tables: make(map[string]*TableDef),
 		clock:  time.Now,
 	}

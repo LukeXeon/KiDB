@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"kidb"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 )
 
@@ -20,9 +21,6 @@ import (
 // 值编码假设（docs/04 §4.5 既有声明）：字符串列不含 \xff 字节（UTF-8 天然满足），
 // 不含 \x00 的极端值由回表校验的 HasPrefix 重判兜底（member 截断只影响该值自身
 // 的分桶序，不产生错行）。
-
-// lexRefillPage 字典序归并补页大小（同 topkRefillPage 的权衡）。
-const lexRefillPage = 16
 
 // lexItem 归并堆条目（member 全序即（值, pk）序——member 比较即字典序比较）。
 type lexItem struct {
@@ -168,7 +166,7 @@ func (lm *lexMerger) refillWays(idxs []int) error {
 	cmds := make([]kidb.Cmd, 0, len(idxs))
 	for _, wi := range idxs {
 		w := &lm.ways[wi]
-		cmds = append(cmds, lm.pageCmd(w.key, w.cursor, lexRefillPage))
+		cmds = append(cmds, lm.pageCmd(w.key, w.cursor, tuning.Get().Exec.LexRefillPage))
 	}
 	results, err := s.exec.readPipeline(s.ctx, cmds)
 	if err != nil {
@@ -186,7 +184,7 @@ func (lm *lexMerger) refillWays(idxs []int) error {
 			w.inHeap++
 		}
 		w.cursor += len(members)
-		if len(members) < lexRefillPage {
+		if len(members) < tuning.Get().Exec.LexRefillPage {
 			w.done = true
 		}
 	}

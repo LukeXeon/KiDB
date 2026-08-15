@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"kidb/internal/tuning"
 
 	"kidb"
 	"kidb/bucketmap"
@@ -19,13 +20,13 @@ type Manager struct {
 	splitter *Splitter
 	l4       *L4Manager
 
-	SplitMembers int64 // bucket_split_members 默认 50000
+	SplitMembers int64 // 桶分裂成员阈值（tuning.toml controller.split_members）
 	HotQPS       int64 // 单桶读 QPS 热阈（简化：每 tick ops 增量）
 }
 
 // NewManager 构造。
 func NewManager(cli kidb.KvClient, bm *bucketmap.Store, splitter *Splitter, l4 *L4Manager) *Manager {
-	return &Manager{cli: cli, bm: bm, splitter: splitter, l4: l4, SplitMembers: 50000, HotQPS: 4000}
+	return &Manager{cli: cli, bm: bm, splitter: splitter, l4: l4, SplitMembers: tuning.Get().Controller.SplitMembers, HotQPS: tuning.Get().Controller.HotQPS}
 }
 
 // Tick 一轮决策：候选复核 → 分裂/L4。错误不致命（下轮再来）。

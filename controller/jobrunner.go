@@ -10,6 +10,7 @@ import (
 	"kidb"
 	"kidb/bucketmap"
 	"kidb/exec"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
@@ -34,8 +35,9 @@ type JobRunner struct {
 
 // NewJobRunner 构造（tickBudget 每 tick 回填时间预算，默认 500ms）。
 func NewJobRunner(cli kidb.KvClient, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store) *JobRunner {
-	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: 256, tickBudget: 500 * time.Millisecond,
-		bfLimit: rate.NewLimiter(rate.Limit(10000), 1024)}
+	tn := tuning.Get()
+	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: tn.Controller.JobSlotsPerTick, tickBudget: tn.JobTickBudget(),
+		bfLimit: rate.NewLimiter(rate.Limit(tn.Controller.BackfillRowsPerSec), 1024)}
 }
 
 // SetBackfillRate 回填速率热更（行/s/实例；gateway 轮询 ddl_backfill_rate_limit 驱动）。

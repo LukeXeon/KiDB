@@ -24,6 +24,7 @@ import (
 
 	"kidb"
 	"kidb/bucketmap"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
@@ -31,11 +32,7 @@ import (
 	"kidb/script"
 )
 
-// 常量默认值（docs/10 §10.2 变量表；config 包落地后改读全局变量）。
-const (
-	defaultBatch         = 512 // 分页/回表批大小
-	defaultSlotsPerRound = 64  // 每轮 scatter 的 slot 组宽
-)
+// 批大小/组宽等调优值统一收敛 internal/tuning（docs/01 §1.0：开发者参数单一调优面）。
 
 // Kind 是物理计划类型（docs/04 §4.1 翻译表）。
 type Kind int
@@ -283,8 +280,9 @@ type TelemetrySink interface {
 
 // New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
 func New(cli kidb.KvClient, reg *script.Registry) *Executor {
-	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: defaultBatch, slotsPerRound: defaultSlotsPerRound,
-		fsSem: make(chan struct{}, 10)}
+	tn := tuning.Get()
+	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: tn.Exec.Batch, slotsPerRound: tn.Exec.SlotsPerRound,
+		fsSem: make(chan struct{}, tn.Exec.FullscanConcurrency)}
 }
 
 // SetFullscanLimit 全扫并发上限热更（query_fullscan_rate_limit 变量驱动）。
@@ -461,9 +459,6 @@ func (s *RowStream) initRoutes(ctx context.Context) {
 // 50k 上限是"每值每 slot"，全集群同值成员可超百万；超出即放弃共享物化，
 // 各调用方退回独立流式散取，有界性优先）。
 var errL2Overflow = errors.New("exec: L2 collect overflow")
-
-// l2MaxCollect L2 leader 物化上限（pk 数）。
-const l2MaxCollect = 1 << 20
 
 // collectEqPKs L2 leader 的全量散取收集（只取 pk 不回表；与 fillScatter
 // 同一分页循环，pkOnly 模式）。
@@ -658,7 +653,7 @@ func (s *RowStream) fillScatter() error {
 			for _, it := range items {
 				s.ncCollect = append(s.ncCollect, it.pk)
 			}
-			if s.pkOnly && len(s.ncCollect) > l2MaxCollect {
+			if s.pkOnly && len(s.ncCollect) > tuning.Get().Exec.L2MaxCollect {
 				return errL2Overflow
 			}
 		}

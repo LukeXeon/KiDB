@@ -23,5 +23,5 @@ func (e *Executor) IndexCardinality(ctx context.Context, table, idxID string) (u
 	if err != nil {
 		return 0, nil // 空 HLL/异常值按 0 基数（近似统计不报错）
 	}
-	return n * txguard.HLLCompensation, nil
+	return n * txguard.HLLCompensation(), nil
 }

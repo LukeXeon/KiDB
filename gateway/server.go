@@ -20,6 +20,7 @@ import (
 	"kidb/controller"
 	"kidb/ddl"
 	"kidb/engine"
+	"kidb/internal/tuning"
 )
 
 // Server 是 KiDB 网关进程内组装体（docs/02 SQL 服务器）：
@@ -76,8 +77,8 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 		deps:               deps,
 		sessions:           map[uint32]*sessRec{},
 		cfg:                config.New(deps.Client, deps.Reg, "kidb-server"),
-		plans:              newPlanCache(1024),
-		slowQueryThreshold: 500 * time.Millisecond,
+		plans:              newPlanCache(tuning.Get().Gateway.PlanCacheCapacity),
+		slowQueryThreshold: tuning.Get().SlowQueryThreshold(),
 	}
 
 	// 会话构造：BaseSession + 角色登记

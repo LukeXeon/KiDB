@@ -11,6 +11,7 @@ import (
 	"strconv"
 
 	"kidb"
+	"kidb/internal/tuning"
 )
 
 // CandKey 热桶候选注册表（Hash：field=桶 key，value=最近采样时间戳）。
@@ -25,7 +26,7 @@ type Recorder struct {
 
 // New 构造。
 func New(cli kidb.KvClient) *Recorder {
-	return &Recorder{cli: cli, ratio: 64, rnd: rand.New(rand.NewSource(rand.Int63()))}
+	return &Recorder{cli: cli, ratio: tuning.Get().Telemetry.SampleRatio, rnd: rand.New(rand.NewSource(rand.Int63()))}
 }
 
 // SetRatio 覆盖采样率（配置热更新挂点）。

@@ -8,6 +8,7 @@ import (
 	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/indexer"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/nearcache"
 	"kidb/sweeper"
@@ -18,10 +19,11 @@ import (
 // 所有节点默认参与；ReadWriteOnly 节点经 Bootstrap 显式豁免。
 // 锁即选举 + watchdog 续约；全部角色故障安全（全挂只会变慢，不出错行）。
 
-const (
-	sweepTick   = time.Second            // docs/07 §7.3
-	indexerTick = 100 * time.Millisecond // docs/05 §5.2 秒级收敛
-	sweepRange  = 1024                   // slot 区间宽度（lk:sweep:{区间} 锁粒度）
+// 周期/区间取自 tuning.toml（sweeper.tick_ms / sweep_range_slots；indexer 100ms）。
+var (
+	sweepTick   = time.Duration(tuning.Get().Sweeper.TickMs) * time.Millisecond
+	indexerTick = 100 * time.Millisecond
+	sweepRange  = tuning.Get().Sweeper.SweepRangeSlots
 )
 
 // startRoles 启动后台角色循环（ReadWriteOnly 豁免）。
@@ -46,7 +48,7 @@ func (s *Server) startRoles(ctx context.Context) {
 
 	// 读路径开关装配（docs/01 §1.0：变量只承载语义开关——replica_read /
 	// hotkey_row_cache；L1/L2 常量装配一次到位：3s/10000，调优参数不设变量）。
-	s.deps.Exec.SetNearCache(nearcache.NewSharded[[]string](10000, 3*time.Second))
+	s.deps.Exec.SetNearCache(nearcache.NewSharded[[]string](tuning.Get().Nearcache.Capacity, tuning.Get().NearcacheTTL()))
 	s.attachSemanticSwitches(roleCtx)
 
 	go s.elector.Campaign(roleCtx, s.controllerRole)
@@ -66,7 +68,7 @@ func (s *Server) attachSemanticSwitches(ctx context.Context) {
 		// 行级近缓存（默认关闭）
 		if s.boolVar(ctx, "hotkey_row_cache") {
 			if curRow == nil {
-				curRow = nearcache.NewRowCache(10000, 3*time.Second)
+				curRow = nearcache.NewRowCache(tuning.Get().Nearcache.RowCapacity, tuning.Get().NearcacheRowTTL())
 				s.deps.Exec.SetRowCache(curRow)
 			}
 		} else if curRow != nil {

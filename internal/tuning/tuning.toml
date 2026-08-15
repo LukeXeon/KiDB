@@ -1,0 +1,66 @@
+# KiDB 开发者调优参数（唯一开发者调优面，embed 进二进制）
+#
+# 纪律（docs/01 §1.0 设计原点）：
+#   - 面向用户的变量只有 cfg:global 的 3 个语义开关；
+#   - 本文件收纳全部开发者调优参数——修改需重新构建发布（不热更）；
+#   - 新增参数前先回答：能否自动推导？能否保守写死？只有都不行的才进本文件。
+#
+# 注意（数据语义常量）：hll.sample_rate / telemetry.sample_ratio 改动会改变
+# 存量统计口径（旧样本按旧率采集），发布说明需注明。
+
+[gateway]
+slow_query_threshold_ms = 500   # 慢查询日志阈值
+plan_cache_capacity     = 1024  # 判定缓存 LRU 容量
+
+[nearcache]
+ttl_ms        = 3000   # L1 谓词指纹缓存 TTL
+capacity      = 10000  # L1 条目上限
+row_ttl_ms    = 3000   # 行级近缓存默认条目寿命（hotkey_row_cache 开启时）
+row_capacity  = 10000  # 行级近缓存条目上限
+
+[exec]
+batch                 = 512     # 分页/回表批大小（有界纪律）
+slots_per_round       = 64      # 每轮 scatter 的 slot 组宽
+fullscan_concurrency  = 10      # 全扫并发上限/实例（限流通道）
+l2_max_collect        = 1048576 # L2 leader 物化上限（pk 数）
+topk_refill_page      = 16      # top-k 归并补页（每 way 每次）
+lex_refill_page       = 16      # 前缀搜索归并补页
+
+[controller]
+split_members           = 50000   # 桶分裂：成员阈值
+split_bytes             = 8388608 # 桶分裂：体积阈值（< 16MB rebalance 红线）
+split_qps_ratio         = 0.4     # 桶分裂：读 QPS 占单节点安全值比例
+merge_members           = 12500   # 桶合并：成员阈值
+merge_sustain_periods   = 3       # 桶合并：持续周期
+hotkey_replica_max      = 8       # L4 副本上限
+hotkey_refresh_ms       = 1000    # L4 副本滚动刷新周期
+job_tick_budget_ms      = 500     # DDL 回填每 tick 时间预算
+job_slots_per_tick      = 256     # DDL 回填每批 slot 数
+backfill_rows_per_sec   = 10000   # DDL 回填限速（行/s/实例）
+hot_qps                 = 4000    # L4 触发热度（复核参考）
+
+[sweeper]
+batch                 = 512     # 每 tick 每 slot 到期批
+max_batches_per_tick  = 4       # 单 slot 每周期批数上限
+receipt_grace_ms      = 300000  # 回执宽限（行 TTL + 宽限）
+tick_ms               = 1000    # 清扫周期
+sweep_range_slots     = 1024    # slot 区间锁粒度
+
+[txguard]
+stale_retries        = 3      # BucketMap/行版本冲突整体重试上限
+async_log_capacity   = 100000 # 异步索引日志容量上限/slot（背压）
+async_log_alert_ratio = 0.8   # 日志水位告警比例
+
+[telemetry]
+sample_ratio = 64 # 采样率 1/64（数据语义常量：改动改变存量统计口径）
+
+[hll]
+sample_rate = 64 # 基数统计采样率 1/64（数据语义常量：改动改变存量口径）
+
+[meta]
+schema_lease_ms = 1000 # 元数据本地快照租约
+
+[retry]
+backoff_base_ms = 50   # 退避基数
+backoff_max_ms  = 2000 # 退避上限
+max_attempts    = 3    # 退避矩阵默认上限

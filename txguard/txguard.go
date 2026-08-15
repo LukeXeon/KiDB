@@ -13,6 +13,7 @@ import (
 
 	"kidb"
 	"kidb/bucketmap"
+	"kidb/internal/tuning"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
@@ -20,8 +21,7 @@ import (
 	"kidb/script"
 )
 
-// maxStaleRetries 是 BucketMap/行版本冲突的整体重试上限（docs/05 §5.5）。
-const maxStaleRetries = 3
+// maxStaleRetries 由调用点读取 tuning.Get().Txguard.StaleRetries（docs/05 §5.5）。
 
 // Guard 编排单行写入。通过 kidb.KvClient 下发命令，满足契约 R1~R7。
 type Guard struct {
@@ -88,7 +88,7 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 
 	var acquired []string // 本事务占有的唯一预约 key（回滚/重试用）
 	var res Result
-	for attempt := 0; attempt < maxStaleRetries; attempt++ {
+	for attempt := 0; attempt < tuning.Get().Txguard.StaleRetries; attempt++ {
 		res.StaleRetries = attempt
 		stale, err := g.writeAttempt(ctx, req, rowkey, slot, &acquired, &res)
 		if err != nil {
@@ -109,7 +109,7 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 		}
 	}
 	g.rollbackReservations(ctx, acquired)
-	return Result{}, fmt.Errorf("%w: write %s after %d attempts", kidb.ErrStaleMetadata, rowkey, maxStaleRetries)
+	return Result{}, fmt.Errorf("%w: write %s after %d attempts", kidb.ErrStaleMetadata, rowkey, tuning.Get().Txguard.StaleRetries)
 }
 
 // writeAttempt 完成一轮"预读 → 展开 → 预约 → Lua 提交"；stale=true 表示版本冲突。
@@ -261,7 +261,7 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (deleted bool, err error) {
 	rowkey := keycodec.RowKey(t.Name, pk)
 	slot := keycodec.Slot(rowkey)
-	for attempt := 0; attempt < maxStaleRetries; attempt++ {
+	for attempt := 0; attempt < tuning.Get().Txguard.StaleRetries; attempt++ {
 		oldRow, err := g.hgetall(ctx, rowkey)
 		if err != nil {
 			return false, err
@@ -311,7 +311,7 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		}
 		return false, nil
 	}
-	return false, fmt.Errorf("%w: delete %s after %d attempts", kidb.ErrStaleMetadata, rowkey, maxStaleRetries)
+	return false, fmt.Errorf("%w: delete %s after %d attempts", kidb.ErrStaleMetadata, rowkey, tuning.Get().Txguard.StaleRetries)
 }
 
 // NextAutoID 取 AUTO_INCREMENT 序列值（docs/05 §5.4：
