@@ -11,6 +11,7 @@ import (
 
 	"kidb"
 	"kidb/exec"
+	"kidb/i18n"
 	"kidb/meta"
 )
 
@@ -164,7 +165,7 @@ func (t *Table) PartitionRows(ctx *sql.Context, part sql.Partition) (sql.RowIter
 	gate := t.deps.FullscanGate
 	if gate == nil {
 		// 未装配 = 保守拒绝（docs/01 §1.0：默认取保守安全值；生产由装配层注入）
-		return nil, sqlErr(fmt.Errorf("%w: 表 %s 全表遍历未放行（全扫闸门未装配）", kidb.ErrNoIndex, t.def.Name))
+		return nil, sqlErr(fmt.Errorf("%w: %s", kidb.ErrNoIndex, i18n.T("err.gate_unwired", t.def.Name)))
 	}
 	n, _, err := t.RowCount(ctx)
 	if err != nil {

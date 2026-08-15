@@ -9,6 +9,7 @@ import (
 
 	"kidb"
 	"kidb/ds"
+	"kidb/i18n"
 	"kidb/rowcodec"
 	"kidb/tuning"
 	"kidb/txguard"
@@ -192,7 +193,7 @@ func rowKeyOf(table, pk string) string { return "d:" + table + ":{" + pk + "}" }
 func (e *editor) splitRow(row sql.Row) (pk string, fields map[string]string, err error) {
 	fields = map[string]string{}
 	if len(row) != len(e.t.def.Columns) {
-		return "", nil, fmt.Errorf("%w: 行宽度 %d 与列数 %d 不符", kidb.ErrContractViolation, len(row), len(e.t.def.Columns))
+		return "", nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.row_width", len(row), len(e.t.def.Columns)))
 	}
 	for i, col := range e.t.def.Columns {
 		v := row[i]
@@ -232,7 +233,7 @@ func (e *editor) withProgress(err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%w（本语句已提交 %d 行，无整体回滚——docs/05 §5.5）", err, e.applied)
+	return fmt.Errorf("%w（%s）", err, i18n.T("err.partial_commit", e.applied))
 }
 
 // checkRowSize 单行体积防线（docs/03 §3.4：max_row_bytes，超限 ERR_ROW_TOO_LARGE）。

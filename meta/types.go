@@ -5,6 +5,8 @@ package meta
 import (
 	"fmt"
 	"strings"
+
+	"kidb/i18n"
 )
 
 // ColumnType 是 DDL 列类型白名单（docs/02 §2.4）。
@@ -141,7 +143,7 @@ func (t *TableDef) EffectiveExpShards() int {
 // ValidateReserved 拒绝保留列命名（docs/07 §7.1：`_` 前缀是引擎命名空间）。
 func ValidateReserved(name string) error {
 	if strings.HasPrefix(name, "_") {
-		return fmt.Errorf("column/index %q uses reserved '_' prefix", name)
+		return fmt.Errorf("%s", i18n.T("meta.reserved_prefix", name))
 	}
 	return nil
 }

@@ -21,8 +21,8 @@ import (
 	"kidb/nearcache"
 	"kidb/script"
 	"kidb/telemetry"
-	"kidb/txguard"
 	"kidb/tuning"
+	"kidb/txguard"
 )
 
 // ProvideClient 构造参考适配器（KvClient 契约实现，docs/09 §9.3）。

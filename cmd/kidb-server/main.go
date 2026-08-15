@@ -17,6 +17,7 @@ import (
 
 	"kidb"
 	"kidb/di"
+	"kidb/i18n"
 )
 
 func main() {
@@ -30,10 +31,12 @@ func main() {
 		replicaRead  = flag.Bool("replica-read", false, "声明副本读能力（docs/09 §9.4：适配器构造 ReadOnly 副本客户端；运行时还需 SET GLOBAL replica_read=true 才进读路径）")
 		metricsAddr  = flag.String("metrics-addr", "", "Prometheus /metrics HTTP 监听地址（如 :9100；空 = 不暴露）")
 		accounts     = flag.String("accounts", "root:%:kidb:rw", "账号表：user:host:pass:role，逗号分隔")
+		lang         = flag.String("lang", "en", "用户面向消息语言（en / zh）")
 	)
 	flag.Parse()
 
 	boot := kidb.Bootstrap{
+		Lang:         *lang,
 		Addrs:         strings.Split(*addrs, ","),
 		PoolSize:      *poolSize,
 		ReadTimeout:   *readTimeout,
@@ -51,6 +54,8 @@ func main() {
 			User: parts[0], Host: parts[1], Password: parts[2], Role: parts[3],
 		})
 	}
+
+	i18n.SetLang(boot.Lang)
 
 	// DI 装配（唯一入口，docs/01 §1.6；指标暴露为进程级可选端点）
 	srv, err := di.InitializeServer(boot)

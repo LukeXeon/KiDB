@@ -10,6 +10,7 @@ import (
 
 	"github.com/tinylib/msgp/msgp"
 
+	"kidb/i18n"
 	"kidb/meta"
 )
 
@@ -114,7 +115,7 @@ func ScoreOf(ct meta.ColumnType, encoded string) (float64, error) {
 	case meta.ColInt, meta.ColTimestamp, meta.ColFloat:
 		return strconv.ParseFloat(encoded, 64)
 	}
-	return 0, fmt.Errorf("rowcodec: %v 不可作 score", ct)
+	return 0, fmt.Errorf("rowcodec: %s", i18n.T("codec.not_scoreable", ct))
 }
 
 // EncodeRow 把整行字段映射编码为存储形态（供 txguard.Fields）。
@@ -123,7 +124,7 @@ func EncodeRow(t *meta.TableDef, fields map[string]any) (map[string]string, erro
 	for name, v := range fields {
 		col, ok := t.Column(name)
 		if !ok {
-			return nil, fmt.Errorf("rowcodec: 未知列 %q", name)
+			return nil, fmt.Errorf("rowcodec: %s", i18n.T("codec.unknown_column", name))
 		}
 		enc, err := Encode(col.Type, v)
 		if err != nil {

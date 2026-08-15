@@ -9,6 +9,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"kidb"
+	"kidb/i18n"
 	"kidb/meta"
 )
 
@@ -45,10 +46,10 @@ func ParseTableComment(comment string) (int64, error) {
 	dec := json.NewDecoder(strings.NewReader(v))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&to); err != nil {
-		return 0, fmt.Errorf("kidb 表选项 JSON 非法: %w", err)
+		return 0, fmt.Errorf("%s: %w", i18n.T("ddl.bad_table_opts"), err)
 	}
 	if to.DefaultTTL < 0 {
-		return 0, fmt.Errorf("default_ttl 不能为负")
+		return 0, fmt.Errorf("%s", i18n.T("ddl.default_ttl_negative"))
 	}
 	return to.DefaultTTL, nil
 }
@@ -63,7 +64,7 @@ func ParseIndexComment(comment string) (indexOpts, error) {
 	dec := json.NewDecoder(strings.NewReader(v))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&io); err != nil {
-		return io, fmt.Errorf("kidb 索引选项 JSON 非法: %w", err)
+		return io, fmt.Errorf("%s: %w", i18n.T("ddl.bad_index_opts"), err)
 	}
 	return io, nil
 }
@@ -80,7 +81,7 @@ func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
 	case types.IsFloat(ct):
 		return meta.ColFloat, nil
 	case types.IsDecimal(ct):
-		return 0, fmt.Errorf("%w: DECIMAL 不支持（score 精度纪律，docs/03 §3.4）", kidb.ErrUnsupported)
+		return 0, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.decimal_unsupported"))
 	case types.IsJSON(ct): // 先于二进制：gms IsBinaryType 把 TypeJSON 也算在内
 		return meta.ColJSON, nil
 	case types.IsBinaryType(ct):
@@ -90,7 +91,7 @@ func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
 	case types.IsDatetimeType(ct) || types.IsTimestampType(ct):
 		return meta.ColTimestamp, nil
 	}
-	return 0, fmt.Errorf("%w: 不支持的列类型 %v", kidb.ErrUnsupported, ct)
+	return 0, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.column_type_unsupported", ct))
 }
 
 // ==== CREATE TABLE：gms PrimaryKeySchema → TableDef ====
@@ -99,10 +100,10 @@ func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
 // 忠实类型记录：列定义存 存储类（ColumnTypeOf）+ 规范类型文本（c.Type.String()）。
 func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*meta.TableDef, error) {
 	if len(sch.Schema) == 0 || len(sch.Schema) > 256 {
-		return nil, fmt.Errorf("%w: 列数 %d 超出 [1,256]", kidb.ErrUnsupported, len(sch.Schema))
+		return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.column_count_range", len(sch.Schema)))
 	}
 	if len(sch.PkOrdinals) != 1 {
-		return nil, fmt.Errorf("%w: 必须显式单列主键（%d 个）", kidb.ErrUnsupported, len(sch.PkOrdinals))
+		return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.single_pk_required", len(sch.PkOrdinals)))
 	}
 	ttl, err := ParseTableComment(comment)
 	if err != nil {
@@ -115,24 +116,24 @@ func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*me
 			return nil, fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
 		}
 		if seen[strings.ToLower(c.Name)] {
-			return nil, fmt.Errorf("列 %q 重复", c.Name)
+			return nil, fmt.Errorf("%s", i18n.T("ddl.column_duplicate", c.Name))
 		}
 		seen[strings.ToLower(c.Name)] = true
 		ct, err := ColumnTypeOf(c.Type)
 		if err != nil {
-			return nil, fmt.Errorf("列 %q: %w", c.Name, err)
+			return nil, fmt.Errorf("%s: %w", i18n.T("ddl.column_label", c.Name), err)
 		}
 		// 列级属性白名单（docs/01 §1.0：不支持直接报错，优于静默丢弃）：
 		// Catalog 只记录类型/可空性/自增，DEFAULT/ON UPDATE/列级 COLLATE
 		// 若静默丢弃会产生与用户声明不符的行为——明确拒绝。
 		if c.Default != nil {
-			return nil, fmt.Errorf("%w: 列 %q 的 DEFAULT 表达式不支持（写入请显式给值）", kidb.ErrUnsupported, c.Name)
+			return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.default_unsupported", c.Name))
 		}
 		if c.OnUpdate != nil {
-			return nil, fmt.Errorf("%w: 列 %q 的 ON UPDATE 不支持", kidb.ErrUnsupported, c.Name)
+			return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.on_update_unsupported", c.Name))
 		}
 		if tc, ok := c.Type.(sql.TypeWithCollation); ok && tc.Collation() != sql.Collation_Default {
-			return nil, fmt.Errorf("%w: 列 %q 的列级 COLLATE/CHARSET 不支持（全局 utf8mb4 默认）", kidb.ErrUnsupported, c.Name)
+			return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.collation_unsupported", c.Name))
 		}
 		def.Columns = append(def.Columns, meta.ColumnDef{
 			Name: c.Name, Type: ct, TypeText: c.Type.String(), NotNull: !c.Nullable,
@@ -150,20 +151,20 @@ func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*me
 // validateTable 表级校验（docs/02 §2.3 + docs/06 §6.1）。
 func validateTable(t *meta.TableDef) error {
 	if t.PK == "" {
-		return fmt.Errorf("%w: 必须显式主键", kidb.ErrUnsupported)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.pk_required"))
 	}
 	pkCol, ok := t.Column(t.PK)
 	if !ok {
-		return fmt.Errorf("%w: 主键列 %q 不在列定义中", kidb.ErrUnsupported, t.PK)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.pk_column_missing", t.PK))
 	}
 	if pkCol.Type != meta.ColInt && pkCol.Type != meta.ColString {
-		return fmt.Errorf("%w: 主键类型限 INT/STRING", kidb.ErrUnsupported)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.pk_type_limit"))
 	}
 	if t.AutoIncrColumn != "" && (t.AutoIncrColumn != t.PK || pkCol.Type != meta.ColInt) {
-		return fmt.Errorf("%w: AUTO_INCREMENT 限 INT 主键列（docs/05 §5.4）", kidb.ErrUnsupported)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.auto_incr_limit"))
 	}
 	if len(t.Indexes) > 16 {
-		return fmt.Errorf("%w: 单表索引数 %d > 16", kidb.ErrUnsupported, len(t.Indexes))
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.too_many_indexes", len(t.Indexes)))
 	}
 	seen := map[string]bool{}
 	for i := range t.Indexes {
@@ -172,7 +173,7 @@ func validateTable(t *meta.TableDef) error {
 			return fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
 		}
 		if seen[strings.ToLower(idx.ID)] {
-			return fmt.Errorf("索引名 %q 重复", idx.ID)
+			return fmt.Errorf("%s", i18n.T("ddl.index_name_duplicate", idx.ID))
 		}
 		seen[strings.ToLower(idx.ID)] = true
 		if err := ValidateIndexForTable(idx, t); err != nil {
@@ -188,7 +189,7 @@ func validateTable(t *meta.TableDef) error {
 // IndexDef.Comment 携带 kidb payload，Constraint 携带 UNIQUE）。
 func IndexFromDef(idxDef sql.IndexDef) (*meta.IndexDef, error) {
 	if len(idxDef.Columns) != 1 {
-		return nil, fmt.Errorf("%w: 索引限单列（%s 有 %d 列）", kidb.ErrUnsupported, idxDef.Name, len(idxDef.Columns))
+		return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.index_single_column", idxDef.Name, len(idxDef.Columns)))
 	}
 	idx := &meta.IndexDef{ID: idxDef.Name, Columns: []string{idxDef.Columns[0].Name}}
 	if idxDef.Constraint == sql.IndexConstraint_Unique {
@@ -206,13 +207,13 @@ func IndexFromDef(idxDef sql.IndexDef) (*meta.IndexDef, error) {
 // validateIndexShape 索引形态校验（不依赖表定义的部分）。
 func validateIndexShape(idx *meta.IndexDef) error {
 	if len(idx.Columns) != 1 {
-		return fmt.Errorf("%w: 索引限单列（%s 有 %d 列）", kidb.ErrUnsupported, idx.ID, len(idx.Columns))
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.index_single_column", idx.ID, len(idx.Columns)))
 	}
 	if idx.Async && idx.Kind == meta.IndexUnique {
-		return fmt.Errorf("%w: 唯一索引必须同步模式（%s）", kidb.ErrUnsupported, idx.ID)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.unique_sync_required", idx.ID))
 	}
 	if idx.Async && len(idx.Covering) > 0 {
-		return fmt.Errorf("%w: 异步索引不允许 COVERING（docs/03 §3.5，%s）", kidb.ErrUnsupported, idx.ID)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.async_no_covering", idx.ID))
 	}
 	return nil
 }
@@ -224,7 +225,7 @@ func ValidateIndexForTable(idx *meta.IndexDef, t *meta.TableDef) error {
 	}
 	col, ok := t.Column(idx.Columns[0])
 	if !ok {
-		return fmt.Errorf("索引列 %q 不存在", idx.Columns[0])
+		return fmt.Errorf("%s", i18n.T("ddl.index_column_missing", idx.Columns[0]))
 	}
 	// 形态推导（docs/02 §2.3）：唯一=UNIQUE；数值/时间戳=RANGE；其余=等值。
 	if idx.Kind != meta.IndexUnique {
@@ -241,10 +242,10 @@ func ValidateIndexForTable(idx *meta.IndexDef, t *meta.TableDef) error {
 	for _, cc := range idx.Covering {
 		cdef, ok := t.Column(cc)
 		if !ok {
-			return fmt.Errorf("覆盖列 %q 不存在", cc)
+			return fmt.Errorf("%s", i18n.T("ddl.covering_column_missing", cc))
 		}
 		if !cdef.NotNull {
-			return fmt.Errorf("%w: 覆盖列 %q 必须 NOT NULL（member 编码 NULL 不保真，docs/03 §3.5）", kidb.ErrUnsupported, cc)
+			return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.covering_not_null", cc))
 		}
 	}
 	return nil

@@ -11,6 +11,7 @@ import (
 	query "github.com/dolthub/vitess/go/vt/proto/query"
 
 	"kidb"
+	"kidb/i18n"
 )
 
 // typetext.go：Catalog 规范类型文本 → gms 类型的忠实重建（docs/02 §2.2
@@ -33,7 +34,7 @@ func columnTypeFromText(text string) (sql.Type, error) {
 		base = s[:i]
 		n, err := strconv.Atoi(s[i+1 : len(s)-1])
 		if err != nil {
-			return nil, fmt.Errorf("%w: 类型文本 %q 参数非法", kidb.ErrContractViolation, text)
+			return nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.typetext_param", text))
 		}
 		arg = n
 	}
@@ -93,19 +94,19 @@ func columnTypeFromText(text string) (sql.Type, error) {
 	case "json":
 		return types.JSON, nil
 	}
-	return nil, fmt.Errorf("%w: 未知类型文本 %q（Catalog 只由 DDL 白名单写入）", kidb.ErrContractViolation, text)
+	return nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.typetext_unknown", text))
 }
 
 func sizedString(base query.Type, n int, orig string) (sql.Type, error) {
 	if n < 1 {
-		return nil, fmt.Errorf("%w: 类型文本 %q 缺长度参数", kidb.ErrContractViolation, orig)
+		return nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.typetext_len", orig))
 	}
 	return types.MustCreateStringWithDefaults(base, int64(n)), nil
 }
 
 func sizedBinary(base query.Type, n int, orig string) (sql.Type, error) {
 	if n < 1 {
-		return nil, fmt.Errorf("%w: 类型文本 %q 缺长度参数", kidb.ErrContractViolation, orig)
+		return nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.typetext_len", orig))
 	}
 	return types.MustCreateBinary(base, int64(n)), nil
 }
@@ -123,7 +124,7 @@ func datetimeWithPrecision(base query.Type, precision int, orig string) (sql.Typ
 	}
 	t, err := types.CreateDatetimeType(base, precision)
 	if err != nil {
-		return nil, fmt.Errorf("%w: 类型文本 %q 精度非法: %v", kidb.ErrContractViolation, orig, err)
+		return nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.typetext_precision", orig, err))
 	}
 	return t, nil
 }

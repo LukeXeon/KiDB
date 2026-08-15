@@ -11,6 +11,7 @@ import (
 
 	"kidb"
 	"kidb/exec"
+	"kidb/i18n"
 	"kidb/meta"
 	"kidb/rowcodec"
 )
@@ -24,7 +25,7 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 	idxID := lookup.Index.ID()
 	ranges, ok := lookup.Ranges.(sql.MySQLRangeCollection)
 	if !ok {
-		return nil, fmt.Errorf("%w: 非 MySQL 范围集合 %T", kidb.ErrUnsupported, lookup.Ranges)
+		return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("err.range_set_type", lookup.Ranges))
 	}
 
 	// 主键路径：点查直取（HGETALL），范围退化为登记册遍历 + 谓词校验
@@ -34,7 +35,7 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 
 	idx := t.def.Index(idxID)
 	if idx == nil {
-		return nil, fmt.Errorf("%w: 索引 %q 不存在于表 %q", kidb.ErrStaleMetadata, idxID, t.def.Name)
+		return nil, fmt.Errorf("%w: %s", kidb.ErrStaleMetadata, i18n.T("err.index_stale", idxID, t.def.Name))
 	}
 	col := idx.Columns[0]
 
@@ -95,7 +96,7 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 			Covering:   t.coveringOK(idx, col),
 		}, nil
 	}
-	return nil, fmt.Errorf("%w: 未知索引形态 %v", kidb.ErrUnsupported, idx.Kind)
+	return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("err.unknown_index_kind", idx.Kind))
 }
 
 // coveringOK 覆盖索引命中判定（docs/03 §3.5）：投影 ∪ 谓词列 ⊆
@@ -221,7 +222,7 @@ func sortRangeBounds(bounds []exec.RangeBound, desc bool) {
 func (t *Table) fullScanFallback(ranges []sql.Range, col string) (*exec.Request, error) {
 	c, ok := t.def.Column(col)
 	if !ok {
-		return nil, fmt.Errorf("engine: 列 %q 不存在", col)
+		return nil, fmt.Errorf("%s", i18n.T("err.column_missing", col))
 	}
 	pred := &exec.Predicate{Column: col}
 	if c.Type == meta.ColString || c.Type == meta.ColBytes {
@@ -252,7 +253,7 @@ func (t *Table) fullScanFallback(ranges []sql.Range, col string) (*exec.Request,
 func (t *Table) pointValue(r sql.Range, col string) (string, bool, error) {
 	mr, ok := r.(sql.MySQLRange)
 	if !ok || len(mr) != 1 {
-		return "", false, fmt.Errorf("%w: 非单列范围 %T", kidb.ErrUnsupported, r)
+		return "", false, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("err.non_single_range", r))
 	}
 	ce := mr[0]
 	lo, lok := belowKey(ce.LowerBound)
@@ -278,7 +279,7 @@ func (t *Table) pointValue(r sql.Range, col string) (string, bool, error) {
 func (t *Table) rangeBound(r sql.Range, col string) (exec.RangeBound, error) {
 	mr, ok := r.(sql.MySQLRange)
 	if !ok || len(mr) != 1 {
-		return exec.RangeBound{}, fmt.Errorf("%w: 非单列范围 %T", kidb.ErrUnsupported, r)
+		return exec.RangeBound{}, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("err.non_single_range", r))
 	}
 	ce := mr[0]
 	var rb exec.RangeBound
@@ -321,7 +322,7 @@ func (t *Table) rangeBound(r sql.Range, col string) (exec.RangeBound, error) {
 func (t *Table) strRange(r sql.Range, col string) (exec.StrRange, error) {
 	mr, ok := r.(sql.MySQLRange)
 	if !ok || len(mr) != 1 {
-		return exec.StrRange{}, fmt.Errorf("%w: 非单列范围 %T", kidb.ErrUnsupported, r)
+		return exec.StrRange{}, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("err.non_single_range", r))
 	}
 	ce := mr[0]
 	var sr exec.StrRange
@@ -364,7 +365,7 @@ func (t *Table) strRange(r sql.Range, col string) (exec.StrRange, error) {
 func (t *Table) encodeCol(col string, v any) (string, error) {
 	c, ok := t.def.Column(col)
 	if !ok {
-		return "", fmt.Errorf("engine: 列 %q 不存在", col)
+		return "", fmt.Errorf("%s", i18n.T("err.column_missing", col))
 	}
 	return rowcodec.Encode(c.Type, v)
 }

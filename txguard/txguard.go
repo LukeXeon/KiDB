@@ -14,6 +14,7 @@ import (
 	"kidb"
 	"kidb/bucketmap"
 	"kidb/ds"
+	"kidb/i18n"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
@@ -81,7 +82,7 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 			return Result{}, fmt.Errorf("%w: %v", kidb.ErrContractViolation, err)
 		}
 		if strings.EqualFold(f, req.Table.PK) {
-			return Result{}, fmt.Errorf("%w: 主键列 %q 经 PK 传入，不在 Fields", kidb.ErrContractViolation, f)
+			return Result{}, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("tx.pk_in_fields", f))
 		}
 	}
 	rowkey := keycodec.RowKey(req.Table.Name, req.PK)
@@ -187,8 +188,8 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	//    不重试（重试不会改变调用方的过期预期）。
 	observed := int64(oldVerOf(oldRow))
 	if req.ExpectedOldVer != nil && *req.ExpectedOldVer != observed {
-		return false, fmt.Errorf("%w: %s 期望 _ver=%d 当前=%d",
-			kidb.ErrStaleMetadata, rowkey, *req.ExpectedOldVer, observed)
+		return false, fmt.Errorf("%w: %s",
+			kidb.ErrStaleMetadata, i18n.T("tx.ver_mismatch", rowkey, *req.ExpectedOldVer, observed))
 	}
 	ttlms := int64(req.TTL / time.Millisecond)
 	if req.TTL < 0 {
@@ -224,7 +225,7 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	case "stale":
 		return true, nil
 	case "log_full":
-		return false, fmt.Errorf("%w: %s（异步索引日志背压，docs/05 §5.2）", kidb.ErrIndexLogFull, rowkey)
+		return false, fmt.Errorf("%w: %s", kidb.ErrIndexLogFull, i18n.T("tx.index_log_full", rowkey))
 	case "ok":
 		res.OldVer = parseUint64(fmt.Sprint(arr[1]))
 		if len(arr) > 2 {

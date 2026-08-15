@@ -8,7 +8,9 @@ require (
 	github.com/dolthub/go-mysql-server v0.20.0
 	github.com/dolthub/vitess v0.0.0-20250512224608-8fb9c6ea092c
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/google/wire v0.7.0
 	github.com/maypok86/otter/v2 v2.3.0
+	github.com/nicksnyder/go-i18n/v2 v2.6.1
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/prometheus/client_golang v1.24.1
 	github.com/redis/go-redis/v9 v9.22.0
@@ -17,6 +19,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/tinylib/msgp v1.6.4
 	golang.org/x/sync v0.22.0
+	golang.org/x/text v0.40.0
 	golang.org/x/time v0.15.0
 	gopkg.in/src-d/go-errors.v1 v1.0.0
 	pgregory.net/rapid v1.3.0
@@ -48,7 +51,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/google/wire v0.7.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/lestrrat-go/strftime v1.0.4 // indirect
@@ -91,7 +93,6 @@ require (
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57 // indirect
-	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	google.golang.org/genproto v0.0.0-20230110181048-76db0878b65f // indirect
 	google.golang.org/grpc v1.67.0 // indirect

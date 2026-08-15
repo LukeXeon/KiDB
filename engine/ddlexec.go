@@ -10,6 +10,7 @@ import (
 
 	"kidb"
 	"kidb/exec"
+	"kidb/i18n"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
@@ -125,7 +126,7 @@ func (t *Table) createIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
 		return sql.ErrTableNotFound.New(t.def.Name)
 	}
 	if def.Index(idx.ID) != nil {
-		return fmt.Errorf("%w: 索引 %q 已存在", kidb.ErrUnsupported, idx.ID)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.index_exists", idx.ID))
 	}
 	if err := ValidateIndexForTable(idx, def); err != nil {
 		return err
@@ -165,7 +166,7 @@ func (t *Table) createIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
 	if job, err := deps.Store.GetJob(ctx, def.Name); err != nil {
 		return err
 	} else if job != nil {
-		return fmt.Errorf("%w: 表 %s 有进行中的 DDL 作业，完成后重试", kidb.ErrUnsupported, def.Name)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.job_in_progress", def.Name))
 	}
 	if err := deps.Store.SetJob(ctx, def.Name, &meta.DDLJob{
 		Type: "create_index", Index: &idxCopy, Cursor: 0, Started: time.Now().Unix(),
@@ -196,7 +197,7 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 	}
 	idx := def.Index(indexName)
 	if idx == nil {
-		return fmt.Errorf("%w: 索引 %q 不存在于表 %s", kidb.ErrUnsupported, indexName, t.def.Name)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.index_not_found", indexName, t.def.Name))
 	}
 	idxCopy := *idx
 	var kept []meta.IndexDef
@@ -271,7 +272,7 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 
 // RenameIndex 不支持（超出文档化子集，docs/02 §2.4）。
 func (t *Table) RenameIndex(ctx *sql.Context, fromIndexName, toIndexName string) error {
-	return fmt.Errorf("%w: RENAME INDEX 超出支持子集（DROP + CREATE 替代）", kidb.ErrUnsupported)
+	return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.rename_index_unsupported"))
 }
 
 func pkOf(def *meta.TableDef, row []any) string {

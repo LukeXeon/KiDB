@@ -7,6 +7,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
+	"kidb/i18n"
 )
 
 // errUnsupported 是本包的定位外错误出口（映射 1235）。
@@ -83,12 +84,12 @@ func (d *Database) GetViewDefinition(ctx *sql.Context, viewName string) (sql.Vie
 
 // CreateView 拒绝（定位外）。
 func (d *Database) CreateView(ctx *sql.Context, name, selectStatement, createViewStmt string) error {
-	return fmt.Errorf("%w: VIEW 超出缓存查询层定位", errUnsupported)
+	return fmt.Errorf("%w: %s", errUnsupported, i18n.T("ddl.view_unsupported"))
 }
 
 // DropView 拒绝。
 func (d *Database) DropView(ctx *sql.Context, name string) error {
-	return fmt.Errorf("%w: VIEW 超出缓存查询层定位", errUnsupported)
+	return fmt.Errorf("%w: %s", errUnsupported, i18n.T("ddl.view_unsupported"))
 }
 
 // GetTriggers 无触发器。
@@ -96,12 +97,12 @@ func (d *Database) GetTriggers(ctx *sql.Context) ([]sql.TriggerDefinition, error
 
 // CreateTrigger 拒绝。
 func (d *Database) CreateTrigger(ctx *sql.Context, definition sql.TriggerDefinition) error {
-	return fmt.Errorf("%w: TRIGGER 超出缓存查询层定位", errUnsupported)
+	return fmt.Errorf("%w: %s", errUnsupported, i18n.T("ddl.trigger_unsupported"))
 }
 
 // DropTrigger 拒绝。
 func (d *Database) DropTrigger(ctx *sql.Context, name string) error {
-	return fmt.Errorf("%w: TRIGGER 超出缓存查询层定位", errUnsupported)
+	return fmt.Errorf("%w: %s", errUnsupported, i18n.T("ddl.trigger_unsupported"))
 }
 
 var (

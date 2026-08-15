@@ -9,9 +9,7 @@
 # 存量统计口径（旧样本按旧率采集），发布说明需注明。
 
 [gateway]
-slow_query_threshold_ms = 500   # 慢查询日志阈值
-plan_cache_capacity     = 1024  # 判定缓存 LRU 容量
-dimension_max_rows      = 100000 # 档 2 维表广播的行数上限（实时行数自动判定）
+dimension_max_rows      = 100000 # 小表自动全扫放行/维表广播的行数上限（实时行数自动判定）
 
 [nearcache]
 ttl_ms        = 3000   # L1 谓词指纹缓存 TTL

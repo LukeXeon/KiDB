@@ -8,6 +8,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
+	"kidb/i18n"
 	"kidb/metrics"
 	"kidb/tuning"
 )
@@ -34,8 +35,7 @@ func NewFullscanGate(m *metrics.Metrics) func(*sql.Context, string, uint64) erro
 			slog.Warn("kidb 全表遍历（白名单放行）", "table", table, "rows", rows)
 			return nil
 		}
-		return fmt.Errorf("%w: 表 %s（%d 行）无可用索引——建索引，或 SET GLOBAL query_allow_fullscan_tables 加表白名单",
-			kidb.ErrNoIndex, table, rows)
+		return fmt.Errorf("%w: %s", kidb.ErrNoIndex, i18n.T("err.no_index", table, rows))
 	}
 }
 

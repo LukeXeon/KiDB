@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"kidb"
+	"kidb/i18n"
 	"kidb/keycodec"
 	"kidb/script"
 )
@@ -66,11 +67,11 @@ func (s *Store) Get(ctx context.Context, name string) (string, bool, error) {
 func (s *Store) Set(ctx context.Context, name, value string) error {
 	def, ok := Vars[name]
 	if !ok {
-		return fmt.Errorf("%w: 未知变量 %q", kidb.ErrUnsupported, name)
+		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("cfg.unknown_variable", name))
 	}
 	if def.Validate != nil {
 		if err := def.Validate(value); err != nil {
-			return fmt.Errorf("%w: 变量 %s 值 %q 非法: %v", kidb.ErrUnsupported, name, value, err)
+			return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("cfg.invalid_value", name, value, err))
 		}
 	}
 	cs, _ := s.reg.Get("config_set")
@@ -90,7 +91,7 @@ func (s *Store) Set(ctx context.Context, name, value string) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("%w: SET GLOBAL %s 冲突重试耗尽", kidb.ErrStaleMetadata, name)
+	return fmt.Errorf("%w: %s", kidb.ErrStaleMetadata, i18n.T("cfg.set_conflict", name))
 }
 
 // Version 返回配置版本（传播循环比对锚点）。
@@ -137,14 +138,14 @@ func boolValidator(s string) error {
 	if s == "true" || s == "false" {
 		return nil
 	}
-	return fmt.Errorf("需为 true/false")
+	return fmt.Errorf("%s", i18n.T("cfg.bool_expected"))
 }
 
 // tableListValidator 表白名单（表名存在性由调用方结合 Catalog 校验）。
 func tableListValidator(s string) error {
 	for _, part := range strings.Split(s, ",") {
 		if strings.TrimSpace(part) == "" && s != "" {
-			return fmt.Errorf("空表名")
+			return fmt.Errorf("%s", i18n.T("cfg.empty_table_name"))
 		}
 	}
 	return nil

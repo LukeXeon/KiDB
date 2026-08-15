@@ -23,9 +23,7 @@ var embedded []byte
 // Tuning 是 tuning.toml 的映射结构（层级与文件一致）。
 type Tuning struct {
 	Gateway struct {
-		SlowQueryThresholdMs int `toml:"slow_query_threshold_ms"`
-		PlanCacheCapacity    int `toml:"plan_cache_capacity"`
-		DimensionMaxRows     int `toml:"dimension_max_rows"`
+		DimensionMaxRows int `toml:"dimension_max_rows"`
 	} `toml:"gateway"`
 	Nearcache struct {
 		TTLMs       int `toml:"ttl_ms"`
@@ -132,11 +130,6 @@ func OverrideForTest(tb testing.TB, fn func(*Tuning)) {
 }
 
 // ==== 便捷访问器（Duration 换算集中在此）====
-
-// SlowQueryThreshold 慢查询阈值。
-func (t *Tuning) SlowQueryThreshold() time.Duration {
-	return time.Duration(t.Gateway.SlowQueryThresholdMs) * time.Millisecond
-}
 
 // NearcacheTTL L1 条目 TTL。
 func (t *Tuning) NearcacheTTL() time.Duration {
