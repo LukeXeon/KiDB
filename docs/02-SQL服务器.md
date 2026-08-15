@@ -39,7 +39,7 @@ ComQuery(sql)
 
 - **网关只做装配**（引擎构造、账号注册、后台角色启动、能力探测、限流/告警挂点）；
 - **DDL 全量经 gms**：planbuilder 产出计划节点 → 我们的 `Database.CreateTable`（`sql.TableCreator`，COMMENT 串直达）/ `Table.CreateIndex`（`sql.IndexAlterableTable`，`IndexDef.Comment` 直达）——校验与 Catalog 作业化语义不变（[06](06-元数据与Schema演进.md) §6.3），类型语义以 gms 为准（`types.Is*` 谓词映射到存储列类型）；
-- **一个定制分析器规则变更**：移除 `resolveAlterColumn`（OnceBeforeDefault）——它按"TEXT/BLOB 索引须前缀长度"的 MySQL 习惯校验，与桶模型冲突（字符串列无前缀长度概念）；
+- **类型忠实记录（用户裁决，替代任何分析器规则变更）**：Catalog 按 **gms 解析产物的完整类型**存储列定义（规范类型文本如 `varchar(32)` + 存储类），`Schema()` 忠实重建——`VARCHAR(32)` 就是 VarChar(32)，不一刀切 LongText。由此 gms 的"TEXT/BLOB 索引须前缀长度"校验（MySQL 1170 行为）对 varchar 天然不触发，对 TEXT/BLOB **按 MySQL 原样报错**（与 MySQL 逐字一致，零困惑）；`INDEX (col(n))` 前缀长度语法明确报错（子集声明；要支持就做前缀桶，另立项）。**gms 分析器零规则变更**——公开扩展点之外的内部规则一个不动。附带红利：varchar 长度在写入侧由 gms 类型转换强制（MySQL 严格模式同款）；
 - **历史拆除**：v5.x 的前置分类器（classify）、双解析器分工、网关快速路径（COUNT(*)/MIN/MAX 形状识别）、网关自定义 EXPLAIN、plan cache 判定缓存、网关 sqlguard 文本分析——全部删除。COUNT(*) 由 gms `replaceCountStar` 规则原生承接（命中 `sql.StatisticsTable` 精确 RowCount，即 exp 登记册 Σ ZCOUNT）；MIN/MAX 经引擎聚合（结果精确），端点加速的等价写法是 `ORDER BY col LIMIT 1`（top-k 有序流早停）。
 
 ## 2.3 DDL 路径（gms 托管）
@@ -54,6 +54,8 @@ ComQuery(sql)
 | 其余 ALTER（加减列/改类型等） | — | 不实现对应接口 → gms 明确报错 |
 
 列类型白名单（gms 类型语义）：整数族（`types.IsInteger`）、浮点（`IsFloat`）、字符串（`IsText`）、二进制（`IsBinaryType`）、`DATETIME/TIMESTAMP`（存 Unix 秒）、`JSON`。DECIMAL/DATE/TIME/枚举等明确报错（score 精度与编码纪律）。**注意**：`types.IsBinaryType` 把 JSON 算二进制——映射判定必须先 JSON 后二进制（实现教训）。
+
+**Catalog 类型记录（v6.0 起忠实化）**：列定义存两个字段——存储类（编码/索引形态用：整数/浮点/字符串/二进制/时间戳/JSON）与**规范类型文本**（gms 解析产物的 `Type.String()`，如 `varchar(32)`、`bigint`、`datetime`）。`Schema()` 按规范文本忠实重建 gms 类型（varchar 长度不丢）：字符串列呈 VarChar 而非不定长 LongText——这同时是 gms 原生索引校验（MySQL 1170 前缀长度规则）与 KiDB 桶模型**零冲突**的落点（§2.2 纪律项）。预发布阶段不留存量兼容逻辑（字段变更直接演进）。
 
 KiDB 扩展的 COMMENT 载体（不 fork parser 的关键，语义不变）：`COMMENT 'kidb:{json}'`，表级仅 `default_ttl`，索引级仅 `covering`/`async`（严格解析，未知字段报错——docs/01 §1.0：其余选项全部自动或内置）。DDL 作业化（在线建索引、`Building` 不可见、`_job` 断点续作）语义见 [06](06-元数据与Schema演进.md) §6.3；空表建索引同步完成（无回填对象，绕开单 `_job` 槽位——CREATE TABLE 内联多索引场景），非空表走 `_job` 后台回填。
 
