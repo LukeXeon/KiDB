@@ -12,6 +12,7 @@ require (
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1
 	github.com/stretchr/testify v1.11.1
+	gopkg.in/dnaeon/go-priorityqueue.v1 v1.1.1
 	pgregory.net/rapid v1.3.0
 )
 

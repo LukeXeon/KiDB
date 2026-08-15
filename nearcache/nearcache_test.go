@@ -46,9 +46,37 @@ func TestJanitorReclaims(t *testing.T) {
 		"janitor 应主动释放过期条目（冷条目不过夜）")
 }
 
+// TestStaleHeapRecordNeverMisdeletes 回归测试（真实缺陷钉死）：
+// Replace 在过期堆里留下新旧两条记录；旧记录到期弹出时不得删除新值。
+// 用假钟手动驱动 evictExpired，确定性无睡眠。
+func TestStaleHeapRecordNeverMisdeletes(t *testing.T) {
+	c, err := New[string, int](100, time.Minute) // ttl 1min，假钟驱动
+	require.NoError(t, err)
+	defer c.Close()
+
+	t0 := time.Now()
+	now := t0
+	c.now = func() time.Time { return now }
+
+	c.Add("k", 1) // 堆记录 dl = t0+60s
+	now = t0.Add(10 * time.Second)
+	c.Add("k", 2)                  // Replace：堆里新增 dl = t0+70s，ARC 当前条目 = v2
+	now = t0.Add(65 * time.Second) // 越过旧记录 deadline（60s），未到新记录（70s）
+
+	c.evictExpired()
+	v, ok := c.Get("k")
+	require.True(t, ok, "新值不得在旧堆记录到期时被误删")
+	require.Equal(t, 2, v)
+
+	now = t0.Add(71 * time.Second) // 越过新记录 deadline
+	c.evictExpired()
+	_, ok = c.Get("k")
+	require.False(t, ok, "真到期后 janitor 应摘除")
+}
+
 func TestJanitorExitsClean(t *testing.T) {
 	c, err := New[string, int](10, time.Minute)
 	require.NoError(t, err)
 	c.Add("x", 1)
-	require.NoError(t, c.Close()) // 退出无泄漏（goleak 防线在 CI，docs/12）
+	require.NoError(t, c.Close()) // 退出无泄漏
 }
