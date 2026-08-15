@@ -16,6 +16,7 @@ import (
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
+	"kidb/rowcodec"
 	"kidb/script"
 )
 
@@ -448,7 +449,7 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 			ops = append(ops, indexOp{
 				kind:       'A',
 				redoKey:    keycodec.AsyncLogKey(t.Name, idx.ID, slot),
-				redoMember: pk + "\x1f" + oldVal + "\x1f" + newVal,
+				redoMember: pk + "\x1f" + escLogField(oldVal) + "\x1f" + escLogField(newVal), // \x1f 分隔 + 字段转义（值含分隔符安全）
 				hasRedo:    true,
 			})
 			continue
@@ -539,20 +540,21 @@ func rangeWriteSet(sh *bucketmap.Shard, score float64) []int {
 	return sh.WriteTargetsRange(score)
 }
 
-// coveringMember 桶 member 编码：无覆盖列 = pk；
-// 有覆盖列 = pk + "|" + 覆盖列编码（docs/03 §3.5；
-// TODO(impl): 覆盖列编码切换 msgp 代码生成版）。
+// coveringMember 桶 member 编码（docs/03 §3.5）：无覆盖列 = pk 原始字节；
+// 有覆盖列 = msgp 数组（rowcodec.EncodeMember，二进制安全）。
 func coveringMember(pk string, idx meta.IndexDef, fields map[string]string) string {
 	if len(idx.Covering) == 0 {
 		return pk
 	}
-	parts := make([]string, 0, len(idx.Covering)+1)
-	parts = append(parts, pk)
+	covers := make([]string, 0, len(idx.Covering))
 	for _, c := range idx.Covering {
-		parts = append(parts, fields[c])
+		covers = append(covers, fields[c])
 	}
-	return strings.Join(parts, "|")
+	return rowcodec.EncodeMember(pk, covers)
 }
+
+// escLogField 异步日志字段转义（URL escape 消除 \x1f 歧义；值原样可读性由对账工具保证）。
+func escLogField(v string) string { return keycodec.EscapeValue(v) }
 
 // lexMember 字典序副本 member：value + \x00 + pk（按值字典序再按 pk 唯一）。
 func lexMember(value, pk string) string {

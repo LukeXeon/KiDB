@@ -11,6 +11,7 @@ import (
 	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/metrics"
+	"kidb/rowcodec"
 	"kidb/script"
 )
 
@@ -370,13 +371,10 @@ func subOf(member string, n int) int {
 	return int(xxhash.Sum64String(stripCovering(member)) % uint64(n))
 }
 
+// stripCovering 提取 member pk（搬迁场景一律按含覆盖列解析——msgp 解码失败
+// 自动回退原样，docs/03 §3.5 编码对无覆盖列 member 是恒等映射）。
 func stripCovering(member string) string {
-	for i := 0; i < len(member); i++ {
-		if member[i] == '|' {
-			return member[:i]
-		}
-	}
-	return member
+	return rowcodec.MemberPK(member, true)
 }
 
 func boundOf(s string) float64 {

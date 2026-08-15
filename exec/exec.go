@@ -427,7 +427,7 @@ func (s *RowStream) fillScatter() error {
 		for i, b := range s.pending {
 			members := asStrings(results[i])
 			for _, m := range members {
-				pk := stripCovering(m)
+				pk := s.stripCovering(m)
 				if s.seen != nil { // 分裂窗口父子桶双读去重
 					if _, dup := s.seen[pk]; dup {
 						continue
@@ -585,10 +585,11 @@ func (s *RowStream) fetchRows(pks []string) error {
 	return nil
 }
 
-// stripCovering 剥掉桶 member 的覆盖列后缀（docs/03 §3.5："pk|col1|col2..."）。
-func stripCovering(member string) string {
-	if i := strings.IndexByte(member, '|'); i >= 0 {
-		return member[:i]
+// stripCovering 提取桶 member 的 pk（schema 感知：覆盖列为 msgp 数组编码，
+// 由调用方按索引定义传入 hasCovering，docs/03 §3.5）。
+func (s *RowStream) stripCovering(member string) string {
+	if s.req.Index != nil && len(s.req.Index.Covering) > 0 {
+		return rowcodec.MemberPK(member, true)
 	}
 	return member
 }

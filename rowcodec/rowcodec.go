@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tinylib/msgp/msgp"
+
 	"kidb/meta"
 )
 
@@ -159,4 +161,78 @@ func DecodeRow(t *meta.TableDef, pk string, raw map[string]string) []any {
 		row = append(row, v)
 	}
 	return row
+}
+
+// ==== 桶 member 编码（docs/03 §3.4/§3.5）====
+// 无覆盖列：member = 原始 pk（零序列化红利）。
+// 有覆盖列：member = msgp 数组 [pk, cover1, ...]（代码生成级格式，二进制安全——
+// 替代 v1 的 "|" 拼接，根除 pk/值含分隔符的歧义风险）。
+// 读取侧经索引定义得知是否有覆盖列（schema 感知，无格式猜测）。
+
+// EncodeMember 生成桶 member。
+func EncodeMember(pk string, covers []string) string {
+	if len(covers) == 0 {
+		return pk
+	}
+	b := msgp.AppendArrayHeader(nil, uint32(1+len(covers)))
+	b = msgp.AppendString(b, pk)
+	for _, c := range covers {
+		b = msgp.AppendString(b, c)
+	}
+	return string(b)
+}
+
+// MemberPK 提取 member 中的 pk。hasCovering 来自索引定义（schema 感知）。
+// 严格全量解析（所有元素消费完毕才算 msgp 形态），任一失败回退原样——
+// 原始 pk 字节流恰好构成合法完整 msgp 数组的概率在工程上可忽略。
+func MemberPK(member string, hasCovering bool) string {
+	if !hasCovering {
+		return member
+	}
+	sz, rest, err := msgp.ReadArrayHeaderBytes([]byte(member))
+	if err != nil || sz == 0 {
+		return member
+	}
+	var pk string
+	for i := uint32(0); i < sz; i++ {
+		var v string
+		v, rest, err = msgp.ReadStringBytes(rest)
+		if err != nil {
+			return member
+		}
+		if i == 0 {
+			pk = v
+		}
+	}
+	if len(rest) != 0 || pk == "" {
+		return member // 非完整消费 → 按原始 pk
+	}
+	return pk
+}
+
+// MemberCovers 提取覆盖列（供覆盖索引读路径跳过回表，docs/03 §3.5）。
+// 严格全量解析；失败返回 nil（调用方回退回表）。
+func MemberCovers(member string, hasCovering bool) []string {
+	if !hasCovering {
+		return nil
+	}
+	sz, rest, err := msgp.ReadArrayHeaderBytes([]byte(member))
+	if err != nil || sz == 0 {
+		return nil
+	}
+	var covers []string
+	for i := uint32(0); i < sz; i++ {
+		var v string
+		v, rest, err = msgp.ReadStringBytes(rest)
+		if err != nil {
+			return nil
+		}
+		if i > 0 {
+			covers = append(covers, v)
+		}
+	}
+	if len(rest) != 0 {
+		return nil
+	}
+	return covers
 }

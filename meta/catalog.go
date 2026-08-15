@@ -2,7 +2,6 @@ package meta
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -13,8 +12,7 @@ import (
 // CatalogStore 是 Catalog 的读写存储（docs/06 §6.1：`c:table:{table}` Hash，
 // 字段 def=编码后的 TableDef、_ver=表级版本、_job=进行中的 DDL 作业）。
 //
-// TODO(impl): def 编码当前为 JSON；切换 msgp 代码生成版见 docs/03 §3.4
-// （格式版本号内嵌，迁移走 docs/06 §6.4 演进纪律）。
+// def/_job 编码为 msgp 代码生成版（docs/03 §3.4；_fmtv 版本号内嵌，演进走 docs/06 §6.4）。
 // TODO(impl): Save 的 CAS 当前为读-改-写，实现期改 config_set 风格 Lua 原子 CAS。
 type CatalogStore struct {
 	cli kidb.Store
@@ -41,7 +39,7 @@ func (s *CatalogStore) Load(ctx context.Context, table string) (*TableDef, error
 		return nil, fmt.Errorf("catalog %s: missing def field", table)
 	}
 	var def TableDef
-	if err := json.Unmarshal([]byte(raw), &def); err != nil {
+	if _, err := def.UnmarshalMsg([]byte(raw)); err != nil {
 		return nil, fmt.Errorf("catalog %s: decode def: %w", table, err)
 	}
 	ver, _ := strconv.ParseUint(fields["_ver"], 10, 64)
@@ -62,12 +60,12 @@ func (s *CatalogStore) Save(ctx context.Context, def *TableDef, expectVer uint64
 	if curVer != expectVer {
 		return fmt.Errorf("%w: catalog %s expect _ver=%d got %d", kidb.ErrStaleMetadata, def.Name, expectVer, curVer)
 	}
-	raw, err := json.Marshal(def)
+	raw, err := def.MarshalMsg(nil)
 	if err != nil {
 		return fmt.Errorf("catalog %s: encode def: %w", def.Name, err)
 	}
 	key := keycodec.CatalogKey(def.Name)
-	if _, err := s.cli.Do(ctx, "HSET", key, "def", string(raw), "_fmtv", 1); err != nil { // _fmtv：格式版本 seam（docs/06 §6.4 演进纪律）
+	if _, err := s.cli.Do(ctx, "HSET", key, "def", string(raw), "_fmtv", 2); err != nil { // _fmtv=2：msgp 代码生成版（docs/03 §3.4）
 		return err
 	}
 	if _, err := s.cli.Do(ctx, "HINCRBY", key, "_ver", 1); err != nil {
@@ -80,7 +78,7 @@ func (s *CatalogStore) Save(ctx context.Context, def *TableDef, expectVer uint64
 
 // SetJob 写入 DDL 作业（Catalog `_job` 字段，docs/06 §6.3）。
 func (s *CatalogStore) SetJob(ctx context.Context, table string, job *DDLJob) error {
-	raw, err := json.Marshal(job)
+	raw, err := job.MarshalMsg(nil)
 	if err != nil {
 		return err
 	}
@@ -95,7 +93,7 @@ func (s *CatalogStore) GetJob(ctx context.Context, table string) (*DDLJob, error
 		return nil, err
 	}
 	var job DDLJob
-	if err := json.Unmarshal([]byte(fmt.Sprint(res)), &job); err != nil {
+	if _, err := job.UnmarshalMsg([]byte(fmt.Sprint(res))); err != nil {
 		return nil, err
 	}
 	return &job, nil

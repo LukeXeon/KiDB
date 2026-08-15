@@ -10,7 +10,6 @@ package bucketmap
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/tinylib/msgp/msgp"
 
 	"kidb"
 	"kidb/keycodec"
@@ -76,9 +76,10 @@ func DefaultShard() *Shard {
 		Next:   1,
 		Eq:     map[string]*EqEntry{},
 		Ranges: []RangeBucket{{Idx: 0, Lo: "-inf", Hi: "+inf", State: Active}},
-		loaded: true,
 	}
 }
+
+//msgp:ignore Store
 
 // Store 是 BucketMap 的读写存储（版本 CAS 经 bucket_state_cas.lua）。
 type Store struct {
@@ -132,12 +133,11 @@ func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shar
 			switch {
 			case len(f) > 2 && f[:2] == "e:":
 				var e EqEntry
-				if json.Unmarshal([]byte(v), &e) == nil {
+				if _, err := e.UnmarshalMsg([]byte(v)); err == nil {
 					sh.Eq[f[2:]] = &e
 				}
 			case f == "r":
-				var rs []RangeBucket
-				if json.Unmarshal([]byte(v), &rs) == nil {
+				if rs, err := decodeRanges([]byte(v)); err == nil {
 					sh.Ranges = rs
 				}
 			}
@@ -187,9 +187,10 @@ func (s *Store) Invalidate() {
 	s.mu.Unlock()
 }
 
-// CAS 原子步进一个字段（bucket_state_cas.lua）。
+// CAS 原子步进一个字段（bucket_state_cas.lua）。值编码：条目类为 msgp
+// 代码生成版（docs/03 §3.4），"next" 为十进制字符串。
 func (s *Store) CAS(ctx context.Context, key string, expectVer uint64, field string, value any) (uint64, error) {
-	raw, err := json.Marshal(value)
+	raw, err := encodeBMValue(value)
 	if err != nil {
 		return 0, err
 	}
@@ -357,6 +358,50 @@ func FormatBound(v float64) string {
 func parseUint(s string) uint64 {
 	n, _ := strconv.ParseUint(s, 10, 64)
 	return n
+}
+
+// encodeBMValue bm 字段值编码（msgp 生成版；int 走十进制字符串）。
+func encodeBMValue(v any) ([]byte, error) {
+	switch t := v.(type) {
+	case int:
+		return []byte(strconv.Itoa(t)), nil
+	case *EqEntry:
+		return t.MarshalMsg(nil)
+	case []RangeBucket:
+		return encodeRanges(t)
+	}
+	return nil, fmt.Errorf("bucketmap: unsupported CAS value %T", v)
+}
+
+// encodeRanges 范围桶列表编码。
+func encodeRanges(rs []RangeBucket) ([]byte, error) {
+	b := msgp.AppendArrayHeader(nil, uint32(len(rs)))
+	for i := range rs {
+		var err error
+		b, err = rs[i].MarshalMsg(b)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return b, nil
+}
+
+// decodeRanges 范围桶列表解码。
+func decodeRanges(b []byte) ([]RangeBucket, error) {
+	sz, rest, err := msgp.ReadArrayHeaderBytes(b)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RangeBucket, 0, sz)
+	for i := uint32(0); i < sz; i++ {
+		var rb RangeBucket
+		rest, err = rb.UnmarshalMsg(rest)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rb)
+	}
+	return out, nil
 }
 
 func asStringMap(res any) map[string]string {
