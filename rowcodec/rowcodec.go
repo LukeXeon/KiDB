@@ -207,6 +207,12 @@ func DecodeRowCols(t *meta.TableDef, pk string, raw map[string]string, cols []st
 // 替代 v1 的 "|" 拼接，根除 pk/值含分隔符的歧义风险）。
 // 读取侧经索引定义得知是否有覆盖列（schema 感知，无格式猜测）。
 
+// LexMember 字典序副本 member：value + \x00 + pk（按值字典序再按 pk 唯一）。
+// txguard 写路径与 JobRunner 回填共用（编码单点）。
+func LexMember(value, pk string) string {
+	return value + "\x00" + pk
+}
+
 // EncodeMember 生成桶 member。
 func EncodeMember(pk string, covers []string) string {
 	if len(covers) == 0 {

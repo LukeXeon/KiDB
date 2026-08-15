@@ -188,7 +188,7 @@ func TestCoveringFallback(t *testing.T) {
 	tbl := seedCoverTable()
 	ctx := context.Background()
 	_, err := g.WriteRow(ctx, txguard.WriteReq{
-		Table:  tbl, PK: "1",
+		Table: tbl, PK: "1",
 		Fields: map[string]string{"city": "shanghai", "age": "30"},
 	})
 	require.NoError(t, err)

@@ -40,7 +40,8 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 
 	switch idx.Kind {
 	case meta.IndexEq, meta.IndexUnique:
-		// 等值索引：每个 range 必须是点；非点范围退化全表遍历 + 字符串范围校验
+		// 等值索引：每个 range 必须是点；非点范围先看前缀形态（字典序副本），
+		// 否则退化全表遍历 + 字符串范围校验
 		values := make([]string, 0, len(ranges))
 		for _, r := range ranges {
 			v, point, err := t.pointValue(r, col)
@@ -48,6 +49,18 @@ func (t *Table) translateLookup(lookup sql.IndexLookup) (*exec.Request, error) {
 				return nil, err
 			}
 			if !point {
+				// 前缀区间形态 [p, p+\xff)（LookupForExpressions 自产）→
+				// 字典序副本 ZRANGEBYLEX 归并路径（docs/04 §4.5）
+				if idx.PrefixCopy {
+					if lo, hi, ok := prefixRangeBounds(r); ok {
+						return &exec.Request{
+							Table: t.def, Kind: exec.PrefixLookup, Index: idx,
+							LexLo: lo, LexHi: hi,
+							Pred:       &exec.Predicate{Column: col, LikePrefix: lo},
+							Projection: t.projectionForExec(),
+						}, nil
+					}
+				}
 				return t.fullScanFallback(ranges.ToRanges(), col)
 			}
 			values = append(values, v)

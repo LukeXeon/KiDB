@@ -53,13 +53,13 @@ type mergeWay struct {
 // 区间互不重叠时按 Lo 顺序拼接即全局有序——translate 已排序；
 // gms 只在区间不重叠时删 Sort，docs/04 §4.3）。
 type orderedMerger struct {
-	s     *RowStream
-	r     RangeBound
-	pq    *pq.PriorityQueue[topkItem, float64]
-	ways  []mergeWay
-	desc  bool
+	s      *RowStream
+	r      RangeBound
+	pq     *pq.PriorityQueue[topkItem, float64]
+	ways   []mergeWay
+	desc   bool
 	seeded bool
-	empty bool // 本区间确定无更多成员（堆空且无待补页）
+	empty  bool // 本区间确定无更多成员（堆空且无待补页）
 }
 
 // newOrderedMerger 构造（不发起 IO；首个 fill 时种子）。

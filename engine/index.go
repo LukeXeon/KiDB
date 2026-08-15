@@ -84,10 +84,26 @@ func (i *Index) ColumnExpressionTypes() []sql.ColumnExpressionType {
 // 就会静默产出乱序。因此只有 score 有序流（topk.go k 路归并）的范围索引
 // 接受任意区间；等值/唯一/主键只接受点范围（点集内序由 translate 排序保证），
 // 非点范围退回全扫 + 引擎层 sort（正确性优先，代价与既有 fullScanFallback 相同）。
+// 唯一例外：带 prefix_copy 的等值/唯一索引额外接受**前缀区间形态**
+// [p, p+\xff)（该形态只由 LookupForExpressions 自产——字典序副本路径
+// 产出全局字典序，同样满足有序契约）。
 func (i *Index) CanSupport(ctx *sql.Context, ranges ...sql.Range) bool {
 	if !i.primary {
-		if idx := i.def.Index(i.id); idx != nil && idx.Kind == meta.IndexRange {
-			return true
+		if idx := i.def.Index(i.id); idx != nil {
+			if idx.Kind == meta.IndexRange {
+				return true
+			}
+			if idx.PrefixCopy {
+				for _, r := range ranges {
+					if isPointRange(r) {
+						continue
+					}
+					if _, _, ok := prefixRangeBounds(r); !ok {
+						return false
+					}
+				}
+				return true
+			}
 		}
 	}
 	for _, r := range ranges {
@@ -110,6 +126,29 @@ func isPointRange(r sql.Range) bool {
 		return false
 	}
 	return fmt.Sprint(lo) == fmt.Sprint(hi)
+}
+
+// prefixRangeBounds 提取前缀区间形态的界值：单列 [lo, hi) 且 hi == lo+"\xff"
+// （即 LookupForExpressions 经 GreaterOrEqual(p)+LessThan(p+\xff) 构造的形状）。
+func prefixRangeBounds(r sql.Range) (string, string, bool) {
+	mr, ok := r.(sql.MySQLRange)
+	if !ok || len(mr) != 1 {
+		return "", "", false
+	}
+	lo, ok := mr[0].LowerBound.(sql.Below) // 闭下界 [lo
+	if !ok {
+		return "", "", false
+	}
+	hi, ok := mr[0].UpperBound.(sql.Below) // 开上界 hi)（gms 语义：Below 作上界为开）
+	if !ok {
+		return "", "", false
+	}
+	loS, ok1 := lo.Key.(string)
+	hiS, ok2 := hi.Key.(string)
+	if !ok1 || !ok2 || loS == "" {
+		return "", "", false
+	}
+	return loS, hiS, hiS == loS+"\xff"
 }
 
 // Order 索引扫描产出序（sql.OrderedIndex，gms replace_sort.go Case B 的裁决面）：

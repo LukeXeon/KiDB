@@ -168,6 +168,9 @@ func (h *kidbHandler) checkBoundedScan(ctx context.Context, stmt ast.StmtNode, w
 	}
 	cols := map[string]bool{}
 	collectPredCols(where, cols)
+	// 前缀 LIKE 的列单独收集（PatternLikeExpr 非比较运算，不进 cols）
+	prefixCols := map[string]bool{}
+	collectPrefixLikeCols(where, prefixCols)
 	building := ""
 	for c := range cols {
 		switch indexStateOn(def, c) {
@@ -177,10 +180,66 @@ func (h *kidbHandler) checkBoundedScan(ctx context.Context, stmt ast.StmtNode, w
 			building = c
 		}
 	}
+	for c := range prefixCols {
+		switch prefixIndexStateOn(def, c) {
+		case 2:
+			return nil // 有字典序副本 → 前缀搜索路径（docs/04 §4.5）
+		case 1:
+			building = c
+		}
+	}
 	if building != "" {
 		return fmt.Errorf("%w: 表 %s 列 %s 的索引建设中，稍后重试（在线回填，docs/06 §6.3）", kidb.ErrNoIndex, def.Name, building)
 	}
 	return h.allowFullscan(ctx, def, rawQuery)
+}
+
+// collectPrefixLikeCols 收集常量前缀 LIKE 的列（`col LIKE 'abc%'`：
+// 恰一个 % 结尾、无 _/转义、前缀非空——其余形态不收集，走全扫纪律）。
+func collectPrefixLikeCols(e ast.ExprNode, out map[string]bool) {
+	switch x := e.(type) {
+	case *ast.BinaryOperationExpr:
+		if x.Op == opcode.LogicAnd {
+			collectPrefixLikeCols(x.L, out)
+			collectPrefixLikeCols(x.R, out)
+		}
+	case *ast.PatternLikeOrIlikeExpr:
+		if x.Not {
+			return // NOT LIKE 不进前缀通道（保守走全扫纪律）
+		}
+		ce, ok := x.Expr.(*ast.ColumnNameExpr)
+		if !ok {
+			return
+		}
+		ve, ok := x.Pattern.(ast.ValueExpr)
+		if !ok {
+			return
+		}
+		pat, ok := ve.GetValue().(string)
+		if !ok || len(pat) < 2 || !strings.HasSuffix(pat, "%") {
+			return
+		}
+		prefix := pat[:len(pat)-1]
+		if prefix == "" || strings.ContainsAny(prefix, "%_\\") {
+			return
+		}
+		out[strings.ToLower(ce.Name.Name.O)] = true
+	}
+}
+
+// prefixIndexStateOn 列上字典序副本状态：0=无，1=回填中，2=可用。
+func prefixIndexStateOn(def *meta.TableDef, col string) int {
+	state := 0
+	for _, idx := range def.Indexes {
+		if idx.PrefixCopy && len(idx.Columns) == 1 && strings.EqualFold(idx.Columns[0], col) {
+			if idx.Building {
+				state = 1
+			} else if state == 0 {
+				state = 2
+			}
+		}
+	}
+	return state
 }
 
 // allowFullscan 全表遍历访问控制（docs/07 §7.4：hint 或表白名单）。

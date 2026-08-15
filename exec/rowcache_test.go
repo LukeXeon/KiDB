@@ -64,8 +64,8 @@ func TestRowCache(t *testing.T) {
 	write("2", "x", 1200*time.Millisecond)
 	rows = get("2")
 	require.Len(t, rows, 1)
-	now = now.Add(2 * time.Second)   // 推进共享钟（写入侧 TTL 计算）
-	m.FastForward(2 * time.Second)   // 推进 miniredis TTL 钟（行物理过期）
+	now = now.Add(2 * time.Second)      // 推进共享钟（写入侧 TTL 计算）
+	m.FastForward(2 * time.Second)      // 推进 miniredis TTL 钟（行物理过期）
 	time.Sleep(1300 * time.Millisecond) // otter 条目真实时钟到期（PTTL 1.2s）
 	rows = get("2")
 	require.Empty(t, rows, "行过期后条目必须同步失效（绝不返回过期行）")

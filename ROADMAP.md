@@ -23,6 +23,7 @@
 - **L2 请求合并**（singleflight：EqLookup 同指纹并发合并，leader 物化 pk 列表（2^20 上限）+ 填充 L1，followers 共享后各自回表；同时补上 L1 的网关装配缺口——`nearcache_ttl/_capacity` 变量驱动 + 轮询换装，此前 L1 只在测试内接线）。
 - **L3 副本读**（`DoReplica` 进读路径 + 契约新增 `PipelineReplica` 批级副本读——单命令副本读无法满足散取 RTT 纪律；参考适配器改为独立 `ReadOnly` 副本客户端（主客户端恒主节点，修正原 `ReadOnly` 主客户端会把内建只读命令全分流的误配）；开关 = `replica_read` 变量 × 能力位轮询热更）。
 - **行级近缓存**（`hotkey_row_cache` 变量消费：pk→行投影，命中零 RTT；条目 TTL = min(默认 TTL, 行 PTTL)——过期行绝不返回；更新/删除陈旧窗口 ≤3s 为文档化取舍（默认关闭的根因），docs/08 §8.4 语义已如实改写）。
+- **前缀搜索**（`LIKE 'abc%'` → 字典序副本 ZRANGEBYLEX k 路归并：引擎接入走 gms `IndexSearchableTable.LookupForExpressions`——FilteredTable 在 v0.20 只在 bindvar 规则被调用，是死路；`CanSupport` 对 prefix_copy 索引额外放行前缀区间形态 [p, p+\xff)；回表 HasPrefix 重判；回填补齐字典序副本产出（此前 `_job` 回填只写主桶，在线建的副本是哑的）；guard 同步放行常量前缀 LIKE）。
 
 | 项 | 说明 |
 |---|---|
@@ -30,7 +31,6 @@
 | 后台任务池 | 后台角色为常驻循环，无任务池负载；需要时引入 `panjf2000/ants` |
 | 全扫/回填限流通道 | 落地时引入 `golang.org/x/time/rate` |
 | 故障注入 | docs/12 §12.6 清单在案；引入 `Shopify/toxiproxy`（CI 环境项） |
-| 前缀搜索 `LIKE 'abc%'`（字典序副本 ZRANGEBYLEX 查询路径） | 副本在写，查询翻译未做 |
 | HLL 基数统计接入（PFADD 写路径 + 优化器选路） | docs/04 §4.6 |
 | plan cache（指纹 + 版本绑定） | docs/02 §2.6 承诺；gms 有内置语句缓存，KiDB 侧版本绑定未做 |
 | EXPLAIN 自定义节点（桶数/扇出/下推展示） | docs/02 §2.8；gms EXPLAIN 可用但无 KiDB 细节 |

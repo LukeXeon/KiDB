@@ -181,6 +181,11 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		default:
 			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, slot, 0), 0, member}})
 		}
+		// 字典序副本随等值索引回填（docs/04 §4.5 前缀搜索的数据面；
+		// 与 txguard 写路径同一编码——rowcodec.LexMember 单点）
+		if idx.PrefixCopy && idx.Kind != meta.IndexRange {
+			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, 0), 0, rowcodec.LexMember(enc, pk)}})
+		}
 		if len(cmds) >= 512 {
 			if err := flush(); err != nil {
 				return err

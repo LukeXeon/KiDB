@@ -556,9 +556,9 @@ func coveringMember(pk string, idx meta.IndexDef, fields map[string]string) stri
 // escLogField 异步日志字段转义（URL escape 消除 \x1f 歧义；值原样可读性由对账工具保证）。
 func escLogField(v string) string { return keycodec.EscapeValue(v) }
 
-// lexMember 字典序副本 member：value + \x00 + pk（按值字典序再按 pk 唯一）。
+// lexMember 字典序副本 member（编码单点在 rowcodec.LexMember——回填/写入同路）。
 func lexMember(value, pk string) string {
-	return value + "\x00" + pk
+	return rowcodec.LexMember(value, pk)
 }
 
 // mergeReceiptUndo 主键复活：把旧回执中的索引条目并入撤销集

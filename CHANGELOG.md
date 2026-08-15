@@ -43,6 +43,7 @@
 - **L2 请求合并（singleflight）**：EqLookup 同指纹并发查询共享一次散取——leader 物化 pk 列表（2^20 上限，超出各调用方退回独立流式，有界性优先）并填充 L1，followers 经 `DoChan` 共享（leader 客户端断开不连坐）后各自回表校验。命令量实证：32 路并发冷查询热值，桶读取 ≈1 次散取而非 32 次。配套补上 **L1 网关装配缺口**（此前 `SetNearCache` 只在测试内接线，生产路径 L1 休眠）：装配进 `startRoles`，`nearcache_ttl/_capacity` 变量轮询换装。
 - **L3 副本读进读路径**：契约新增 `PipelineReplica`（批级副本读——散取/回表是批量形态，单命令 `DoReplica` 无法满足 RTT 纪律；`KvClient` 契约面扩为六方法，docs/09 §9.3 同步）；参考适配器改为**独立 `ReadOnly` 副本客户端**（修正原实现：`ReadOnly` 设在主客户端上会把 go-redis 内建只读命令表的全部读分流到副本，主节点读纪律失守）；exec 读命令统一走 `readPipeline`/`readDo` 分流出口；开关 = `replica_read` 变量 × 适配器能力位（轮询热更，能力缺失自动降级）。cmd 新增 `--replica-read` 能力开关。
 - **行级近缓存（hotkey_row_cache）**：pk→行投影近缓存落地（此前只注册了变量）——命中零 RTT；条目 TTL = min(默认 TTL, 行剩余 PTTL)（HGETALL+PTTL 同 pipeline 填充，零额外 RTT），**行物理过期则条目同步死亡**；更新/删除在 TTL 窗口内返回陈旧内容（无跨实例失效广播——默认关闭的根因，docs/08 §8.4 语义如实改写，替代原文稿过于乐观的"天然保证"表述）。开关经 `hotkey_row_cache` 变量轮询生效。
+- **前缀搜索 LIKE 'abc%' 查询路径**：字典序副本（`i:…#l{n}`，写路径本就在维护）接通读侧——`ZRANGEBYLEX [p [p+\xff` 分页 + k 路归并产出全局字典序（字符串堆；`ORDER BY` 前缀列时 gms 删 Sort 的契约与 top-k 同源）。引擎接入走 gms `IndexSearchableTable.LookupForExpressions`（**FilteredTable 在 gms v0.20 只在 bindvar 规则内被调用，非常驻分析面——实证死路**）；`CanSupport` 对 prefix_copy 索引精确放行前缀区间形态（其余非点范围仍拒绝，防无序路径被选为排序载体）。配套修复：在线回填此前只写主桶不写字典序副本（在线建的 prefix_copy 索引查询结果残缺）；sqlguard 放行常量前缀 LIKE。
 
 ## v5.0（文档全面革新，docs/ 现行版本基线）
 

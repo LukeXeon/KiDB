@@ -40,10 +40,11 @@ const (
 type Kind int
 
 const (
-	FullScan    Kind = iota + 1 // exp 登记册遍历（docs/07 §7.4）
-	PointGet                    // 主键点查：HGETALL 直取
-	EqLookup                    // 等值索引：值 × slot 桶 ZRANGE 分页
-	RangeLookup                 // 范围索引：slot 桶 ZRANGEBYSCORE 分页
+	FullScan     Kind = iota + 1 // exp 登记册遍历（docs/07 §7.4）
+	PointGet                     // 主键点查：HGETALL 直取
+	EqLookup                     // 等值索引：值 × slot 桶 ZRANGE 分页
+	RangeLookup                  // 范围索引：slot 桶 ZRANGEBYSCORE 归并（topk.go）
+	PrefixLookup                 // 前缀搜索：字典序副本 ZRANGEBYLEX 归并（prefix.go）
 )
 
 // Predicate 是回表校验谓词（docs/04 §4.3：所有索引路径的必须环节）。
@@ -53,6 +54,9 @@ type Predicate struct {
 	Eq     []string     // 等值集合（编码后）；nil = 无等值约束
 	Ranges []RangeBound // 数值范围集合（OR 语义）；nil = 无范围约束
 	Str    []StrRange   // 字符串范围集合（字典序，OR 语义）
+	// LikePrefix 常量前缀（LIKE 'abc%' 的前缀搜索路径，docs/04 §4.5）——
+	// 回表以 HasPrefix 重判（member 桶内值天然满足，此行兜 member 编码边界）。
+	LikePrefix string
 }
 
 // RangeBound 是一段 score 区间 [lo, hi]（开闭由 Open 位决定；
@@ -106,6 +110,9 @@ func (p *Predicate) Match(raw map[string]string) bool {
 		}
 		return false
 	}
+	if p.LikePrefix != "" {
+		return strings.HasPrefix(v, p.LikePrefix)
+	}
 	return true
 }
 
@@ -156,9 +163,12 @@ type Request struct {
 	Kind  Kind
 
 	Pks    []string       // PointGet：编码后 pk 列表
-	Index  *meta.IndexDef // EqLookup/RangeLookup：命中的索引
+	Index  *meta.IndexDef // EqLookup/RangeLookup/PrefixLookup：命中的索引
 	Values []string       // EqLookup：编码后值列表
 	Ranges []RangeBound   // RangeLookup：score 区间列表（OR，不重迭）
+
+	// LexLo/LexHi：PrefixLookup 的 ZRANGEBYLEX 界（原始界值，命令侧加 [ 括号）。
+	LexLo, LexHi string
 
 	Pred     *Predicate // 回表校验（nil = 不校验）
 	Pushdown bool       // 谓词下推到服务端 Lua（docs/04 §4.2，白名单形态）
@@ -182,13 +192,13 @@ type Request struct {
 // Executor 执行 Request，产出流式行。
 type Executor struct {
 	cli           kidb.KvClient
-	reg           *script.Registry // 谓词下推脚本（nil = 不下推）
-	nc            L1Cache          // L1 近缓存（nil = 关闭，docs/08 §8.4）
-	bm            *bucketmap.Store // 桶路由（分裂状态）；nil = 永远默认单桶
-	l4            L4Resolver       // L4 热桶副本（nil = 关闭）
-	telemetry     TelemetrySink    // 遥测采样（nil = 关闭）
-	m             *metrics.Metrics // 指标（nil = no-op，docs/10 §10.3）
-	clock         func() time.Time // 覆盖读路径活性判定时钟（测试可注入，与写入侧共钟）
+	reg           *script.Registry   // 谓词下推脚本（nil = 不下推）
+	nc            L1Cache            // L1 近缓存（nil = 关闭，docs/08 §8.4）
+	bm            *bucketmap.Store   // 桶路由（分裂状态）；nil = 永远默认单桶
+	l4            L4Resolver         // L4 热桶副本（nil = 关闭）
+	telemetry     TelemetrySink      // 遥测采样（nil = 关闭）
+	m             *metrics.Metrics   // 指标（nil = no-op，docs/10 §10.3）
+	clock         func() time.Time   // 覆盖读路径活性判定时钟（测试可注入，与写入侧共钟）
 	replicaRead   atomic.Bool        // L3 副本读开关（SetReplicaRead；docs/08 §8.4）
 	rowCache      RowCache           // 行级近缓存（nil = 关闭，默认关闭；hotkey_row_cache 变量驱动）
 	sf            singleflight.Group // L2 请求合并（docs/08 §8.4：同指纹并发合并；随 L1 装配生效）
@@ -302,8 +312,10 @@ type RowStream struct {
 	// bm 路由判定（Run 期解析）：等值值是否热分裂 / 范围索引是否有分裂
 	bmHotEq    bool
 	bmHotRange bool
+	bmHotLex   bool // 字典序副本分裂（Eq["l"] 伪条目，prefix.go）
 
 	om *orderedMerger // RangeLookup 当前区间的归并器（topk.go）
+	lm *lexMerger     // PrefixLookup 的归并器（prefix.go）
 
 	startedAt time.Time // 首个 Next 时间（query_duration_seconds 挂点）
 }
@@ -397,6 +409,16 @@ func (s *RowStream) initRoutes(ctx context.Context) {
 	// RangeLookup 多区间：跨区间去重（与分裂双读共用 seen；单区间零开销）
 	if req.Kind == RangeLookup && len(req.Ranges) > 1 && s.seen == nil {
 		s.seen = map[string]struct{}{}
+	}
+	// PrefixLookup：字典序副本分裂感知（Eq["l"] 伪条目；当前控制器不触发，
+	// 恒默认桶——读侧挂点先行，启用时双读去重由 seen 承载）
+	if req.Kind == PrefixLookup && e.bm != nil && req.Index != nil {
+		if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil && reg["l"] {
+			s.bmHotLex = true
+			if s.seen == nil {
+				s.seen = map[string]struct{}{}
+			}
+		}
 	}
 }
 
@@ -504,6 +526,8 @@ func (s *RowStream) fill() error {
 		return s.fillPointGet()
 	case RangeLookup:
 		return s.fillOrderedRange() // 全局 score 有序流（topk.go：gms 删 Sort 契约）
+	case PrefixLookup:
+		return s.fillPrefix() // 全局字典序流（prefix.go：同一契约）
 	default:
 		return s.fillScatter()
 	}
