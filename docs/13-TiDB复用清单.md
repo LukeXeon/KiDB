@@ -13,6 +13,14 @@
 | **Y. 搬 TiDB SQL 层，Redis 伪装 TiKV**（实现 `kv.Storage`/`kv.Transaction` 接口） | 复用 parser+planner+executor 全套 | ❌ 死在三个接口语义上（尸检见 §13.2）；为填洞会把桶模型/hash tag/Lua 全部重新发明一遍，还多背整个 TiDB 的代码与运维面 |
 | **Z. 翻译式设计 + 模块化复用（本方案）** | 约束推导机制（[09](09-后端契约与适配器.md) 为 forcing function），模块边界允许的代码直接依赖 | ✅ 采用 |
 
+> **常被问起：为什么同时依赖 go-mysql-server 和 TiDB parser？**
+> 两者给的答案不同且互不替代：gms 给的是**运行时**（DML 分析器/执行器 + MySQL 协议服务器 + 系统变量），
+> 它的 parser 不作为独立的 MySQL 高保真 DDL 解析器暴露；TiDB parser 给的是**纯解析**
+> （DDL 语法保真 + `NormalizeDigest` 指纹 + 快速路径形状识别），它没有我们能用的执行引擎
+> （其执行层焊死在 TiKV 事务模型上，§13.2）。用 gms 的 parser 做 DDL 是降级（语法面窄、
+> 扩展载体不可控）；用 TiDB parser 做 DML 是空转（gms 只认自己的 AST，仍要再解析一次）。
+> 所以职责切分是：**gms = 引擎+协议；TiDB parser = 解析器**。
+
 ## 13.2 路线 Y 尸检：为什么 SQL 层搬不动
 
 TiDB 的 SQL 层不是独立的——它焊死在 TiKV 的事务模型上。`kv.Transaction` 接口隐含三个 Redis 物理上给不出的能力：
