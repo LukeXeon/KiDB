@@ -32,8 +32,9 @@
 
 | 项 | 说明 |
 |---|---|
-| 并发扇出池 | 当前顺序 pipeline 批 + 批大小 bulkhead 已够用；需要结构化并发时引入 `sourcegraph/conc` / errgroup |
-| 后台任务池 | 后台角色为常驻循环，无任务池负载；需要时引入 `panjf2000/ants` |
+| AND 自动选路接管（LookupForExpressions 合取选低基数索引，消费 HLL 基数） | 数据面已就绪（B11）；当前由 gms coster 均匀统计承载，出现选路误判案例再启动 |
+| 并发扇出池 | 当前顺序 pipeline 批 + 批大小 bulkhead 已够用；需要结构化并发时引入 `sourcegraph/conc` / errgroup（条件项） |
+| 后台任务池 | 后台角色为常驻循环，无任务池负载；需要时引入 `panjf2000/ants`（条件项） |
 | 故障注入 | docs/12 §12.6 清单在案；引入 `Shopify/toxiproxy`（CI 环境项） |
 
 ## C. 运维与验证基建
