@@ -135,10 +135,10 @@ func (om *orderedMerger) step() error {
 	for _, c := range cand {
 		pk := s.stripCovering(c.it.member)
 		if s.seen != nil {
-			if _, dup := s.seen[pk]; dup {
+			if s.seen.Has(pk) {
 				continue
 			}
-			s.seen[pk] = struct{}{}
+			s.seen.Add(pk)
 		}
 		items = append(items, candItem{member: c.it.member, pk: pk, val: scoreEnc(col.Type, c.score)})
 	}

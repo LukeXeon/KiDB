@@ -3,7 +3,7 @@ package utils
 import (
 	"fmt"
 	"math/rand"
-	"sort"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -53,7 +53,7 @@ func TestPriorityQueueString(t *testing.T) {
 		_, p := q.Pop()
 		got = append(got, p)
 	}
-	require.True(t, sort.StringsAreSorted(got))
+	require.True(t, slices.IsSorted(got))
 	require.Equal(t, "beijing", got[0])
 }
 

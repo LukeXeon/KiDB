@@ -16,6 +16,7 @@ import (
 	"kidb/meta"
 	"kidb/rowcodec"
 	"kidb/tuning"
+	"kidb/utils"
 )
 
 // ddlexec.go：DDL 执行（docs/06 §6.3 作业流）——gms 引擎的 DDL 接口实现。
@@ -247,7 +248,7 @@ func (t *Table) checkUniqueNoDup(ctx *sql.Context, def *meta.TableDef, idx *meta
 	}
 	s := t.deps.Exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, Projection: []string{col}})
 	defer func() { _ = s.Close() }() // 流收尾：错误无消费方，显式丢弃
-	seen := make(map[string]struct{}, 1024)
+	seen := make(utils.Set[string], 1024)
 	cap_ := tuning.Get().Exec.L2MaxCollect
 	for {
 		row, err := s.Next()
@@ -264,10 +265,10 @@ func (t *Table) checkUniqueNoDup(ctx *sql.Context, def *meta.TableDef, idx *meta
 		if err != nil {
 			return err
 		}
-		if _, dup := seen[enc]; dup {
+		if seen.Has(enc) {
 			return sql.NewUniqueKeyErr(fmt.Sprintf("%s on %s", enc, idx.ID), false, nil)
 		}
-		seen[enc] = struct{}{}
+		seen.Add(enc)
 		if len(seen) > cap_ {
 			return fmt.Errorf("%w: %s", kidb.ErrUnsupported,
 				i18n.T("ddl.unique_dedup_overflow", def.Name, idx.ID, cap_))

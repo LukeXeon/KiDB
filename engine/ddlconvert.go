@@ -11,6 +11,7 @@ import (
 	"kidb"
 	"kidb/i18n"
 	"kidb/meta"
+	"kidb/utils"
 )
 
 // ddlconvert.go：DDL 语义层（docs/02 §2.3）——把 gms 的 DDL 计划产物
@@ -118,7 +119,7 @@ func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*me
 		return nil, err
 	}
 	def := &meta.TableDef{Name: name, DefaultTTL: ttl}
-	seen := map[string]bool{}
+	seen := utils.NewSet[string]()
 	for i, c := range sch.Schema {
 		if err := meta.ValidateReserved(c.Name); err != nil {
 			return nil, fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
@@ -126,10 +127,10 @@ func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*me
 		if err := meta.ValidateIdent(c.Name); err != nil {
 			return nil, fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
 		}
-		if seen[strings.ToLower(c.Name)] {
+		if seen.Has(strings.ToLower(c.Name)) {
 			return nil, fmt.Errorf("%s", i18n.T("ddl.column_duplicate", c.Name))
 		}
-		seen[strings.ToLower(c.Name)] = true
+		seen.Add(strings.ToLower(c.Name))
 		ct, err := ColumnTypeOf(c.Type)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", i18n.T("ddl.column_label", c.Name), err)
@@ -177,16 +178,16 @@ func validateTable(t *meta.TableDef) error {
 	if len(t.Indexes) > 16 {
 		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.too_many_indexes", len(t.Indexes)))
 	}
-	seen := map[string]bool{}
+	seen := utils.NewSet[string]()
 	for i := range t.Indexes {
 		idx := &t.Indexes[i]
 		if err := meta.ValidateReserved(idx.ID); err != nil {
 			return fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
 		}
-		if seen[strings.ToLower(idx.ID)] {
+		if seen.Has(strings.ToLower(idx.ID)) {
 			return fmt.Errorf("%s", i18n.T("ddl.index_name_duplicate", idx.ID))
 		}
-		seen[strings.ToLower(idx.ID)] = true
+		seen.Add(strings.ToLower(idx.ID))
 		if err := ValidateIndexForTable(idx, t); err != nil {
 			return err
 		}

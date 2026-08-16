@@ -92,12 +92,12 @@ type Store struct {
 	since time.Time
 	ttl   time.Duration
 
-	regCache map[string]map[string]bool // 热值注册表缓存（同 TTL——review 实证：Registry 无缓存曾让每条索引查询 +1 RTT）
+	regCache map[string]utils.Set[string] // 热值注册表缓存（同 TTL——review 实证：Registry 无缓存曾让每条索引查询 +1 RTT）
 }
 
 // New 构造（缓存 TTL 1s——分裂中间态读侧容忍见 docs/08 §8.3）。
 func New(cli kv.Client, reg *script.Registry) *Store {
-	return &Store{cli: cli, reg: reg, cache: map[string]*Shard{}, since: time.Now(), ttl: time.Second, regCache: map[string]map[string]bool{}}
+	return &Store{cli: cli, reg: reg, cache: map[string]*Shard{}, since: time.Now(), ttl: time.Second, regCache: map[string]utils.Set[string]{}}
 }
 
 // Load 读分片（短 TTL 缓存；强制刷新走 Invalidate）。
@@ -157,7 +157,7 @@ func (s *Store) LoadFresh(ctx context.Context, table, idx string, slot uint16) (
 // Registry 读热值注册表（等值值名 → 是否有分裂状态；范围索引用哨兵 "@range"）。
 // 读路径据此免加载全 slot 分片（docs/03 §3.1 稀疏原则）。短 TTL 缓存
 // （1s，与分片缓存同节奏）：注册/摘除的传播延迟 ≪ 其语义精度（读侧双读/回退全兜住）。
-func (s *Store) Registry(ctx context.Context, table, idx string) (map[string]bool, error) {
+func (s *Store) Registry(ctx context.Context, table, idx string) (utils.Set[string], error) {
 	k := keycodec.BucketMapHotKey(table, idx)
 	s.mu.RLock()
 	if time.Since(s.since) < s.ttl {
@@ -172,15 +172,15 @@ func (s *Store) Registry(ctx context.Context, table, idx string) (map[string]boo
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]bool{}
+	out := utils.NewSet[string]()
 	bmReply, _ := utils.StringMap(res)
 	for f := range bmReply {
-		out[f] = true
+		out.Add(f)
 	}
 	s.mu.Lock()
 	if time.Since(s.since) >= s.ttl {
 		s.cache = map[string]*Shard{}
-		s.regCache = map[string]map[string]bool{}
+		s.regCache = map[string]utils.Set[string]{}
 		s.since = time.Now()
 	}
 	s.regCache[k] = out
@@ -198,7 +198,7 @@ func (s *Store) RegisterHot(ctx context.Context, table, idx, field string) error
 func (s *Store) Invalidate() {
 	s.mu.Lock()
 	s.cache = map[string]*Shard{}
-	s.regCache = map[string]map[string]bool{}
+	s.regCache = map[string]utils.Set[string]{}
 	s.since = time.Now()
 	s.mu.Unlock()
 }

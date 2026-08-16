@@ -9,11 +9,12 @@ import (
 	"fmt"
 	"io/fs"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
 	"kidb/i18n"
+	"kidb/utils"
 
 	"embed"
 )
@@ -48,7 +49,7 @@ func (r *Registry) List() []string {
 	for n := range r.byName {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -100,7 +101,7 @@ func loadFrom(fsys embed.FS) (*Registry, error) {
 // parse 解析单个脚本的头部元数据并静态校验（独立函数便于负例单测）。
 func parse(filename, src string) (*Script, error) {
 	s := &Script{}
-	seen := map[string]bool{}
+	seen := utils.NewSet[string]()
 	for _, line := range strings.Split(src, "\n") {
 		m := headerField.FindStringSubmatch(line)
 		if m == nil {
@@ -110,7 +111,7 @@ func parse(filename, src string) (*Script, error) {
 			break // 首行非注释即头部结束
 		}
 		key, val := m[1], m[2]
-		seen[key] = true
+		seen.Add(key)
 		switch key {
 		case "name":
 			s.Name = val
@@ -127,7 +128,7 @@ func parse(filename, src string) (*Script, error) {
 		}
 	}
 	for _, req := range []string{"name", "version", "keys_desc", "idempotent"} {
-		if !seen[req] {
+		if !seen.Has(req) {
 			return nil, fmt.Errorf("script %s: missing @%s header", filename, req)
 		}
 	}

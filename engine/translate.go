@@ -1,9 +1,10 @@
 package engine
 
 import (
+	"cmp"
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"kidb/i18n"
 	"kidb/meta"
 	"kidb/rowcodec"
+	"kidb/utils"
 )
 
 // translateLookup 把 gms IndexLookup 翻译为 KiDB 物理计划（docs/04 §4.1 翻译表）。
@@ -107,14 +109,14 @@ func (t *Table) coveringOK(idx *meta.IndexDef, predCol string) bool {
 	if len(idx.Covering) == 0 {
 		return false
 	}
-	covered := map[string]bool{}
+	covered := utils.NewSet[string]()
 	for _, c := range idx.Covering {
-		covered[strings.ToLower(c)] = true
+		covered.Add(strings.ToLower(c))
 	}
-	covered[strings.ToLower(idx.Columns[0])] = true
-	covered[strings.ToLower(t.def.PK)] = true
+	covered.Add(strings.ToLower(idx.Columns[0]))
+	covered.Add(strings.ToLower(t.def.PK))
 	need := func(c string) bool {
-		return c != "" && !covered[strings.ToLower(c)]
+		return c != "" && !covered.Has(strings.ToLower(c))
 	}
 	if need(predCol) {
 		return false
@@ -155,13 +157,13 @@ func (t *Table) dedupSortValues(col string, values []string, desc bool) []string
 	if !ok {
 		return values
 	}
-	seen := make(map[string]struct{}, len(values))
+	seen := make(utils.Set[string], len(values))
 	out := values[:0]
 	for _, v := range values {
-		if _, dup := seen[v]; dup {
+		if seen.Has(v) {
 			continue
 		}
-		seen[v] = struct{}{}
+		seen.Add(v)
 		out = append(out, v)
 	}
 	type pair struct {
@@ -176,26 +178,26 @@ func (t *Table) dedupSortValues(col string, values []string, desc bool) []string
 		}
 		pairs = append(pairs, pair{v, d})
 	}
-	less := func(i, j int) bool {
-		a, b := pairs[i].dec, pairs[j].dec
+	compare := func(x, y pair) int {
+		a, b := x.dec, y.dec
 		switch av := a.(type) {
 		case int64:
-			return av < b.(int64)
+			return cmp.Compare(av, b.(int64))
 		case float64:
-			return av < b.(float64)
+			return cmp.Compare(av, b.(float64))
 		case time.Time:
-			return av.Before(b.(time.Time))
+			return av.Compare(b.(time.Time))
 		case string:
-			return av < b.(string)
+			return cmp.Compare(av, b.(string))
 		case []byte:
-			return string(av) < string(b.([]byte))
+			return cmp.Compare(string(av), string(b.([]byte)))
 		}
-		return pairs[i].enc < pairs[j].enc
+		return cmp.Compare(x.enc, y.enc)
 	}
 	if desc {
-		sort.SliceStable(pairs, func(i, j int) bool { return less(j, i) })
+		slices.SortStableFunc(pairs, func(x, y pair) int { return compare(y, x) })
 	} else {
-		sort.SliceStable(pairs, less)
+		slices.SortStableFunc(pairs, compare)
 	}
 	for i := range pairs {
 		out[i] = pairs[i].enc
@@ -206,10 +208,10 @@ func (t *Table) dedupSortValues(col string, values []string, desc bool) []string
 // sortRangeBounds 区间排序（归并逐区间拼接的前提）。
 func sortRangeBounds(bounds []exec.RangeBound, desc bool) {
 	if desc {
-		sort.SliceStable(bounds, func(i, j int) bool { return bounds[i].Hi > bounds[j].Hi })
+		slices.SortStableFunc(bounds, func(x, y exec.RangeBound) int { return cmp.Compare(y.Hi, x.Hi) })
 		return
 	}
-	sort.SliceStable(bounds, func(i, j int) bool { return bounds[i].Lo < bounds[j].Lo })
+	slices.SortStableFunc(bounds, func(x, y exec.RangeBound) int { return cmp.Compare(x.Lo, y.Lo) })
 }
 
 // fullScanFallback 非点范围兜底：exp 登记册遍历 + 谓词校验（始终正确）。

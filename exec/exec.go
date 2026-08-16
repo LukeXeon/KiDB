@@ -13,7 +13,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -348,7 +348,7 @@ type RowStream struct {
 
 	// 分裂窗口双读去重（SPLITTING 父子桶同 member 各一份）；
 	// RangeLookup 多区间时跨区间去重（重叠区间谓词的防御，gms 理论上已合并）
-	seen map[string]struct{}
+	seen utils.Set[string]
 
 	// bm 路由判定（Run 期解析）：等值值是否热分裂 / 范围索引是否有分裂
 	bmHotEq    bool
@@ -438,33 +438,33 @@ func (s *RowStream) initRoutes(ctx context.Context) {
 	if e.bm != nil && req.Index != nil {
 		switch req.Kind {
 		case EqLookup:
-			s.seen = map[string]struct{}{}
+			s.seen = utils.NewSet[string]()
 			if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil {
 				for _, v := range req.Values {
-					if reg[keycodec.EscapeValue(v)] {
+					if reg.Has(keycodec.EscapeValue(v)) {
 						s.bmHotEq = true
 						break
 					}
 				}
 			}
 		case RangeLookup:
-			s.seen = map[string]struct{}{}
-			if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil && reg["@range"] {
+			s.seen = utils.NewSet[string]()
+			if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil && reg.Has("@range") {
 				s.bmHotRange = true
 			}
 		}
 	}
 	// RangeLookup 多区间：跨区间去重（与分裂双读共用 seen；单区间零开销）
 	if req.Kind == RangeLookup && len(req.Ranges) > 1 && s.seen == nil {
-		s.seen = map[string]struct{}{}
+		s.seen = utils.NewSet[string]()
 	}
 	// PrefixLookup：字典序副本分裂感知（Eq["l"] 伪条目；当前控制器不触发，
 	// 恒默认桶——读侧挂点先行，启用时双读去重由 seen 承载）
 	if req.Kind == PrefixLookup && e.bm != nil && req.Index != nil {
-		if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil && reg["l"] {
+		if reg, err := e.bm.Registry(ctx, req.Table.Name, req.Index.ID); err == nil && reg.Has("l") {
 			s.bmHotLex = true
 			if s.seen == nil {
-				s.seen = map[string]struct{}{}
+				s.seen = utils.NewSet[string]()
 			}
 		}
 	}
@@ -496,7 +496,7 @@ func (e *Executor) collectEqPKs(ctx context.Context, req *Request) ([]string, er
 // （"a,b"+"c" 与 "a"+"b,c" 撞指纹 = 跨查询串缓存漏行，review 实证）。
 func l1Fingerprint(req *Request) string {
 	vs := append([]string(nil), req.Values...)
-	sort.Strings(vs)
+	slices.Sort(vs)
 	var b strings.Builder
 	b.WriteString(req.Table.Name)
 	b.WriteByte('|')
@@ -679,10 +679,10 @@ func (s *RowStream) fillScatter() error {
 			for _, m := range members {
 				pk := s.stripCovering(m)
 				if s.seen != nil { // 分裂窗口父子桶双读去重
-					if _, dup := s.seen[pk]; dup {
+					if s.seen.Has(pk) {
 						continue
 					}
-					s.seen[pk] = struct{}{}
+					s.seen.Add(pk)
 				}
 				items = append(items, candItem{member: m, pk: pk, val: b.val})
 			}
@@ -816,11 +816,11 @@ func (s *RowStream) fetchColumns() []string {
 	if s.req.Projection == nil {
 		return nil
 	}
-	set := map[string]bool{}
+	set := utils.NewSet[string]()
 	var cols []string
 	add := func(c string) {
-		if c != "" && !strings.EqualFold(c, s.req.Table.PK) && !set[c] {
-			set[c] = true
+		if c != "" && !strings.EqualFold(c, s.req.Table.PK) && !set.Has(c) {
+			set.Add(c)
 			cols = append(cols, c)
 		}
 	}

@@ -608,10 +608,10 @@ func lexMember(value, pk string) string {
 // mergeReceiptUndo 主键复活：把旧回执中的索引条目并入撤销集
 // （回执字段 idx:<i> = bucketKey \x1f member，docs/07 §7.3）。
 func mergeReceiptUndo(ops []indexOp, rcpt map[string]string) []indexOp {
-	known := make(map[string]bool, len(ops))
+	known := make(utils.Set[string], len(ops))
 	for _, d := range ops {
 		if d.undoKey != "" {
-			known[d.undoKey+"\x1f"+d.undoMember] = true
+			known.Add(d.undoKey + "\x1f" + d.undoMember)
 		}
 	}
 	for f, v := range rcpt {
@@ -619,7 +619,7 @@ func mergeReceiptUndo(ops []indexOp, rcpt map[string]string) []indexOp {
 			continue
 		}
 		parts := strings.SplitN(v, "\x1f", 2)
-		if len(parts) != 2 || known[v] {
+		if len(parts) != 2 || known.Has(v) {
 			continue
 		}
 		ops = append(ops, indexOp{undoKey: parts[0], undoMember: parts[1]})

@@ -6,8 +6,22 @@ version: "2"
 # 生成代码（wire_gen.go 等带 DO NOT EDIT 头）由默认 generated=lax 自动豁免。
 linters:
   enable:
+    - depguard
     - misspell
     - unconvert
+  settings:
+    depguard:
+      rules:
+        no-pregeneric-containers:
+          files:
+            - $all
+          deny:
+            - pkg: sort
+              desc: 预泛型 sort API 禁用（v7.0 触发三）——排序用 slices；确需 sort 特有能力先评审
+            - pkg: container/list
+              desc: 非泛型链表禁用（v7.0 触发三）——slice 即足够
+            - pkg: container/ring
+              desc: 非泛型环禁用（v7.0 触发三）
   exclusions:
     rules:
       # 测试清理面（defer Close / go Start）不查 errcheck：测试的错误探测由断言承担，

@@ -87,10 +87,10 @@ func (lm *lexMerger) step() error {
 		}
 		pk := c.member[cut+1:]
 		if s.seen != nil {
-			if _, dup := s.seen[pk]; dup {
+			if s.seen.Has(pk) {
 				continue
 			}
-			s.seen[pk] = struct{}{}
+			s.seen.Add(pk)
 		}
 		items = append(items, candItem{member: c.member, pk: pk, val: c.member[:cut]})
 	}

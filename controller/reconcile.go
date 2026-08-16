@@ -138,13 +138,13 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		vals []string // 与 indexes 对齐（编码形态；"" = NULL/列缺失）
 	}
 	var live []liveRow
-	deadSwept := map[string]bool{} // 死且已清扫
+	deadSwept := utils.NewSet[string]() // 死且已清扫
 	for i, pk := range pks {
 		vals, allNil := hmgetStrings(results[2*i])
 		rowAlive := len(vals) > 0 && !allNil // HMGET 全 nil = 行不存在
 		if !rowAlive {
 			if fmt.Sprint(results[2*i+1]) != "1" {
-				deadSwept[pk] = true
+				deadSwept.Add(pk)
 			}
 			continue
 		}
@@ -201,33 +201,33 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		if err != nil {
 			return err
 		}
-		hit := map[string]bool{}      // pk|desc → 存在
-		badScore := map[string]bool{} // pk|desc → score 不符
+		hit := utils.NewSet[string]()      // pk|desc → 存在
+		badScore := utils.NewSet[string]() // pk|desc → score 不符
 		for i, cres := range fres {
 			if cres == nil {
 				continue
 			}
 			c := checks[i]
 			k := c.pk + "|" + c.desc
-			hit[k] = true
+			hit.Add(k)
 			if c.checkScore {
 				got, err := strconv.ParseFloat(fmt.Sprint(cres), 64)
 				if err != nil || got != c.wantScore {
-					badScore[k] = true
+					badScore.Add(k)
 				}
 			}
 		}
-		seen := map[string]bool{}
+		seen := utils.NewSet[string]()
 		for _, c := range checks {
 			k := c.pk + "|" + c.desc
-			if seen[k] {
+			if seen.Has(k) {
 				continue
 			}
-			seen[k] = true
+			seen.Add(k)
 			switch {
-			case !hit[k]:
+			case !hit.Has(k):
 				r.drift("index_member_missing", def.Name, c.desc, c.pk)
-			case badScore[k]:
+			case badScore.Has(k):
 				r.drift("index_score_mismatch", def.Name, c.desc, c.pk)
 			}
 		}
@@ -237,7 +237,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 	// 范围桶反向由正向的 score 校验覆盖（桶级反查边际收益低，不重复扇出）。
 	var rcmds []kv.Cmd
 	var rchecks []struct{ covering bool }
-	doneBucket := map[string]bool{}
+	doneBucket := utils.NewSet[string]()
 	for _, row := range live {
 		for j, idx := range indexes {
 			if idx.Kind == meta.IndexRange {
@@ -253,10 +253,10 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 			}
 			for _, b := range sh.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
 				bk := keycodec.EqBucketKey(def.Name, idx.ID, encVal, slot, b)
-				if doneBucket[bk] {
+				if doneBucket.Has(bk) {
 					continue
 				}
-				doneBucket[bk] = true
+				doneBucket.Add(bk)
 				rcmds = append(rcmds, kv.Cmd{Name: "ZRANGE", Args: []any{bk, 0, 63}})
 				rchecks = append(rchecks, struct{ covering bool }{covering: len(idx.Covering) > 0})
 			}
@@ -269,15 +269,15 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		}
 		// 候选成员 pk（去重、排除活行）→ 直查行/回执活性：
 		// 行死且回执已清 = 残留泄漏（回执在 = 清扫窗口合法暂态）。
-		livePKs := map[string]bool{}
+		livePKs := utils.NewSet[string]()
 		for _, row := range live {
-			livePKs[row.pk] = true
+			livePKs.Add(row.pk)
 		}
 		cand := map[string]string{} // pk → bucket key（日志描述）
 		for i, cres := range rres {
 			for _, member := range utils.Strings(cres) {
 				pk := rowcodec.MemberPK(member, rchecks[i].covering)
-				if livePKs[pk] || deadSwept[pk] {
+				if livePKs.Has(pk) || deadSwept.Has(pk) {
 					continue // 活行 / 已在取样面判定死且清扫
 				}
 				if _, ok := cand[pk]; !ok {

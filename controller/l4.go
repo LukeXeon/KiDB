@@ -135,7 +135,7 @@ func (m *L4Manager) Tick(ctx context.Context, store *meta.CatalogStore) error {
 	if err != nil {
 		return err
 	}
-	alive := map[string]bool{}
+	alive := utils.NewSet[string]()
 	for _, name := range tables {
 		def, err := store.Load(ctx, name)
 		if err != nil || def == nil {
@@ -156,7 +156,7 @@ func (m *L4Manager) Tick(ctx context.Context, store *meta.CatalogStore) error {
 				if k <= 0 {
 					continue
 				}
-				alive[def.Name+"/"+idx.ID+"/"+f] = true
+				alive.Add(def.Name + "/" + idx.ID + "/" + f)
 				src := keycodec.EqBucketKeyEsc(def.Name, idx.ID, encVal, slot, 0)
 				// 冷度判定：st:{桶} 采样计数器缺失/无增量 = 冷
 				ops := m.sampledOps(ctx, src)
@@ -185,7 +185,7 @@ func (m *L4Manager) Tick(ctx context.Context, store *meta.CatalogStore) error {
 }
 
 // aliveAny 粗匹配（计数器 key 含表/索引前缀）。
-func aliveAny(alive map[string]bool, f string) bool {
+func aliveAny(alive utils.Set[string], f string) bool {
 	for k := range alive {
 		if strings.HasSuffix(k, "/"+f) {
 			return true
