@@ -53,7 +53,9 @@ ComQuery(sql)
 | `TRUNCATE TABLE` | gms 计划节点 | 不支持（无界操作，[01](01-定位架构与TiDB对齐.md) §1.2） |
 | 其余 ALTER（加减列/改类型等） | — | 不实现对应接口 → gms 明确报错 |
 
-列类型白名单（gms 类型语义）：整数族（`types.IsInteger`）、浮点（`IsFloat`）、字符串（`IsText`）、二进制（`IsBinaryType`）、`DATETIME/TIMESTAMP`（存 Unix 秒）、`JSON`。DECIMAL/DATE/TIME/枚举等明确报错（score 精度与编码纪律）。**注意**：`types.IsBinaryType` 把 JSON 算二进制——映射判定必须先 JSON 后二进制（实现教训）。
+列类型白名单（gms 类型语义）：整数族（`types.IsInteger`）、浮点（`IsFloat`）、字符串（`IsText`）、二进制（`IsBinaryType`）、`DATETIME/TIMESTAMP`（存 Unix 秒——**(p) 小数秒精度 DDL 拒绝**，不静默截断，v6.x review 修复）、`JSON`。DECIMAL/DATE/TIME/枚举等明确报错（score 精度与编码纪律）。
+
+**标识符白名单**（key 布局防腐，v6.x review 修复）：表/列/索引名只允许 `[A-Za-z0-9_]`、长度 1-64——标识符原样进入 key 布局（分隔符与 hash tag 语义），反引号包名的任意字符（含 `:`/`{`/`#`/空格）在 DDL 即拒绝。**注意**：`types.IsBinaryType` 把 JSON 算二进制——映射判定必须先 JSON 后二进制（实现教训）。
 
 **Catalog 类型记录（v6.0 起忠实化）**：列定义存两个字段——存储类（编码/索引形态用：整数/浮点/字符串/二进制/时间戳/JSON）与**规范类型文本**（gms 解析产物的 `Type.String()`，如 `varchar(32)`、`bigint`、`datetime`）。`Schema()` 按规范文本忠实重建 gms 类型（varchar 长度不丢）：字符串列呈 VarChar 而非不定长 LongText——这同时是 gms 原生索引校验（MySQL 1170 前缀长度规则）与 KiDB 桶模型**零冲突**的落点（§2.2 纪律项）。预发布阶段不留存量兼容逻辑（字段变更直接演进）。
 
@@ -96,10 +98,10 @@ KiDB 的三个语义开关注册为 gms 原生系统变量（`sql.MysqlSystemVar
 
 ## 2.8 错误码与权限
 
-错误码映射不变：1062 唯一冲突（预约 key 判定，[05](05-写入路径.md) §5.3）/ 1235 超定位（含事务）/ 1290 只读 / 1105 集群类与耗尽类 / `ERR_NO_INDEX`（引擎层全扫闸门拒绝）/ `ERR_ROW_TOO_LARGE` / `ERR_INDEX_LOG_FULL` / `ERR_STALE_METADATA`（内部重试耗尽 1197）。
+错误码映射不变：1062 唯一冲突（预约 key 判定 + 存量查重拒建，[05](05-写入路径.md) §5.3）/ 1235 超定位（含事务、autocommit=0）/ 1290 只读 / 1105 集群类与耗尽类 / `ERR_NO_INDEX`（引擎层全扫闸门拒绝）/ `ERR_ROW_TOO_LARGE` / `ERR_INDEX_LOG_FULL`（异步日志背压）/ `ERR_STALE_METADATA`（内部重试耗尽 1197）。后三者中 `ERR_NO_INDEX`/`ERR_ROW_TOO_LARGE`/`ERR_INDEX_LOG_FULL` 当前落 1105 兜底（HY000）——语义名在消息文本里（如实声明；独立错误码另立项）。
 
 权限边界：账号在引导配置声明（`user/host/password/role`，role ∈ {`rw`,`ro`}）。无 GRANT/REVOKE——部署边界问题（网络隔离 + 账号分级）。**ro 执法点全部在引擎扩展点内**：写入编辑器、DDL 接口、SET GLOBAL 钩子。
 
 ## 2.9 握手兼容矩阵（采纳度生死线）
 
-不变：GUI 工具与驱动的握手探测语句必须礼貌应答——`SELECT @@version` 等由 gms 原生服务；`SHOW TABLES`/`SHOW CREATE TABLE`/`SHOW INDEX` 从 Catalog 生成；`INFORMATION_SCHEMA` 内存视图；`SET NAMES`/`SET autocommit`/`USE db` 会话状态接受；不支持的会话变量返回默认值 + debug 日志，不报错。兼容矩阵与门禁见 [12](12-测试方案.md) §12.5。
+不变：GUI 工具与驱动的握手探测语句必须礼貌应答——`SELECT @@version` 等由 gms 原生服务；`SHOW TABLES`/`SHOW CREATE TABLE`/`SHOW INDEX` 从 Catalog 生成；`INFORMATION_SCHEMA` 内存视图；`SET NAMES`/`USE db` 会话状态接受；**`SET autocommit=0` 显式拒绝**（1235——无事务定位下它是数据谎言：用户以为可 ROLLBACK，写入却逐语句即时提交；v6.x review 修复前曾静默接受）；不支持的会话变量返回默认值 + debug 日志，不报错。兼容矩阵与门禁见 [12](12-测试方案.md) §12.5。

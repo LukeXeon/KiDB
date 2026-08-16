@@ -79,8 +79,17 @@
 | exp 登记册自动细分（体积超阈自动重散列，docs/07 §7.2 容量账） | 分片键机制保留在 keycodec；当前恒 1 分片。**设计取向已定格**（10 亿行+ 才触碰红线，规模未到不强推）：表级状态 `esm:{table}`={active,next,cursor}，按序迁移 slot，读侧按游标选布局（游标单次读取+本地缓存，slot 判定零命令），游标边界 slot 迁移期写双写覆盖并发竞态（对齐桶分裂 SPLITTING 双写模式）。触发条件：Controller 巡检登记册 ZCARD/体积超阈。**前置依赖**：真实负载逼近红线或 10 亿行测试数据集就位，否则机制空转无验证面 |
 | ~~DROP TABLE 大表后台清理作业~~ ✅ | v6.x 落地：阈值内同步、超阈值作业化（c:dropjobs + slot 游标 + 巡检接管 + 残留 key 清理），docs/06 §6.3 |
 | ~~`_ttl` 伪列 SQL 面~~ ✅ | v6.x 落地：schema 挂尾虚拟列（写：>0 设 TTL/0 覆盖默认/NULL 承默认/<0 软删除；读=剩余 TTL 秒 PTTL 自省；UPDATE 不提则保留——write_row.lua v5 keep 分支；SELECT * 含该列，gms 无隐藏列机制的诚实取舍，docs/07 §7.1） |
-| ~~JSON 列 msgp 压缩~~ ✅ | v6.x 落地：rowcodec/json.go JSON↔msgpack 手卷遍历器（key 归一 + float64 数字归一纪律声明）；典型体积 ~85% 实测 |
+| ~~JSON 列压缩~~ ✅→**回退** | v6.x 曾落 msgpack 二进制；2026-08-16 review 用户裁决回退为**归一化文本直存**（15% 体积收益不值得双格式编解码器与二进制不可观测；归一化保 MySQL 语义对齐） |
 
 ## D. 有意不做（红线，docs/14）
 
 跨 slot 多行事务、大表任意 JOIN、强一致读、TRUNCATE、GRANT/REVOKE、MVCC 全家桶、fork TiDB parser、自研 SQL 解析器——见 docs/14 §14.1，立项才动。
+
+## v6.x review 修复批次（2026-08-16）
+
+严格全量 review（逐模块读码 + 实证探针）后的修复批次，明细见 CHANGELOG：
+- P0：RESP2 协议钉住（go-redis 静默 RESP3 实证挂死）；L4 生命周期落地（粒度修正 + Tick 刷新/冷却回收 + 读侧 EXISTS 回退）。
+- P1 ×10：PTTL 失步/HMGET 活性哨兵/撤字段面/改主键判重/标识符白名单/fsp 拒绝/L1 指纹/唯一存量面/异步转义链/DROP 撞名防护。
+- P2 批次：SyncClock 时钟对齐、预约占有者比对、对账随机页+缺失方向、遥测摘除纪律、指标"注册即接线"、autocommit=0 拒绝、生产装配 fail-fast、重试类型化+抖动、读缓存降 RTT、默认账号收窄。
+- 裁决回退：JSON msgpack → 归一化文本直存。
+- 全部探针转正为 `gateway/semantics_test.go` + `controller/l4_test.go` 等回归测试。

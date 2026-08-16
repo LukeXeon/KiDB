@@ -108,3 +108,35 @@
 ## v4.1
 
 - 初版完整设计（项目代号 redisql）：桶模型、写入 Lua、Sweeper、契约章、测试金字塔。
+
+## v6.x review 修复批次（2026-08-16，全量架构 review 后）
+
+**P0**：
+- 适配器显式钉住 RESP2（go-redis v9.22 静默 RESP3 默认值：push 处理器竞态挂死实证 + RESP2-only 平台兼容面）；
+- L4 生命周期落地：注册按桶粒度 `r4:{encVal}:{slot}`（按值注册曾把全 slot 重定向到单 slot 副本）、Controller Tick 驱动 1s 刷新 + 冷却 3 tick 回收、读侧死副本同 pipeline EXISTS 回退源桶、@ver 伴生 key 移除（只写不读 vestigial）。
+
+**P1（正确性，全部有回归测试）**：
+- fetchRows 三修：PTTL 回复无条件消费（死行跳读曾 ri 失步吞行）、_ttl 标记只写活行、HMGET 加 `_ver` 活性哨兵（全 NULL 回复不再误判死行/放产死行）；
+- write_row.lua v6：撤字段面（UPDATE/ODKU 置 NULL 生效）+ 日志容量/回执宽限 ARGV 化（杀硬编码）；
+- UPDATE 改主键撞活行 1062 判重（曾静默覆盖受害者行）；
+- 标识符白名单 `[A-Za-z0-9_]{1,64}`（表/列/索引——key 布局防腐）；
+- DATETIME/TIMESTAMP 小数秒精度 DDL 拒绝（存 Unix 秒，不静默截断）；
+- L1 谓词指纹长度前缀编码（分隔符注入串缓存修复）；
+- CREATE UNIQUE INDEX 存量查重拒建 + 回填补预约 + 冲突中止回滚（存量行曾不受唯一约束）；
+- 异步索引日志转义改 url.QueryEscape 可逆形态（含空格/中文值曾永久不可见）；
+- DROP 清理作业在途同名重建拒绝（旧作业曾永久卡死 + 幽灵行可见）。
+
+**P2**：
+- 时钟对齐：`kidb.SyncClock`（Redis TIME 30s 惰性重同步）接线 Guard/Exec 写读两侧；
+- 预约安全：回滚/清扫释放均占有者比对（歧义窗口收窄）；
+- 对账：随机页采样（首页偏倚修正）+ 唯一预约缺失方向（uniq_reservation_missing）+ bm 路由转义修正；
+- telemetry 候选复核后一律摘除（注册表曾无限增长）；split 协议陈旧分片读修复 ×2；范围桶中位数改 4 分位采样；
+- 指标纪律"注册即接线"：死系列 ×4 删除（sweeper_lag/async_backlog/lua_noscript/contract_violation），扇出/角色变迁/lease/桶成员/合并/热副本/配置变更接线；死 tuning 参数 ×4 删除（hot_qps/merge_*/async_log_alert_ratio）；
+- 会话面：SET autocommit=0 显式拒绝（1235）；NewServer 生产路径 fail-fast（nil-fill 自愈移除）；pollSysvars/角色循环统一生命周期取消；Executor.Close 收 L1 协程；
+- 退避矩阵：类型化错误分类优先（net.Error/EOF/ctx 取消）+ ±25% 抖动；
+- bm.Registry / L4 ReplicaFor 1s 读缓存（每查询省 1-2 RTT）；
+- 默认账号收窄 root@127.0.0.1 + 未配置告警。
+
+**裁决回退**：JSON 列 msgpack 二进制 → 归一化文本直存（用户裁决：15% 体积收益不值得双格式编解码器与二进制不可观测；归一化保 MySQL 语义对齐）。
+
+**docs 对齐**：02/03/05/06/08/09/10/11/12/14 全面同步（含 docs/14 的 SELECT * 含 _ttl 订正、TiDB parser 残留清除、docs/08 §8.4 L4 承诺落地对齐、docs/10 §10.3 指标表诚实化）。
