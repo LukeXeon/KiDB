@@ -76,7 +76,7 @@
 | GUI 客户端握手门禁（DBeaver/Navicat/DataGrip 实连）+ pymysql | 用户明确暂缓；go-sql-driver 已在冒烟覆盖 |
 | ~~对账任务~~ ✅ | v6.x 落地：controller.Reconciler 抽样对账 + 预约 key 残留巡检（`reconcile_drift_total{kind}`，只观测不修复，docs/12 §12.8）；cnt 校准以"cnt 移除"闭环；影子流量比对仍未落地 |
 | 性能基准门禁（k6/自研压测，1 亿行数据集） | docs/12 §12.7 指标在案；内核侧基线基准已落地（exec/bench_test.go + shape_test.go 命令形状不变式），缺真实集群门禁 |
-| exp 登记册自动细分（体积超阈自动重散列，docs/07 §7.2 容量账） | 分片键机制保留在 keycodec；当前恒 1 分片，10 亿行+ 表触碰 8MB 红线（文档已声明） |
+| exp 登记册自动细分（体积超阈自动重散列，docs/07 §7.2 容量账） | 分片键机制保留在 keycodec；当前恒 1 分片。**设计取向已定格**（10 亿行+ 才触碰红线，规模未到不强推）：表级状态 `esm:{table}`={active,next,cursor}，按序迁移 slot，读侧按游标选布局（游标单次读取+本地缓存，slot 判定零命令），游标边界 slot 迁移期写双写覆盖并发竞态（对齐桶分裂 SPLITTING 双写模式）。触发条件：Controller 巡检登记册 ZCARD/体积超阈。**前置依赖**：真实负载逼近红线或 10 亿行测试数据集就位，否则机制空转无验证面 |
 | ~~DROP TABLE 大表后台清理作业~~ ✅ | v6.x 落地：阈值内同步、超阈值作业化（c:dropjobs + slot 游标 + 巡检接管 + 残留 key 清理），docs/06 §6.3 |
 | ~~`_ttl` 伪列 SQL 面~~ ✅ | v6.x 落地：schema 挂尾虚拟列（写：>0 设 TTL/0 覆盖默认/NULL 承默认/<0 软删除；读=剩余 TTL 秒 PTTL 自省；UPDATE 不提则保留——write_row.lua v5 keep 分支；SELECT * 含该列，gms 无隐藏列机制的诚实取舍，docs/07 §7.1） |
 | ~~JSON 列 msgp 压缩~~ ✅ | v6.x 落地：rowcodec/json.go JSON↔msgpack 手卷遍历器（key 归一 + float64 数字归一纪律声明）；典型体积 ~85% 实测 |
