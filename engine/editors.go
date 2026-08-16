@@ -8,8 +8,8 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
-	"kidb/keycodec"
 	"kidb/i18n"
+	"kidb/keycodec"
 	"kidb/rowcodec"
 	"kidb/tuning"
 	"kidb/txguard"

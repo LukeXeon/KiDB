@@ -357,7 +357,6 @@ func FormatBound(v float64) string {
 	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
-
 // encodeBMValue bm 字段值编码（msgp 生成版；int 走十进制字符串）。
 func encodeBMValue(v any) ([]byte, error) {
 	switch t := v.(type) {

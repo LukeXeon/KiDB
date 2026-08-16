@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"kidb/i18n"
 	"regexp"
 	"sort"
 	"strconv"
@@ -133,7 +134,7 @@ func parse(filename, src string) (*Script, error) {
 		return nil, fmt.Errorf("script %s: @keys_desc must declare KEYS[1] as router key", filename)
 	}
 	if m := forbiddenCall.FindString(src); m != "" {
-		return nil, fmt.Errorf("script %s: forbidden call %q (docs/09 §9.2 禁令)", filename, m)
+		return nil, fmt.Errorf("%s", i18n.T("script.forbidden_call", filename, m))
 	}
 	sum := sha1.Sum([]byte(src))
 	s.SHA1 = hex.EncodeToString(sum[:])

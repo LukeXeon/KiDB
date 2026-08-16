@@ -383,7 +383,6 @@ func boundOf(s string) float64 {
 	return f
 }
 
-
 // ==== 合并（分裂的镜像协议，docs/08 §8.3 末段）====
 
 // MergeEq 等值桶合并：当前 2n 子桶并为 n 个（持续低基数的回收路径）。

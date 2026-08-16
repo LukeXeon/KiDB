@@ -25,14 +25,16 @@ import (
 	"kidb/txguard"
 )
 
-// ProvideClient 构造参考适配器（KvClient 契约实现，docs/09 §9.3）。
+// ProvideClient 构造参考适配器并包退避矩阵（docs/09 §9.6：MOVED/CLUSTERDOWN/
+// LOADING/READONLY/TRYAGAIN/超时按类分派退避，耗尽映射哨兵错误）——
+// 装饰在契约面上，全部消费方零感知。
 func ProvideClient(boot kidb.Bootstrap) kidb.KvClient {
-	return goredis.New(boot.Addrs, goredis.Options{
+	return kidb.NewRetryingClient(goredis.New(boot.Addrs, goredis.Options{
 		PoolSize:     boot.PoolSize,
 		ReadTimeout:  boot.ReadTimeout,
 		WriteTimeout: boot.WriteTimeout,
 		ReplicaRead:  boot.ReplicaRead,
-	})
+	}), kidb.DefaultRetryPolicy())
 }
 
 // ProvideKernel 内核组装（Lua 资产加载 + 能力探测，docs/09 §9.4）。

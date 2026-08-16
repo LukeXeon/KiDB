@@ -635,7 +635,6 @@ func oldVerOf(oldRow map[string]string) uint64 {
 	return utils.ParseUint64(oldRow["_ver"])
 }
 
-
 func contains(sp *[]string, s string) bool {
 	for _, x := range *sp {
 		if x == s {

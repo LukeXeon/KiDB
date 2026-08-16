@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"kidb"
-	"kidb/utils"
 	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/script"
+	"kidb/utils"
 )
 
 // L4Manager 管理热桶副本。

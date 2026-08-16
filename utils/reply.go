@@ -3,6 +3,8 @@ package utils
 import (
 	"fmt"
 	"strconv"
+
+	"kidb/i18n"
 )
 
 // reply.go：KvClient 泛化 Do/Pipeline 回复的形态归一（契约 docs/09 §9.3：
@@ -38,7 +40,7 @@ func StringMap(res any) (map[string]string, error) {
 		return m, nil
 	case []any:
 		if len(v)%2 != 0 {
-			return nil, fmt.Errorf("hgetall 回复奇数长度 %d（截断）", len(v))
+			return nil, fmt.Errorf("%s", i18n.T("utils.hgetall_odd", len(v)))
 		}
 		m := make(map[string]string, len(v)/2)
 		for i := 0; i < len(v); i += 2 {
@@ -48,7 +50,7 @@ func StringMap(res any) (map[string]string, error) {
 	case nil:
 		return map[string]string{}, nil
 	}
-	return nil, fmt.Errorf("hgetall 回复形态未知 %T", res)
+	return nil, fmt.Errorf("%s", i18n.T("utils.hgetall_unknown", res))
 }
 
 // AnySlice 归一 EVAL 类返回的数组形态（[]any / []string → []any）。

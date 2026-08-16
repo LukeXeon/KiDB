@@ -32,7 +32,7 @@ func NewFullscanGate(m *metrics.Metrics) func(*sql.Context, string, uint64) erro
 			if m != nil {
 				m.FullscanTotal.Inc()
 			}
-			slog.Warn("kidb 全表遍历（白名单放行）", "table", table, "rows", rows)
+			slog.Warn(i18n.T("log.fullscan_allowlisted"), "table", table, "rows", rows)
 			return nil
 		}
 		return fmt.Errorf("%w: %s", kidb.ErrNoIndex, i18n.T("err.no_index", table, rows))

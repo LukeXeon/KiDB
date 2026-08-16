@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"kidb"
-	"kidb/utils"
 	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/engine"
@@ -18,6 +17,7 @@ import (
 	"kidb/script"
 	"kidb/sweeper"
 	"kidb/tuning"
+	"kidb/utils"
 )
 
 // roles.go：后台角色（docs/08 §8.5）的组件装配与循环驱动。
@@ -202,4 +202,3 @@ func (s *Server) indexerLoop(ctx context.Context) {
 		_ = utils.SleepCtx(ctx, indexerTick)
 	}
 }
-

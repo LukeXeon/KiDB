@@ -6,9 +6,9 @@ import (
 	"math"
 	"strconv"
 
-	"kidb/utils"
 	"kidb/keycodec"
 	"kidb/rowcodec"
+	"kidb/utils"
 )
 
 // pushdown.go：服务端谓词下推（docs/04 §4.2）。

@@ -24,7 +24,8 @@ func New(t *testing.T) (kidb.KvClient, *script.Registry, *miniredis.Miniredis) {
 	t.Helper()
 	m := miniredis.RunT(t)
 	addr := m.Addr()
-	cli := goredis.New([]string{addr}, goredis.Options{
+	// 与生产同形：适配器外包退避矩阵装饰器（di.ProvideClient 同款）
+	raw := goredis.New([]string{addr}, goredis.Options{
 		ClusterSlots: func(context.Context) ([]redis.ClusterSlot, error) {
 			return []redis.ClusterSlot{{
 				Start: 0,
@@ -33,7 +34,8 @@ func New(t *testing.T) (kidb.KvClient, *script.Registry, *miniredis.Miniredis) {
 			}}, nil
 		},
 	})
-	t.Cleanup(func() { _ = cli.Close() })
+	cli := kidb.NewRetryingClient(raw, kidb.DefaultRetryPolicy())
+	t.Cleanup(func() { _ = raw.Close() })
 	reg, err := script.Load()
 	if err != nil {
 		t.Fatalf("script.Load: %v", err)

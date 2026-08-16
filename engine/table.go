@@ -10,9 +10,9 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
-	"kidb/keycodec"
 	"kidb/exec"
 	"kidb/i18n"
+	"kidb/keycodec"
 	"kidb/meta"
 )
 
@@ -75,7 +75,7 @@ func (t *Table) fullSchema() sql.Schema {
 	for _, c := range t.def.Columns {
 		gt, err := columnTypeFromText(c.TypeText)
 		if err != nil {
-			panic(fmt.Sprintf("engine: 表 %s 列 %s 类型文本非法: %v", t.def.Name, c.Name, err))
+			panic(fmt.Sprintf("%s", i18n.T("engine.bad_typetext", t.def.Name, c.Name, err)))
 		}
 		sch = append(sch, &sql.Column{
 			Name:          c.Name,

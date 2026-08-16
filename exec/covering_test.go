@@ -16,7 +16,6 @@ import (
 	"kidb/txguard"
 )
 
-
 func seedCoverTable() *meta.TableDef {
 	return &meta.TableDef{
 		Name: "users",
