@@ -75,7 +75,7 @@
 | 多节点集群契约场景（MOVED/ASK 迁移窗口） | contract/ 现为单节点全 slot；多节点编排需 docker 环境（CI 项） |
 | GUI 客户端握手门禁（DBeaver/Navicat/DataGrip 实连）+ pymysql | 用户明确暂缓；go-sql-driver 已在冒烟覆盖 |
 | 对账任务（抽样对账/cnt 校准/预约 key 残留巡检） | docs/12 §12.8；长期运行项 |
-| 性能基准门禁（k6/自研压测，1 亿行数据集） | docs/12 §12.7 指标在案 |
+| 性能基准门禁（k6/自研压测，1 亿行数据集） | docs/12 §12.7 指标在案；内核侧基线基准已落地（exec/bench_test.go + shape_test.go 命令形状不变式），缺真实集群门禁 |
 | exp 登记册自动细分（体积超阈自动重散列，docs/07 §7.2 容量账） | 分片键机制保留在 keycodec；当前恒 1 分片，10 亿行+ 表触碰 8MB 红线（文档已声明） |
 | DROP TABLE 大表后台清理作业 | 当前同步清理，小表成立 |
 | `_ttl` 伪列 SQL 面（行级 TTL 显式读写） | docs/07 §7.1；当前表级 default_ttl 已生效 |

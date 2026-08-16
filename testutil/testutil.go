@@ -20,7 +20,7 @@ import (
 // New 起一台 miniredis，返回经参考适配器接线的 Client 与脚本注册表。
 // ClusterSlots 覆盖把全部 slot 指到这台单实例——单实例无 CROSSSLOT 强制，
 // 跨 slot 契约由真实集群的一致性测试套件覆盖（docs/12 §12.4）。
-func New(t *testing.T) (kidb.KvClient, *script.Registry, *miniredis.Miniredis) {
+func New(t testing.TB) (kidb.KvClient, *script.Registry, *miniredis.Miniredis) {
 	t.Helper()
 	m := miniredis.RunT(t)
 	addr := m.Addr()
