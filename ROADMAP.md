@@ -35,6 +35,14 @@
 - **忠实类型往返**：columnTypeFromText 白名单文本解析（非 gms ParseColumnTypeString——后者每次全量 vitess 解析过重）；DEFAULT/ON UPDATE/列级 COLLATE 同步显式拒绝（静默丢弃违背设计原点）；
 - **DDL COMMENT payload 内联多索引**：CREATE TABLE 内联索引经 plan.AlterIndex 逐索引调 CreateIndex（gms 路径实证），空表快速通道绕开单 _job 槽位。
 
+## v7.0 索引槽位独立化（**提案稿已产出，待裁决**）
+
+> 触发（用户裁决，2026-08-16）：一致性目标从"行+索引原子可见"降为 **Redis 级**
+>（缓存语义：正常路径零窗口、故障路径有界收敛以 miss 呈现、查询精确性不放），
+> 换 16384 穷举扇出消亡。设计推导稿 = [docs/v7.0-索引槽位独立化.md](docs/v7.0-索引槽位独立化.md)
+>（含版本戳 member 不漏行不变式证明、key 布局对照表、代价诚实清单）。
+> 实施阶段划分见该文档 §11；**裁决通过前不动代码，docs/01~14 仍是 v6 契约**。
+
 ## A. 正确性执法缺口——**已完成（v5.1 批次）**
 
 - JOIN 分档执法（gateway/sqlguard.go：档 1 主键等值/档 2 维表广播放行，档 4 报错 1235）；
