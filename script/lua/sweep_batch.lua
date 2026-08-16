@@ -1,6 +1,6 @@
 -- @name sweep_batch
 -- @version 3
--- @keys_desc KEYS[1..N]=row_key(router); KEYS[N+1..2N]=rcpt_key
+-- @keys_desc KEYS[1..N]=row_key（KEYS[1] 为路由 key）; KEYS[N+1..2N]=rcpt_key
 -- @idempotent true
 --
 -- Sweeper 行 slot 清扫批（docs/07 §7.3，v7.0 收窄形态）。

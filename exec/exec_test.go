@@ -106,8 +106,7 @@ func TestEqLookupWithValidation(t *testing.T) {
 
 	// 校验拦截演练：桶里放脏 member（模拟异步索引残留/分裂中间态），
 	// 回表校验必须拦截（docs/04 §4.3）。
-	slot := keycodec.Slot(keycodec.RowKey(tbl.Name, "1"))
-	dirty := keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0)
+	dirty := keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", 0)
 	// 行 1 实际是 shanghai；把行 2（beijing）塞进 shanghai 桶制造脏数据
 	_, err := cli.Do(ctx, "ZADD", dirty, 0, "2")
 	require.NoError(t, err)

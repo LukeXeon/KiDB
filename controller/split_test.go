@@ -7,12 +7,12 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"kidb/bucketmap"
 	"kidb/exec"
-	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/testutil"
 	"kidb/txguard"
@@ -34,14 +34,12 @@ func splitTable() *meta.TableDef {
 	}
 }
 
-// sameSlotPKs 生成落在指定 slot 的 pk（测试用）。
-func sameSlotPKs(table string, slot uint16, n int, rng *rand.Rand) []string {
-	var out []string
-	for len(out) < n {
-		pk := strconv.Itoa(rng.Intn(1 << 30))
-		if keycodec.Slot(keycodec.RowKey(table, pk)) == slot {
-			out = append(out, pk)
-		}
+// plainPKs 生成 n 个顺序 pk（v7.0：桶按值寻址，pk 的 slot 不再影响
+// 桶落点——"同值 N 行"即单桶 N 成员，无需同 slot 构造）。
+func plainPKs(n int) []string {
+	out := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		out = append(out, strconv.Itoa(i))
 	}
 	return out
 }
@@ -57,10 +55,9 @@ func TestSplitEqUnderConcurrentWrites(t *testing.T) {
 	e.SetBucketMap(bm)
 	tbl := splitTable()
 	ctx := context.Background()
-	rng := rand.New(rand.NewSource(7))
 
-	slot := uint16(1234)
-	pks := sameSlotPKs(tbl.Name, slot, 300, rng)
+	pks := plainPKs(300)
+	rng := rand.New(rand.NewSource(7))
 
 	// 种子：200 行 hot=shanghai
 	var mu sync.Mutex
@@ -104,7 +101,7 @@ func TestSplitEqUnderConcurrentWrites(t *testing.T) {
 	}()
 
 	// 分裂（中途多次校验查询完整性）
-	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "shanghai", slot))
+	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "shanghai", false))
 	close(stop)
 	wg.Wait()
 
@@ -118,7 +115,7 @@ func TestSplitEqUnderConcurrentWrites(t *testing.T) {
 	}
 
 	// 二次分裂（2→4 桶，验证续作/倍增路径）
-	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "shanghai", slot))
+	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "shanghai", false))
 	eq = drainEq(t, e, tbl, "shanghai")
 	require.Equal(t, countAlive(alive), len(eq), "二次分裂后仍须一致")
 }
@@ -129,14 +126,13 @@ func TestSplitRangeCoversAll(t *testing.T) {
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	sp := NewSplitter(cli, reg, bm)
+	sp.grace = 50 * time.Millisecond
 	e := exec.New(cli, reg)
 	e.SetBucketMap(bm)
 	tbl := splitTable()
 	ctx := context.Background()
-	rng := rand.New(rand.NewSource(11))
 
-	slot := uint16(77)
-	pks := sameSlotPKs(tbl.Name, slot, 200, rng)
+	pks := plainPKs(200)
 	for i, pk := range pks {
 		_, err := g.WriteRow(ctx, txguard.WriteReq{
 			Table: tbl, PK: pk,
@@ -145,7 +141,7 @@ func TestSplitRangeCoversAll(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, sp.SplitRange(ctx, tbl.Name, "idx_age", slot, 0))
+	require.NoError(t, sp.SplitRange(ctx, tbl.Name, "idx_age", 0, false))
 
 	// 分裂后多个区间查询的完整性
 	for _, q := range [][2]int{{0, 199}, {50, 149}, {0, 60}, {100, 199}} {
@@ -215,24 +211,23 @@ func TestMergeEqAfterSplit(t *testing.T) {
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	sp := NewSplitter(cli, reg, bm)
+	sp.grace = 50 * time.Millisecond
 	e := exec.New(cli, reg)
 	e.SetBucketMap(bm)
 	tbl := splitTable()
 	ctx := context.Background()
-	rng := rand.New(rand.NewSource(19))
 
-	slot := uint16(555)
-	pks := sameSlotPKs(tbl.Name, slot, 120, rng)
+	pks := plainPKs(120)
 	for _, pk := range pks {
 		_, err := g.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: pk, Fields: map[string]string{"city": "hz"}})
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "hz", slot))
+	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "hz", false))
 	require.Equal(t, 120, len(drainEq(t, e, tbl, "hz")), "分裂后")
 
 	// 合并回 1 桶
-	require.NoError(t, sp.MergeEq(ctx, tbl.Name, "idx_city", "hz", slot))
+	require.NoError(t, sp.MergeEq(ctx, tbl.Name, "idx_city", "hz", false))
 	require.Equal(t, 120, len(drainEq(t, e, tbl, "hz")), "合并后行数不变")
 
 	// 合并后再写仍正确（落到合并目标桶）
@@ -241,7 +236,7 @@ func TestMergeEqAfterSplit(t *testing.T) {
 	require.Equal(t, 120, len(drainEq(t, e, tbl, "hz")))
 
 	// 再分裂仍正确（续作性）
-	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "hz", slot))
+	require.NoError(t, sp.SplitEq(ctx, tbl.Name, "idx_city", "hz", false))
 	require.Equal(t, 120, len(drainEq(t, e, tbl, "hz")), "再分裂后")
 }
 
@@ -251,24 +246,23 @@ func TestMergeRangeAfterSplit(t *testing.T) {
 	bm := bucketmap.New(cli, reg)
 	g := txguard.New(cli, reg, bm)
 	sp := NewSplitter(cli, reg, bm)
+	sp.grace = 50 * time.Millisecond
 	e := exec.New(cli, reg)
 	e.SetBucketMap(bm)
 	tbl := splitTable()
 	ctx := context.Background()
-	rng := rand.New(rand.NewSource(23))
 
-	slot := uint16(999)
-	pks := sameSlotPKs(tbl.Name, slot, 100, rng)
+	pks := plainPKs(100)
 	for i, pk := range pks {
 		_, err := g.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: pk, Fields: map[string]string{"age": strconv.Itoa(i)}})
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, sp.SplitRange(ctx, tbl.Name, "idx_age", slot, 0))
+	require.NoError(t, sp.SplitRange(ctx, tbl.Name, "idx_age", 0, false))
 	require.Equal(t, 100, len(drainRange(t, e, tbl, 0, 99)), "分裂后全覆盖")
 
 	// 找左子桶（idx 递增，左子桶 = Children[0]）
-	sh, err := bm.LoadFresh(ctx, tbl.Name, "idx_age", slot)
+	sh, err := bm.LoadFresh(ctx, tbl.Name, "idx_age")
 	require.NoError(t, err)
 	var leftIdx int
 	for _, rb := range sh.Ranges {
@@ -276,6 +270,6 @@ func TestMergeRangeAfterSplit(t *testing.T) {
 			leftIdx = rb.Idx // [0, mid)
 		}
 	}
-	require.NoError(t, sp.MergeRange(ctx, tbl.Name, "idx_age", slot, leftIdx))
+	require.NoError(t, sp.MergeRange(ctx, tbl.Name, "idx_age", leftIdx, false))
 	require.Equal(t, 100, len(drainRange(t, e, tbl, 0, 99)), "合并后全覆盖")
 }

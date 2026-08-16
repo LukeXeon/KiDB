@@ -40,10 +40,9 @@ func TestL4Lifecycle(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	slot := keycodec.Slot(keycodec.RowKey("lt", "1"))
-	src := keycodec.EqBucketKeyEsc("lt", "idx_city", "hot", slot, 0)
+	src := keycodec.EqBucketKeyEsc("lt", "idx_city", "hot", 0)
 	l4 := NewL4(cli, reg)
-	require.NoError(t, l4.Activate(ctx, "lt", "idx_city", "hot", slot, src, 2))
+	require.NoError(t, l4.Activate(ctx, "lt", "idx_city", src, 2))
 
 	ex := exec.New(cli, reg)
 	ex.SetL4(l4)
@@ -72,7 +71,7 @@ func TestL4Lifecycle(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		require.NoError(t, l4.Tick(ctx, store))
 	}
-	res, err := cli.Do(ctx, "HGET", keycodec.BucketMapHotKey("lt", "idx_city"), l4Field("hot", slot))
+	res, err := cli.Do(ctx, "HGET", keycodec.BucketMapHotKey("lt", "idx_city"), l4Field(src))
 	require.NoError(t, err)
 	require.Nil(t, res, "冷却 3 tick 后注册表应摘除")
 }
@@ -95,10 +94,9 @@ func TestL4TickRefresh(t *testing.T) {
 	_, err := guard.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: "1", Fields: map[string]string{"city": "hot"}})
 	require.NoError(t, err)
 
-	slot := keycodec.Slot(keycodec.RowKey("lr", "1"))
-	src := keycodec.EqBucketKeyEsc("lr", "idx_city", "hot", slot, 0)
+	src := keycodec.EqBucketKeyEsc("lr", "idx_city", "hot", 0)
 	l4 := NewL4(cli, reg)
-	require.NoError(t, l4.Activate(ctx, "lr", "idx_city", "hot", slot, src, 2))
+	require.NoError(t, l4.Activate(ctx, "lr", "idx_city", src, 2))
 
 	// 有采样信号（模拟遥测命中）→ Tick 刷新续期 → 副本在 FF 30s 后仍活
 	_, err = cli.Do(ctx, "HINCRBY", "st:"+src, "ops", 5)

@@ -75,7 +75,7 @@ func TestDropTableJob(t *testing.T) {
 	// 强制作业化 + 缩小批推进（模拟多轮续作）
 	tuning.OverrideForTest(t, func(tn *tuning.Tuning) {
 		tn.Controller.DropSyncMaxRows = 0
-		tn.Controller.JobSlotsPerTick = 2048
+		tn.Controller.JobRowsPerTick = 10
 	})
 
 	// DROP（引擎层 TableDropper 路径）
@@ -107,7 +107,7 @@ func TestDropTableJob(t *testing.T) {
 	}
 	jobs, err = store.ListDropJobs(ctx)
 	require.NoError(t, err)
-	require.Len(t, jobs, 1, "4 轮（2048 slot/轮）后作业应在推进中（游标 >0 未完成）")
+	require.Len(t, jobs, 1, "4 轮（10 行/轮）后作业应在推进中（游标 >0 未完成）")
 	require.Positive(t, jobs[0].Cursor)
 
 	// 换实例接管（巡检接管语义）跑到完成
@@ -123,18 +123,15 @@ func TestDropTableJob(t *testing.T) {
 	for i := 1; i <= 60; i++ {
 		require.False(t, p.Exists(keycodec.RowKey(tbl.Name, fmt.Sprint(i))), "行 %d 应已删除", i)
 	}
-	for slot := 0; slot < keycodec.NumSlots; slot += 4096 { // 抽查 slot
-		st := uint16(slot)
-		require.Empty(t, p.Get(keycodec.ExpKeyN(tbl.Name, st, 0, 1)), "登记册应已清")
-		for _, idx := range []string{"idx_city", "idx_age"} {
-			require.False(t, p.Exists(keycodec.BucketMapSlotKey(tbl.Name, idx, st)), "bm 分片应已清")
-		}
+	require.Empty(t, p.Get(keycodec.ExpKeyN(tbl.Name, 0, 1)), "登记册应已清")
+	for _, idx := range []string{"idx_city", "idx_age"} {
+		require.False(t, p.Exists(keycodec.BucketMapKey(tbl.Name, idx)), "bm 文档应已清")
 	}
 	require.False(t, p.Exists(keycodec.UniqueKey(tbl.Name, "uk_email", "u1@x.com")), "唯一预约应已释放")
 	require.False(t, p.Exists(keycodec.HLLKey(tbl.Name, "idx_age")), "HLL 应已清")
 	require.False(t, p.Exists(keycodec.BucketMapHotKey(tbl.Name, "idx_city")), "热值注册表应已清")
-	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "c1", keycodec.Slot(keycodec.RowKey(tbl.Name, "1")), 0), "1"), "等值桶成员应已清")
-	require.Empty(t, p.ZScore(keycodec.RangeBucketKey(tbl.Name, "idx_age", keycodec.Slot(keycodec.RowKey(tbl.Name, "1")), 0), "1"), "范围桶成员应已清")
+	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "c1", 0), "1"), "等值桶成员应已清")
+	require.Empty(t, p.ZScore(keycodec.RangeBucketKey(tbl.Name, "idx_age", 0), "1"), "范围桶成员应已清")
 }
 
 // TestDropTableSmallSync 小表维持同步路径（阈值内无作业登记）。
@@ -194,7 +191,7 @@ func TestDropJobBlocksRecreate(t *testing.T) {
 
 	tuning.OverrideForTest(t, func(tn *tuning.Tuning) {
 		tn.Controller.DropSyncMaxRows = 0
-		tn.Controller.JobSlotsPerTick = keycodec.NumSlots
+		tn.Controller.JobRowsPerTick = 1 << 20
 	})
 
 	deps := engine.Deps{Client: cli, Reg: reg, Store: store, Cache: cache, Exec: ex, Guard: guard}

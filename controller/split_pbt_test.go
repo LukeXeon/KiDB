@@ -2,8 +2,8 @@ package controller
 
 import (
 	"context"
-	"math/rand"
 	"testing"
+	"time"
 
 	"pgregory.net/rapid"
 
@@ -20,13 +20,12 @@ func TestSplitMergePBT(t *testing.T) {
 	if testing.Short() {
 		t.Skip("PBT 长测（-short 跳过；CI 全量跑，docs/12 §12.9）")
 	}
-	slot := uint16(2048)
 	values := []string{"red", "green", "blue"}
 
 	cli, reg, m := testutil.New(t)
 	ctx := context.Background()
 	tbl := splitTable()
-	pks := sameSlotPKs(tbl.Name, slot, 400, rand.New(rand.NewSource(31)))
+	pks := plainPKs(400)
 
 	rapid.Check(t, func(rt *rapid.T) {
 		// 每个 rapid 用例重置存储（组件轻量重建，避免状态跨用例泄漏）
@@ -34,6 +33,7 @@ func TestSplitMergePBT(t *testing.T) {
 		bm := bucketmap.New(cli, reg)
 		g := txguard.New(cli, reg, bm)
 		sp := NewSplitter(cli, reg, bm)
+		sp.grace = 50 * time.Millisecond // 顺序交错 + 共享 bm 实例（LoadFresh 即失效传播）
 		e := exec.New(cli, reg)
 		e.SetBucketMap(bm)
 
@@ -70,14 +70,14 @@ func TestSplitMergePBT(t *testing.T) {
 			},
 			"split": func(rt *rapid.T) {
 				val := rapid.SampledFrom(values).Draw(rt, "valsplit")
-				if err := sp.SplitEq(ctx, tbl.Name, "idx_city", val, slot); err != nil {
+				if err := sp.SplitEq(ctx, tbl.Name, "idx_city", val, false); err != nil {
 					rt.Fatalf("split 协议错误: %v", err)
 				}
 				ops++
 			},
 			"merge": func(rt *rapid.T) {
 				val := rapid.SampledFrom(values).Draw(rt, "valmerge")
-				if err := sp.MergeEq(ctx, tbl.Name, "idx_city", val, slot); err != nil {
+				if err := sp.MergeEq(ctx, tbl.Name, "idx_city", val, false); err != nil {
 					rt.Fatalf("merge 协议错误: %v", err)
 				}
 				ops++

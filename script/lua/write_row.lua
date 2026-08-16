@@ -17,10 +17,12 @@
 --   [4] expected_old_ver（"-1"=不校验；与行内 _ver 不符返回 stale）
 --   [5] logCap = 异步日志容量上限（tuning txguard.async_log_capacity）
 --   [6] graceMs = 回执宽限毫秒（tuning sweeper.receipt_grace_ms）
---   [7] A = 异步日志描述符个数；每个 2 字段（自 ARGV[8] 起）：
---         log_key_idx（相对 KEYS[3] 起，1 起）、redo_member（pk\x1f旧值\x1f新值）
+--   [7] A = 异步日志描述符个数；每个 3 字段（自 ARGV[8] 起）：
+--         log_key_idx（相对 KEYS[3] 起，1 起）、redo_member（pk\x1f旧值\x1f新值）、
+--         old_iv（旧 member 创建版本戳——Indexer 精确撤销依据，docs/05 §5.1 _iv 纪律）
 --   W 追加：R = 回执重建条目数，R×(bucket_key, member)——回执记撤销信息
---         （member 由本脚本追加 \x1fnewVer 后写入；调用方索引段同规则建 member）
+--         （member 已含预期版本戳（oldVer+1，调用方预计算——expectOld 校验后
+--           HINCRBY 必得），本脚本原样写入；调用方索引段用同值 ZADD）
 --   W 追加：F = 字段数，F×(field, value)
 --   W 追加：D = 撤字段数，D×field（旧有新无 → HDEL；UPDATE 置 NULL 语义面）
 --   W 追加：U = 唯一预约数，U×(index_id, reservation_key)（记入回执 __uniq: 字段）
@@ -61,8 +63,8 @@ end
 local p = 8
 local adescs = {}
 for i = 1, A do
-  adescs[i] = { logKey = tonumber(ARGV[p]), redoMember = ARGV[p+1] }
-  p = p + 2
+  adescs[i] = { logKey = tonumber(ARGV[p]), redoMember = ARGV[p+1], oldIV = ARGV[p+2] }
+  p = p + 3
 end
 for i = 1, A do
   local d = adescs[i]
@@ -77,7 +79,7 @@ if op == 'D' then
     -- 异步索引：删除也走日志（墓碑条目，新值为空；容量已预检）
     for i = 1, A do
       local d = adescs[i]
-      redis.call('RPUSH', KEYS[2 + d.logKey], d.redoMember .. string.char(31) .. tostring(oldVer))
+      redis.call('RPUSH', KEYS[2 + d.logKey], d.redoMember .. string.char(31) .. d.oldIV .. string.char(31) .. tostring(oldVer))
     end
     redis.call('DEL', rowkey)
     redis.call('DEL', rcptkey)
@@ -118,10 +120,10 @@ end
 
 local newVer = redis.call('HINCRBY', rowkey, '_ver', 1)
 
--- 异步索引：追加变更日志（条目 = pk\x1f旧值\x1f新值\x1fver；Indexer 消费 docs/05 §5.2）
+-- 异步索引：追加变更日志（条目 = pk\x1f旧值\x1f新值\x1f旧IV\x1fver；Indexer 消费 docs/05 §5.2）
 for i = 1, A do
   local d = adescs[i]
-  redis.call('RPUSH', KEYS[2 + d.logKey], d.redoMember .. string.char(31) .. tostring(newVer))
+  redis.call('RPUSH', KEYS[2 + d.logKey], d.redoMember .. string.char(31) .. d.oldIV .. string.char(31) .. tostring(newVer))
 end
 
 -- 回执重建（撤销信息 = 桶key + 精确 member（追加 newVer 版本戳））+ 行 TTL
@@ -132,7 +134,7 @@ if ttlms == -2 then
   for i = 1, R do
     local d = rdescs[i]
     redis.call('HSET', rcptkey, 'idx:' .. i,
-      d.bucket .. string.char(31) .. d.member .. string.char(31) .. tostring(newVer))
+      d.bucket .. string.char(31) .. d.member)
   end
   local U = tonumber(ARGV[p]); p = p + 1
   for i = 1, U do
@@ -149,7 +151,7 @@ elseif ttlms > 0 then
   for i = 1, R do
     local d = rdescs[i]
     redis.call('HSET', rcptkey, 'idx:' .. i,
-      d.bucket .. string.char(31) .. d.member .. string.char(31) .. tostring(newVer))
+      d.bucket .. string.char(31) .. d.member)
   end
   local U = tonumber(ARGV[p]); p = p + 1
   for i = 1, U do

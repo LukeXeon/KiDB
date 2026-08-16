@@ -155,9 +155,9 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 		ver, _ := strconv.ParseUint(fields["_ver"], 10, 64)
 		live = append(live, liveRow{pk: pk, ver: ver, fields: fields})
 	}
-	liveVer := map[string]uint64{}
+	liveByPK := map[string]liveRow{}
 	for _, row := range live {
-		liveVer[row.pk] = row.ver
+		liveByPK[row.pk] = row
 	}
 
 	// 3. 正向：活行的索引成员必须存在（同步索引无合法缺失窗口；版本戳精确 member）。
@@ -181,7 +181,7 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 			}
 			switch idx.Kind {
 			case meta.IndexEq, meta.IndexUnique:
-				member := expectedMember(idx, row.pk, row.ver, row.fields)
+				member := expectedMember(idx, row)
 				for _, b := range d.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
 					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, encVal, b), member}})
 					checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID + "=" + encVal})
@@ -199,7 +199,7 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 				if err != nil {
 					continue
 				}
-				member := expectedMember(idx, row.pk, row.ver, row.fields)
+				member := expectedMember(idx, row)
 				for _, b := range d.ReadBucketsRange(score, score) {
 					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, b), member}})
 					checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID, wantScore: score, checkScore: true})
@@ -250,6 +250,7 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 	var rcmds []kv.Cmd
 	var rchecks []struct {
 		bucket   string
+		idxID    string
 		covering bool
 	}
 	doneBucket := utils.NewSet[string]()
@@ -275,8 +276,9 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 				rcmds = append(rcmds, kv.Cmd{Name: "ZRANGE", Args: []any{bk, 0, 63}})
 				rchecks = append(rchecks, struct {
 					bucket   string
+					idxID    string
 					covering bool
-				}{bucket: bk, covering: len(idx.Covering) > 0})
+				}{bucket: bk, idxID: idx.ID, covering: len(idx.Covering) > 0})
 			}
 		}
 	}
@@ -285,28 +287,38 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 		if err != nil {
 			return err
 		}
-		// 候选收集：孤儿方向（行死且回执清）/ 版本漂移方向（活行 ver 不符）/
+		// 候选收集：孤儿方向（行死且回执清）/ 版本漂移方向（member.ver ≠ _iv）/
 		// 登记册缺失方向（无 exp 登记）
 		cand := map[string]string{} // pk → bucket key（日志描述）
-		var driftClean []kv.Cmd   // 版本漂移清理（ZREM 精确脏 member，幂等）
+		var driftClean []kv.Cmd     // 版本漂移清理（ZREM 精确脏 member，幂等）
 		expCheck := utils.NewSet[string]()
 		for i, cres := range rres {
 			for _, member := range utils.Strings(cres) {
 				pk := rowcodec.MemberPK(member, rchecks[i].covering)
-				if deadSwept.Has(pk) {
-					if _, ok := cand[pk]; !ok {
-						cand[pk] = rchecks[i].bucket
+				row, isLive := liveByPK[pk]
+				if isLive {
+					// 版本判定基准 = _iv（member 创建版本，非当前行版本，docs/05 §5.1）
+					mver, ok := rowcodec.MemberVer(member, rchecks[i].covering)
+					if ok {
+						wantVer := row.ver
+						if v, err := strconv.ParseUint(row.fields["_iv:"+rchecks[i].idxID], 10, 64); err == nil && v > 0 {
+							wantVer = v
+						}
+						if mver != wantVer {
+							// 例外①：member 版本漂移（两段写交错脏残留）→ 观测 + 幂等清理
+							r.drift("index_member_ver_stale", def.Name, rchecks[i].bucket, pk)
+							driftClean = append(driftClean, kv.Cmd{Name: "ZREM", Args: []any{rchecks[i].bucket, member}})
+						}
 					}
+					expCheck.Add(pk) // 登记册缺失方向只覆盖活行（幽灵/死行归孤儿与清扫面）
 					continue
 				}
-				rowVer, isLive := liveVer[pk]
-				mver, ok := rowcodec.MemberVer(member, rchecks[i].covering)
-				if isLive && ok && mver != rowVer {
-					// 例外①：member 版本漂移（两段写交错脏残留）→ 观测 + 幂等清理
-					r.drift("index_member_ver_stale", def.Name, rchecks[i].bucket, pk)
-					driftClean = append(driftClean, kv.Cmd{Name: "ZREM", Args: []any{rchecks[i].bucket, member}})
+				if deadSwept.Has(pk) {
+					continue // 死且已清扫（v6 语义：清扫完成侧由 sweeper 负责）
 				}
-				expCheck.Add(pk)
+				if _, ok := cand[pk]; !ok {
+					cand[pk] = rchecks[i].bucket
+				}
 			}
 		}
 		if len(driftClean) > 0 {
@@ -435,16 +447,22 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 	return nil
 }
 
-// expectedMember 构造期望 member（版本戳精确，docs/05 §5.1）。
-func expectedMember(idx *meta.IndexDef, pk string, ver uint64, fields map[string]string) string {
+// expectedMember 构造期望 member（版本戳精确，docs/05 §5.1）：
+// 版本取行内 `_iv:{idxID}`（member 创建版本——值最后一次写入时的行版本，
+// 缺失回退当前行版本，与 txguard ivOf 同一纪律）。
+func expectedMember(idx *meta.IndexDef, row liveRow) string {
+	ver := row.ver
+	if v, err := strconv.ParseUint(row.fields["_iv:"+idx.ID], 10, 64); err == nil && v > 0 {
+		ver = v
+	}
 	if len(idx.Covering) == 0 {
-		return rowcodec.PlainMember(pk, ver)
+		return rowcodec.PlainMember(row.pk, ver)
 	}
 	covers := make([]string, 0, len(idx.Covering))
 	for _, c := range idx.Covering {
-		covers = append(covers, fields[c])
+		covers = append(covers, row.fields[c])
 	}
-	return rowcodec.EncodeMember(pk, ver, covers)
+	return rowcodec.EncodeMember(row.pk, ver, covers)
 }
 
 // drift 记录一次漂移（指标 + 告警；观测纪律，两个幂等例外见头注）。

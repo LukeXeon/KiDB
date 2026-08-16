@@ -12,6 +12,7 @@ import (
 	"kidb"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/rowcodec"
 	"kidb/testutil"
 )
 
@@ -36,10 +37,6 @@ func testTable() *meta.TableDef {
 // ColIntAlias 避免测试样板里重复点号（本地别名）。
 const ColIntAlias = meta.ColInt
 
-func slotOf(tbl *meta.TableDef, pk string) uint16 {
-	return keycodec.Slot(keycodec.RowKey(tbl.Name, pk))
-}
-
 // TestWriteRowInvariants 覆盖 docs/12 §12.2 的七项一致性断言主路径：
 // 行、等值桶、范围桶、字典序副本、exp、rcpt（+唯一预约）。
 func TestWriteRowInvariants(t *testing.T) {
@@ -49,11 +46,10 @@ func TestWriteRowInvariants(t *testing.T) {
 	p := testutil.NewProbe(t, cli)
 	ctx := context.Background()
 
-	slot := slotOf(tbl, "1")
-	eq := keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0)
-	rg := keycodec.RangeBucketKey(tbl.Name, "idx_age", slot, 0)
-	lex := keycodec.LexBucketKey(tbl.Name, "idx_city", slot, 0)
-	exp := keycodec.ExpKey(tbl.Name, slot)
+	eq := keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", 0)
+	rg := keycodec.RangeBucketKey(tbl.Name, "idx_age", 0)
+	lex := keycodec.LexBucketKey(tbl.Name, "idx_city", 0)
+	exp := keycodec.ExpKey(tbl.Name)
 	rcpt := keycodec.ReceiptKey(tbl.Name, "1")
 	row := keycodec.RowKey(tbl.Name, "1")
 	resv := keycodec.UniqueKey(tbl.Name, "uk_email", "a@x.com")
@@ -67,9 +63,9 @@ func TestWriteRowInvariants(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "shanghai", p.HGet(row, "city"), "行字段")
 	require.Equal(t, "1", p.HGet(row, "_ver"), "行 _ver")
-	require.Equal(t, "0", p.ZScore(eq, "1"), "等值桶 member")
-	require.Equal(t, "30", p.ZScore(rg, "1"), "范围桶 score")
-	require.Equal(t, "0", p.ZScore(lex, "shanghai\x001"), "字典序副本 member")
+	require.Equal(t, "0", p.ZScore(eq, rowcodec.PlainMember("1", 1)), "等值桶 member（版本戳）")
+	require.Equal(t, "30", p.ZScore(rg, rowcodec.PlainMember("1", 1)), "范围桶 score")
+	require.Equal(t, "0", p.ZScore(lex, rowcodec.LexMember("shanghai", "1", 1)), "字典序副本 member")
 	require.NotEmpty(t, p.ZScore(exp, "1"), "exp 登记")
 	require.True(t, p.Exists(rcpt), "TTL 行必须有回执")
 	require.Contains(t, p.Get(resv), row, "唯一预约指向行")
@@ -82,11 +78,11 @@ func TestWriteRowInvariants(t *testing.T) {
 		TTL:    time.Hour,
 	})
 	require.NoError(t, err)
-	require.Empty(t, p.ZScore(eq, "1"), "旧等值桶应撤销")
-	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "1"))
-	require.Equal(t, "31", p.ZScore(rg, "1"))
-	require.Empty(t, p.ZScore(lex, "shanghai\x001"))
-	require.Equal(t, "0", p.ZScore(lex, "beijing\x001"))
+	require.Empty(t, p.ZScore(eq, rowcodec.PlainMember("1", 1)), "旧等值桶应撤销")
+	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", 0), rowcodec.PlainMember("1", 2)))
+	require.Equal(t, "31", p.ZScore(rg, rowcodec.PlainMember("1", 2)))
+	require.Empty(t, p.ZScore(lex, rowcodec.LexMember("shanghai", "1", 1)))
+	require.Equal(t, "0", p.ZScore(lex, rowcodec.LexMember("beijing", "1", 2)))
 	require.Equal(t, "2", p.HGet(row, "_ver"))
 	require.Empty(t, p.Get(resv), "旧预约应释放")
 	require.Contains(t, p.Get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), row)
@@ -115,8 +111,8 @@ func TestWriteRowInvariants(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.False(t, p.Exists(row))
-	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "1"))
-	require.Empty(t, p.ZScore(rg, "1"))
+	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", 0), rowcodec.PlainMember("1", 2)))
+	require.Empty(t, p.ZScore(rg, rowcodec.PlainMember("1", 2)))
 	require.Empty(t, p.ZScore(exp, "1"))
 	require.Empty(t, p.Get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), "删除释放预约")
 
@@ -153,10 +149,9 @@ func TestResurrection(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	slot := slotOf(tbl, "9")
-	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0), "9"),
+	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", 0), rowcodec.PlainMember("9", 1)),
 		"复活必须按旧回执撤销旧索引")
-	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "hangzhou", slot, 0), "9"))
+	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "hangzhou", 0), rowcodec.PlainMember("9", 1)))
 }
 
 // TestCASWriteGuard 调用方 CAS 写语义：期望版本与预读不符 → fail-fast 不重试

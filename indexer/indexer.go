@@ -44,8 +44,8 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 	col := idx.Columns[0]
 	colDef, colOK := t.Column(col)
 	for _, e := range entries {
-		parts := strings.SplitN(e, "\x1f", 4)
-		if len(parts) != 4 {
+		parts := strings.SplitN(e, "\x1f", 5)
+		if len(parts) != 5 {
 			continue // 畸形条目跳过（对账兜底，docs/12 §12.8）
 		}
 		pk := parts[0]
@@ -53,12 +53,14 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 		// 解回原始值再按 keycodec 规则建桶（直接复用转义串会双重转义错位）。
 		oldV, err1 := url.QueryUnescape(parts[1])
 		newV, err2 := url.QueryUnescape(parts[2])
-		ver, err3 := strconv.ParseUint(parts[3], 10, 64)
-		if err1 != nil || err2 != nil || err3 != nil || ver == 0 {
+		oldIV, err3 := strconv.ParseUint(parts[3], 10, 64)
+		ver, err4 := strconv.ParseUint(parts[4], 10, 64)
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || ver == 0 {
 			continue // 畸形条目跳过（对账兜底，docs/12 §12.8）
 		}
-		// v7.0 版本戳：条目 ver = 该次写入的新版本；旧 member 版本恒为 ver-1
-		// （_ver 行内单调 +1——前一次写入的版本即 ver-1，精确撤销可寻）。
+		// v7.0 版本戳：撤销用 oldIV（member 创建版本，行内 _iv 纪律——值最后一次
+		// 写入时的版本，docs/05 §5.1）；重建用 ver（本次写入版本）。墓碑（newV 空）
+		// 只撤不建。
 		switch idx.Kind {
 		case meta.IndexRange:
 			if !colOK {
@@ -66,7 +68,7 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 			}
 			bk := keycodec.RangeBucketKey(t.Name, idx.ID, 0)
 			if oldV != "" {
-				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{bk, rowcodec.PlainMember(pk, ver-1)}})
+				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{bk, rowcodec.PlainMember(pk, oldIV)}})
 			}
 			if newV != "" {
 				score, err := rowcodec.ScoreOf(colDef.Type, newV)
@@ -77,7 +79,7 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 			}
 		default: // IndexEq
 			if oldV != "" {
-				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{keycodec.EqBucketKey(t.Name, idx.ID, oldV, 0), rowcodec.PlainMember(pk, ver-1)}})
+				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{keycodec.EqBucketKey(t.Name, idx.ID, oldV, 0), rowcodec.PlainMember(pk, oldIV)}})
 			}
 			if newV != "" {
 				cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(t.Name, idx.ID, newV, 0), 0, rowcodec.PlainMember(pk, ver)}})
@@ -87,7 +89,7 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 		if idx.PrefixCopy {
 			lk := keycodec.LexBucketKey(t.Name, idx.ID, 0)
 			if oldV != "" {
-				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{lk, rowcodec.LexMember(oldV, pk, ver-1)}})
+				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{lk, rowcodec.LexMember(oldV, pk, oldIV)}})
 			}
 			if newV != "" {
 				cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{lk, 0, rowcodec.LexMember(newV, pk, ver)}})

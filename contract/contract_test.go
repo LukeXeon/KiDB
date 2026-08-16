@@ -103,7 +103,7 @@ func TestR3EvalSlotRules(t *testing.T) {
 	// 同 slot：行 key 与其 slot 的 exp/桶 key
 	slot := keycodec.Slot("d:t:{1}")
 	k1 := "d:t:{1}"
-	k2 := keycodec.ExpKey("t", slot)
+	k2 := keycodec.ExpKey("t")
 	if keycodec.Slot(k1) != keycodec.Slot(k2) {
 		t.Fatalf("测试构造错误：%s 与 %s 不同 slot", k1, k2)
 	}

@@ -148,7 +148,7 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string,
 
 	oldVer := oldVerOf(oldRow)
 	newVer := oldVer + 1
-	undos, redos, asyncs := buildIndexOps(t, slot, req.PK, oldRow, req.Fields, docs, oldVer, newVer)
+	undos, redos, receipts, asyncs, ivUpdates := buildIndexOps(t, slot, req.PK, oldRow, req.Fields, docs, oldVer, newVer)
 	// 复活路径：把旧回执的索引条目并入撤销集（回执内为精确 member，原样使用）
 	if len(oldRow) == 0 && len(oldRcpt) > 0 {
 		undos = mergeReceiptUndo(undos, oldRcpt)
@@ -180,10 +180,12 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string,
 	}
 
 	// 撤字段面（write_row v6 起）：旧有新无 = UPDATE 置 NULL——HSET 不覆盖即
-	// 幽灵残留，展开为显式 HDEL 清单（_ver 是内部字段，永不撤销）。
+	// 幽灵残留，展开为显式 HDEL 清单（`_` 前缀是内部字段命名空间
+	// （_ver/_iv:*，docs/07 §7.1 保留列纪律），永不进入撤销清单；
+	// 被撤列的 member 已按 _iv 精确 ZREM，_iv 字段本身随 UPDATE 保留无害）。
 	var dropped []string
 	for f := range oldRow {
-		if f == "_ver" {
+		if strings.HasPrefix(f, "_") {
 			continue
 		}
 		if _, ok := req.Fields[f]; !ok {
@@ -222,14 +224,17 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string,
 		strconv.Itoa(len(asyncs)),
 	}
 	for _, a := range asyncs {
-		argv = append(argv, logKeyIdx(a.logKey, logKeys), a.redoMember)
+		argv = append(argv, logKeyIdx(a.logKey, logKeys), a.redoMember, strconv.FormatUint(a.oldIV, 10))
 	}
-	argv = append(argv, strconv.Itoa(len(redos)))
-	for _, r := range redos {
+	argv = append(argv, strconv.Itoa(len(receipts)))
+	for _, r := range receipts {
 		argv = append(argv, r.bucket, r.member)
 	}
-	argv = append(argv, strconv.Itoa(len(req.Fields)))
+	argv = append(argv, strconv.Itoa(len(req.Fields)+len(ivUpdates)))
 	for f, v := range req.Fields {
+		argv = append(argv, f, v)
+	}
+	for f, v := range ivUpdates {
 		argv = append(argv, f, v)
 	}
 	argv = append(argv, strconv.Itoa(len(dropped)))
@@ -333,7 +338,7 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 			return false, err
 		}
 		oldVer := oldVerOf(oldRow)
-		undos, _, asyncs := buildIndexOps(t, slot, pk, oldRow, nil, docs, oldVer, oldVer+1)
+		undos, _, _, asyncs, _ := buildIndexOps(t, slot, pk, oldRow, nil, docs, oldVer, oldVer+1)
 
 		logKeys := make([]string, 0, len(asyncs))
 		for _, a := range asyncs {
@@ -348,7 +353,7 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 			strconv.Itoa(len(asyncs)),
 		}
 		for _, a := range asyncs {
-			argv = append(argv, logKeyIdx(a.logKey, logKeys), a.redoMember)
+			argv = append(argv, logKeyIdx(a.logKey, logKeys), a.redoMember, strconv.FormatUint(a.oldIV, 10))
 		}
 
 		wr, _ := g.reg.Get("write_row")
@@ -509,24 +514,43 @@ func (g *Guard) loadDocs(ctx context.Context, t *meta.TableDef) (map[string]*buc
 	return docs, nil
 }
 
-// asyncDesc 异步日志描述符（行 Lua 面）。
+// asyncDesc 异步日志描述符（行 Lua 面）。oldIV = 旧 member 版本戳
+// （行内 _iv:{idxID}——member 创建时版本，精确撤销的依据，docs/05 §5.1）。
 type asyncDesc struct {
 	logKey     string
 	redoMember string
+	oldIV      uint64
+}
+
+// ivField 行内索引版本字段：`_iv:{idxID}` = 该索引 member 的创建版本
+// （v7.0 精确撤销的依据——member 版本戳记录的是"该 (索引,值) 最后一次写入时"
+// 的行版本，不是当前行版本；缺失（首写/复活）回退当前行版本）。
+func ivField(idxID string) string { return "_iv:" + idxID }
+
+// ivOf 读行内某索引的 member 创建版本（缺失回退 oldVer）。
+func ivOf(oldRow map[string]string, idxID string, oldVer uint64) uint64 {
+	if v, err := strconv.ParseUint(oldRow[ivField(idxID)], 10, 64); err == nil && v > 0 {
+		return v
+	}
+	return oldVer
 }
 
 // buildIndexOps 按旧行/新字段展开撤/建清单（v7.0：成员带版本戳；
 // 双写规则由 bucketmap.Doc 路由规则给出，docs/08 §8.3）。
+// 版本纪律：undo 用 _iv（member 创建版本，精确命中）；redo 用 newVer 并把
+// `_iv:{idxID}` = newVer 记入 ivUpdates（随行 Lua HSET——下一次撤销可寻）。
 // oldVer/newVer 由调用方给定（newVer = oldVer+1——行 Lua expectOld 校验后的
 // HINCRBY 必得；redo member 即按预期新版本戳构造）。
 func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields map[string]string,
-	docs map[string]*bucketmap.Doc, oldVer, newVer uint64) (undos []undoEntry, redos []redoEntry, asyncs []asyncDesc) {
+	docs map[string]*bucketmap.Doc, oldVer, newVer uint64) (undos []undoEntry, redos, receipts []redoEntry, asyncs []asyncDesc, ivUpdates map[string]string) {
 
+	ivUpdates = map[string]string{}
 	for _, idx := range t.Indexes {
 		col := idx.Columns[0]
 		oldVal, hadOld := oldRow[col]
 		newVal, hasNew := newFields[col]
 		d := docs[idx.ID] // nil（无 bm 模式）或默认文档 → 单桶
+		oldIV := ivOf(oldRow, idx.ID, oldVer)
 
 		// 异步分支：值有变化才记日志（墓碑 = 新值空串）
 		if idx.Async {
@@ -536,23 +560,28 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 			asyncs = append(asyncs, asyncDesc{
 				logKey:     keycodec.AsyncLogKey(t.Name, idx.ID, slot),
 				redoMember: pk + "\x1f" + escLogField(oldVal) + "\x1f" + escLogField(newVal),
+				oldIV:      oldIV,
 			})
+			if hasNew {
+				ivUpdates[ivField(idx.ID)] = strconv.FormatUint(newVer, 10)
+			}
 			continue
 		}
 
 		switch idx.Kind {
 		case meta.IndexRange:
-			if hadOld {
-				if oldScore, err := strconv.ParseFloat(oldVal, 64); err == nil {
-					for _, b := range rangeReadSet(d, oldScore) {
-						undos = append(undos, undoEntry{
-							keycodec.RangeBucketKey(t.Name, idx.ID, b),
-							coveringMember(pk, oldVer, idx, oldRow),
-						})
-					}
+			// 撤/建以值变化为条件（与等值同纪律——版本戳下无条件 redo 会让
+			// 每次写入累积一个旧版本 member；值不变则 member 与 _iv 原样保留）
+			oldScore, oldOK := strconv.ParseFloat(oldVal, 64)
+			if hadOld && (!hasNew || oldVal != newVal) && oldOK == nil {
+				for _, b := range rangeReadSet(d, oldScore) {
+					undos = append(undos, undoEntry{
+						keycodec.RangeBucketKey(t.Name, idx.ID, b),
+						coveringMember(pk, oldIV, idx, oldRow),
+					})
 				}
 			}
-			if hasNew {
+			if hasNew && (!hadOld || oldVal != newVal) {
 				if score, err := strconv.ParseFloat(newVal, 64); err == nil {
 					for _, b := range rangeWriteSet(d, score) {
 						redos = append(redos, redoEntry{
@@ -560,6 +589,7 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 							coveringMember(pk, newVer, idx, newFields), score,
 						})
 					}
+					ivUpdates[ivField(idx.ID)] = strconv.FormatUint(newVer, 10)
 				}
 			}
 
@@ -568,17 +598,18 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 				for _, b := range eqReadSet(d, keycodec.EscapeValue(oldVal)) {
 					undos = append(undos, undoEntry{
 						keycodec.EqBucketKey(t.Name, idx.ID, oldVal, b),
-						coveringMember(pk, oldVer, idx, oldRow),
+						coveringMember(pk, oldIV, idx, oldRow),
 					})
 				}
 			}
-			if hasNew {
+			if hasNew && (!hadOld || oldVal != newVal) {
 				for _, b := range eqWriteSet(d, keycodec.EscapeValue(newVal), pk) {
 					redos = append(redos, redoEntry{
 						keycodec.EqBucketKey(t.Name, idx.ID, newVal, b),
 						coveringMember(pk, newVer, idx, newFields), 0,
 					})
 				}
+				ivUpdates[ivField(idx.ID)] = strconv.FormatUint(newVer, 10)
 			}
 
 			// 字典序副本随同等值索引分裂（"l" 条目，按 member 内 pk 同规则散列）
@@ -587,11 +618,11 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 					for _, b := range eqReadSet(d, "l") {
 						undos = append(undos, undoEntry{
 							keycodec.LexBucketKey(t.Name, idx.ID, b),
-							rowcodec.LexMember(oldVal, pk, oldVer),
+							rowcodec.LexMember(oldVal, pk, oldIV),
 						})
 					}
 				}
-				if hasNew {
+				if hasNew && (!hadOld || oldVal != newVal) {
 					for _, b := range eqWriteSet(d, "l", pk) {
 						redos = append(redos, redoEntry{
 							keycodec.LexBucketKey(t.Name, idx.ID, b),
@@ -602,7 +633,51 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 			}
 		}
 	}
-	return undos, redos, asyncs
+
+	// 回执全量清单（与撤/建变更分离）：每个同步索引凡新行有值，记录其**当前**
+	// 精确 member（已变的用 newVer、未变的用 _iv）× 全部可读桶（覆盖分裂窗口
+	// 的一切可能位置；sweeper 的 ZREM 精确幂等，多撤无害）——回执是行过期后
+	// 清扫的唯一撤销信息源，缺索引 = 该索引 member 永久泄漏。
+	for _, idx := range t.Indexes {
+		if idx.Async {
+			continue
+		}
+		newVal, hasNew := newFields[idx.Columns[0]]
+		if !hasNew {
+			continue
+		}
+		d := docs[idx.ID]
+		liveVer := newVer
+		if _, was := ivUpdates[ivField(idx.ID)]; !was {
+			liveVer = ivOf(oldRow, idx.ID, oldVer) // 未变：member 停在创建版本
+		}
+		member := coveringMember(pk, liveVer, idx, newFields)
+		switch idx.Kind {
+		case meta.IndexRange:
+			if score, err := strconv.ParseFloat(newVal, 64); err == nil {
+				for _, b := range rangeReadSet(d, score) {
+					receipts = append(receipts, redoEntry{
+						keycodec.RangeBucketKey(t.Name, idx.ID, b), member, 0,
+					})
+				}
+			}
+		default:
+			for _, b := range eqReadSet(d, keycodec.EscapeValue(newVal)) {
+				receipts = append(receipts, redoEntry{
+					keycodec.EqBucketKey(t.Name, idx.ID, newVal, b), member, 0,
+				})
+			}
+			if idx.PrefixCopy {
+				lm := rowcodec.LexMember(newVal, pk, liveVer)
+				for _, b := range eqReadSet(d, "l") {
+					receipts = append(receipts, redoEntry{
+						keycodec.LexBucketKey(t.Name, idx.ID, b), lm, 0,
+					})
+				}
+			}
+		}
+	}
+	return undos, redos, receipts, asyncs, ivUpdates
 }
 
 // eqReadSet / eqWriteSet / rangeReadSet / rangeWriteSet 是 bucketmap 路由规则的

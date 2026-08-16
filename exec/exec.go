@@ -33,7 +33,7 @@ import (
 	"kidb/utils"
 )
 
-// 批大小/组宽等调优值统一收敛 internal/tuning（docs/01 §1.0：开发者参数单一调优面）。
+// 批大小/组宽等调优值统一收敛 tuning 包（docs/01 §1.0：开发者参数单一调优面）。
 
 // Kind 是物理计划类型（docs/04 §4.1 翻译表）。
 type Kind int
@@ -41,8 +41,8 @@ type Kind int
 const (
 	FullScan     Kind = iota + 1 // exp 登记册遍历（docs/07 §7.4）
 	PointGet                     // 主键点查：HGETALL 直取
-	EqLookup                     // 等值索引：值 × slot 桶 ZRANGE 分页
-	RangeLookup                  // 范围索引：slot 桶 ZRANGEBYSCORE 归并（topk.go）
+	EqLookup                     // 等值索引：按值寻址桶 ZRANGE 分页（v7.0：1+K 桶）
+	RangeLookup                  // 范围索引：子桶集 ZRANGEBYSCORE 归并（topk.go；默认单桶直读）
 	PrefixLookup                 // 前缀搜索：字典序副本 ZRANGEBYLEX 归并（prefix.go）
 )
 
@@ -186,20 +186,20 @@ type Request struct {
 
 // Executor 执行 Request，产出流式行。
 type Executor struct {
-	cli           kv.Client
-	reg           *script.Registry   // 谓词下推脚本（nil = 不下推）
-	nc            L1Cache            // L1 近缓存（nil = 关闭，docs/08 §8.4）
-	bm            *bucketmap.Store   // 桶路由（分裂状态）；nil = 永远默认单桶
-	l4            L4Resolver         // L4 热桶副本（nil = 关闭）
-	telemetry     TelemetrySink      // 遥测采样（nil = 关闭）
-	m             *metrics.Metrics   // 指标（nil = no-op，docs/10 §10.3）
-	clock         func() time.Time   // 覆盖读路径活性判定时钟（测试可注入，与写入侧共钟）
-	replicaRead   atomic.Bool        // L3 副本读开关（SetReplicaRead；docs/08 §8.4）
-	rowCache      RowCache           // 行级近缓存（nil = 关闭，默认关闭；hotkey_row_cache 变量驱动）
-	sf            singleflight.Group // L2 请求合并（docs/08 §8.4：同指纹并发合并；随 L1 装配生效）
-	fsMu          sync.Mutex
-	fsSem         chan struct{} // 全扫并发信号量（query_fullscan_rate_limit，docs/07 §7.4 限流通道）
-	batch         int
+	cli         kv.Client
+	reg         *script.Registry   // 谓词下推脚本（nil = 不下推）
+	nc          L1Cache            // L1 近缓存（nil = 关闭，docs/08 §8.4）
+	bm          *bucketmap.Store   // 桶路由（分裂状态）；nil = 永远默认单桶
+	l4          L4Resolver         // L4 热桶副本（nil = 关闭）
+	telemetry   TelemetrySink      // 遥测采样（nil = 关闭）
+	m           *metrics.Metrics   // 指标（nil = no-op，docs/10 §10.3）
+	clock       func() time.Time   // 覆盖读路径活性判定时钟（测试可注入，与写入侧共钟）
+	replicaRead atomic.Bool        // L3 副本读开关（SetReplicaRead；docs/08 §8.4）
+	rowCache    RowCache           // 行级近缓存（nil = 关闭，默认关闭；hotkey_row_cache 变量驱动）
+	sf          singleflight.Group // L2 请求合并（docs/08 §8.4：同指纹并发合并；随 L1 装配生效）
+	fsMu        sync.Mutex
+	fsSem       chan struct{} // 全扫并发信号量（query_fullscan_rate_limit，docs/07 §7.4 限流通道）
+	batch       int
 }
 
 // SetMetrics 接入指标。
@@ -355,9 +355,9 @@ type RowStream struct {
 
 	fsSem chan struct{} // 全扫限流槽位（持有至 EOF/Close，docs/07 §7.4）
 
-	startedAt  time.Time // 首个 Next 时间（query_duration_seconds 挂点）
-	fanout     int       // 本查询散取桶命令总数（query_scatter_fanout 挂点）
-	scatterDone bool     // v7 散取桶集合已构建（一次性，docs/04 §4.3）
+	startedAt   time.Time // 首个 Next 时间（query_duration_seconds 挂点）
+	fanout      int       // 本查询散取桶命令总数（query_scatter_fanout 挂点）
+	scatterDone bool      // v7 散取桶集合已构建（一次性，docs/04 §4.3）
 }
 
 type bucketScan struct {
@@ -1064,7 +1064,7 @@ func (s *RowStream) stripCovering(member string) string {
 	if s.req.Index != nil && len(s.req.Index.Covering) > 0 {
 		return rowcodec.MemberPK(member, true)
 	}
-	return member
+	return rowcodec.MemberPK(member, false) // v7.0：member 恒带 \x1fver 版本戳
 }
 
 // RowCount 精确行数（docs/04 §4.1：Σ ZCOUNT(exp, (now, +inf))，任意时刻精确——

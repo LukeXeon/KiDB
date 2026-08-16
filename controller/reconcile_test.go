@@ -15,6 +15,7 @@ import (
 	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
+	"kidb/rowcodec"
 	"kidb/testutil"
 	"kidb/txguard"
 )
@@ -56,10 +57,6 @@ func reconcileFixture(t *testing.T) (*Reconciler, *metrics.Metrics, *meta.TableD
 	return r, m, tbl, cli, ctx
 }
 
-func slotOfPk(tbl *meta.TableDef, pk string) uint16 {
-	return keycodec.Slot(keycodec.RowKey(tbl.Name, pk))
-}
-
 func driftCount(m *metrics.Metrics, kind string) float64 {
 	return promtest.ToFloat64(m.ReconcileDrift.WithLabelValues(kind))
 }
@@ -68,7 +65,7 @@ func driftCount(m *metrics.Metrics, kind string) float64 {
 func TestReconcileBaseline(t *testing.T) {
 	r, m, tbl, _, ctx := reconcileFixture(t)
 	for i := 1; i <= 5; i++ {
-		require.NoError(t, r.ReconcileSlot(ctx, tbl, slotOfPk(tbl, fmt.Sprint(i))))
+		require.NoError(t, r.ReconcilePage(ctx, tbl))
 	}
 	require.Equal(t, 0.0, driftCount(m, "index_member_missing"))
 	require.Equal(t, 0.0, driftCount(m, "index_score_mismatch"))
@@ -79,40 +76,36 @@ func TestReconcileBaseline(t *testing.T) {
 // TestReconcileForwardDrift 正向：删等值桶成员 → missing 漂移。
 func TestReconcileForwardDrift(t *testing.T) {
 	r, m, tbl, cli, ctx := reconcileFixture(t)
-	slot := slotOfPk(tbl, "1")
-	_, err := cli.Do(ctx, "ZREM", keycodec.EqBucketKey(tbl.Name, "idx_city", "c1", slot, 0), "1")
+	_, err := cli.Do(ctx, "ZREM", keycodec.EqBucketKey(tbl.Name, "idx_city", "c1", 0), rowcodec.PlainMember("1", 1))
 	require.NoError(t, err)
-	require.NoError(t, r.ReconcileSlot(ctx, tbl, slot))
+	require.NoError(t, r.ReconcilePage(ctx, tbl))
 	require.Equal(t, 1.0, driftCount(m, "index_member_missing"))
 }
 
 // TestReconcileLexDrift 正向：字典序副本成员缺失 → missing 漂移。
 func TestReconcileLexDrift(t *testing.T) {
 	r, m, tbl, cli, ctx := reconcileFixture(t)
-	slot := slotOfPk(tbl, "1")
-	_, err := cli.Do(ctx, "ZREM", keycodec.LexBucketKey(tbl.Name, "idx_city", slot, 0), "c1\x001")
+	_, err := cli.Do(ctx, "ZREM", keycodec.LexBucketKey(tbl.Name, "idx_city", 0), rowcodec.LexMember("c1", "1", 1))
 	require.NoError(t, err)
-	require.NoError(t, r.ReconcileSlot(ctx, tbl, slot))
+	require.NoError(t, r.ReconcilePage(ctx, tbl))
 	require.Equal(t, 1.0, driftCount(m, "index_member_missing"))
 }
 
 // TestReconcileScoreMismatch 正向：范围桶 score 被篡改 → score_mismatch 漂移。
 func TestReconcileScoreMismatch(t *testing.T) {
 	r, m, tbl, cli, ctx := reconcileFixture(t)
-	slot := slotOfPk(tbl, "2")
-	_, err := cli.Do(ctx, "ZADD", keycodec.RangeBucketKey(tbl.Name, "idx_age", slot, 0), 999, "2")
+	_, err := cli.Do(ctx, "ZADD", keycodec.RangeBucketKey(tbl.Name, "idx_age", 0), 999, rowcodec.PlainMember("2", 1))
 	require.NoError(t, err)
-	require.NoError(t, r.ReconcileSlot(ctx, tbl, slot))
+	require.NoError(t, r.ReconcilePage(ctx, tbl))
 	require.Equal(t, 1.0, driftCount(m, "index_score_mismatch"))
 }
 
 // TestReconcileOrphan 反向：死且已清扫（无行无回执）行的桶成员残留 → orphan 漂移。
 func TestReconcileOrphan(t *testing.T) {
 	r, m, tbl, cli, ctx := reconcileFixture(t)
-	slot := slotOfPk(tbl, "1")
-	_, err := cli.Do(ctx, "ZADD", keycodec.EqBucketKey(tbl.Name, "idx_city", "c1", slot, 0), 0, "ghost")
+	_, err := cli.Do(ctx, "ZADD", keycodec.EqBucketKey(tbl.Name, "idx_city", "c1", 0), 0, "ghost")
 	require.NoError(t, err)
-	require.NoError(t, r.ReconcileSlot(ctx, tbl, slot))
+	require.NoError(t, r.ReconcilePage(ctx, tbl))
 	require.Equal(t, 1.0, driftCount(m, "index_member_orphan"))
 }
 
@@ -120,11 +113,10 @@ func TestReconcileOrphan(t *testing.T) {
 // （把活行 u4 的预约改写指向不存在的行 key——模拟事故现场）。
 func TestReconcileUniqResidual(t *testing.T) {
 	r, m, tbl, cli, ctx := reconcileFixture(t)
-	slot := slotOfPk(tbl, "4")
 	_, err := cli.Do(ctx, "SET", keycodec.UniqueKey(tbl.Name, "uk_email", "u4@x.com"),
 		keycodec.RowKey(tbl.Name, "ghost")+"|12345")
 	require.NoError(t, err)
-	require.NoError(t, r.ReconcileSlot(ctx, tbl, slot))
+	require.NoError(t, r.ReconcilePage(ctx, tbl))
 	require.Equal(t, 1.0, driftCount(m, "uniq_reservation_residual"))
 }
 
@@ -153,7 +145,7 @@ func TestReconcileSweepLagNoFalsePositive(t *testing.T) {
 	require.NoError(t, err)
 	m.FastForward(time.Minute) // 行物理过期；Sweeper 未跑（桶成员/回执仍在）
 
-	require.NoError(t, r.ReconcileSlot(ctx, tbl, slotOfPk(tbl, "77")))
+	require.NoError(t, r.ReconcilePage(ctx, tbl))
 	require.Equal(t, 0.0, driftCount(mt, "index_member_orphan"), "清扫暂态不得误报 orphan")
 	require.Equal(t, 0.0, driftCount(mt, "index_member_missing"))
 }

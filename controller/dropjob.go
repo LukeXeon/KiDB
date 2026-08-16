@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"kidb/keycodec"
@@ -48,15 +49,17 @@ func (r *JobRunner) tickDropJobs(ctx context.Context) error {
 	return nil
 }
 
-// stepDrop 推进一个作业批次：每步处理一个登记册分片（v7.0 集中册——
-// 游标 = 分片序号，默认 1 册即一步完成主体清理）。
+// stepDrop 推进一个作业批次：每 tick 按行预算（rowsPerT）推进各登记册分片
+// （恒读首页：处理即移除，续作天然安全；游标 = 累计清理行数——进度语义，
+// 恢复点由"已删即走"构造保证）。
 func (r *JobRunner) stepDrop(ctx context.Context, job *meta.DropJob) error {
 	def := job.Def
 	sw := sweeper.New(r.cli, r.reg)
 	batch := tuning.Get().Exec.Batch
 	shards := def.EffectiveExpShards()
+	budget := r.rowsPerT
 
-	for shard := job.Cursor; shard < shards; shard++ {
+	for shard := 0; shard < shards && budget > 0; shard++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -66,11 +69,10 @@ func (r *JobRunner) stepDrop(ctx context.Context, job *meta.DropJob) error {
 		}
 		// 2. 登记册分页清空（恒读首页：处理即移除，终止由构造保证）：
 		// 活行 DeleteRow（写路径全清：行/索引/登记册/回执/预约）；
-		// 死行 DeleteRow 是 no-op（write_row D 分支不撤 exp）——
-		// 收集后立即强制清扫出登记册（SweepPksForced：按回执清桶成员 +
-		// 预约释放），否则分页循环在死行上空转（实现期实证死锁形态）。
+		// 死行 DeleteRow 是 no-op——收集后立即强制清扫出登记册（SweepPksForced：
+		// 按回执清桶成员 + 预约释放），否则分页循环在死行上空转（实现期实证死锁形态）。
 		expKey := keycodec.ExpKeyN(def.Name, shard, shards)
-		for {
+		for budget > 0 {
 			res, err := r.cli.Do(ctx, "ZRANGE", expKey, 0, batch-1)
 			if err != nil {
 				return err
@@ -81,6 +83,9 @@ func (r *JobRunner) stepDrop(ctx context.Context, job *meta.DropJob) error {
 			}
 			var dead []string
 			for _, pk := range pks {
+				if budget <= 0 {
+					break
+				}
 				if err := r.bfLimit.Wait(ctx); err != nil {
 					return err
 				}
@@ -91,20 +96,31 @@ func (r *JobRunner) stepDrop(ctx context.Context, job *meta.DropJob) error {
 				if !deleted {
 					dead = append(dead, pk)
 				}
+				budget--
+				job.Cursor++
 			}
 			if _, err := sw.SweepPksForced(ctx, def, shard, dead); err != nil {
 				return err
 			}
+			if len(pks) < batch {
+				break
+			}
 		}
-		job.Cursor = shard + 1
-		if err := r.store.SetDropJob(ctx, job); err != nil { // 游标落库（断点）
+	}
+	if err := r.store.SetDropJob(ctx, job); err != nil { // 游标落库（断点）
+		return err
+	}
+	// 完成判定：全部分片登记册已空
+	for shard := 0; shard < shards; shard++ {
+		res, err := r.cli.Do(ctx, "ZCARD", keycodec.ExpKeyN(def.Name, shard, shards))
+		if err != nil {
 			return err
 		}
+		if n, _ := strconv.ParseInt(fmt.Sprint(res), 10, 64); n > 0 {
+			return nil // 仍有成员（本 tick 预算用尽），下 tick 续作
+		}
 	}
-	if job.Cursor >= shards {
-		return r.finishDrop(ctx, job)
-	}
-	return nil
+	return r.finishDrop(ctx, job)
 }
 
 // finishDrop 清理残留 key 并注销作业（一次性、有界、异步）。

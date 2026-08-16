@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"kidb"
 	"kidb/bucketmap"
@@ -34,11 +35,12 @@ type Splitter struct {
 	bm    *bucketmap.Store
 	m     *metrics.Metrics // 指标（nil = no-op）
 	batch int
+	grace time.Duration // 排干宽限（默认 1500ms = bm 读缓存 TTL 1s + 余量；测试可收窄）
 }
 
 // NewSplitter 构造（batch 默认 500，docs/08 §8.3）。
 func NewSplitter(cli kv.Client, reg *script.Registry, bm *bucketmap.Store) *Splitter {
-	return &Splitter{cli: cli, reg: reg, bm: bm, batch: 500}
+	return &Splitter{cli: cli, reg: reg, bm: bm, batch: 500, grace: 1500 * time.Millisecond}
 }
 
 // SetMetrics 接入指标。
@@ -104,8 +106,13 @@ func (s *Splitter) SplitEq(ctx context.Context, table, idxID, encVal string, cov
 			e = e2
 		}
 
-		// 第 3 步：UNLINK 父桶 → CAS ACTIVE(子桶)
+		// 第 3 步：排干宽限（收容迟到写）→ UNLINK 父桶 → CAS ACTIVE(子桶)
 		if e.Split.State == bucketmap.Draining {
+			if err := s.drainGrace(ctx, func() error {
+				return s.migrateEq(ctx, table, idxID, encVal, e.Split, covering)
+			}); err != nil {
+				return err
+			}
 			for _, pIdx := range e.Split.Parents {
 				if _, err := s.cli.Do(ctx, "UNLINK", keycodec.EqBucketKeyEsc(table, idxID, encVal, pIdx)); err != nil {
 					return err
@@ -126,6 +133,26 @@ func (s *Splitter) SplitEq(ctx context.Context, table, idxID, encVal string, cov
 		}
 	}
 	return fmt.Errorf("%w: SplitEq %s/%s/%s", kidb.ErrStaleMetadata, table, idxID, encVal)
+}
+
+// drainGrace DRAINING/MERGE_DRAIN 宽限排干（v7.0 无行 Lua bm CAS 的替代正确性
+// 机制）：持续 ≥ bm 读缓存 TTL（1s）+ 余量，期间反复重跑搬迁收容快照过期的
+// 迟到写。时序论证：T0 = DRAINING CAS 落库；T0+TTL 后全部写者 bm 必为新态
+// （只写子桶），父桶写入流截断；末次搬迁（deadline 后）清尽全部迟到成员 →
+// UNLINK 父桶安全（docs/08 §8.3）。
+func (s *Splitter) drainGrace(ctx context.Context, migrate func() error) error {
+	deadline := time.Now().Add(s.grace) // bm 读缓存 TTL + 余量（Splitters.grace）
+	for {
+		if err := migrate(); err != nil { // 幂等重跑（精确 member）
+			return err
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		if !utils.SleepCtx(ctx, 100*time.Millisecond) {
+			return ctx.Err()
+		}
+	}
 }
 
 // memberTarget 一条待搬迁成员（精确 member + 目标桶 + score）。
@@ -253,6 +280,11 @@ func (s *Splitter) SplitRange(ctx context.Context, table, idxID string, bucketId
 		}
 
 		if rb.State == bucketmap.Draining {
+			if err := s.drainGrace(ctx, func() error {
+				return s.migrateRange(ctx, table, idxID, rb, covering)
+			}); err != nil {
+				return err
+			}
 			if _, err := s.cli.Do(ctx, "UNLINK", keycodec.RangeBucketKey(table, idxID, rb.Idx)); err != nil {
 				return err
 			}
@@ -394,28 +426,8 @@ func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, cov
 		if e.Split.State == bucketmap.Merging {
 			// 搬迁：每个旧桶 → 合并目标桶（EqSubFor 同一函数选桶）
 			for _, cIdx := range e.Split.Children {
-				childKey := keycodec.EqBucketKeyEsc(table, idxID, encVal, cIdx)
-				for {
-					res, err := s.cli.Do(ctx, "ZRANGE", childKey, 0, s.batch-1)
-					if err != nil {
-						return err
-					}
-					members := utils.Strings(res)
-					if len(members) == 0 {
-						break
-					}
-					batch := make([]memberTarget, 0, len(members))
-					for _, m := range members {
-						pk := rowcodec.MemberPK(m, covering)
-						tIdx := e.Split.Parents[keycodec.EqSubFor(pk, len(e.Split.Parents))]
-						batch = append(batch, memberTarget{m, keycodec.EqBucketKeyEsc(table, idxID, encVal, tIdx), "0"})
-					}
-					if err := s.migrateBatch(ctx, table, childKey, batch, covering); err != nil {
-						return err
-					}
-					if len(members) < s.batch {
-						break
-					}
+				if err := s.migrateEqTo(ctx, table, idxID, encVal, cIdx, e.Split.Parents, covering); err != nil {
+					return err
 				}
 			}
 			sh2, err := s.bm.LoadFresh(ctx, table, idxID)
@@ -434,6 +446,16 @@ func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, cov
 		}
 
 		if e.Split.State == bucketmap.MergeDrain {
+			if err := s.drainGrace(ctx, func() error {
+				for _, cIdx := range e.Split.Children {
+					if err := s.migrateEqTo(ctx, table, idxID, encVal, cIdx, e.Split.Parents, covering); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
 			for _, cIdx := range e.Split.Children {
 				if _, err := s.cli.Do(ctx, "UNLINK", keycodec.EqBucketKeyEsc(table, idxID, encVal, cIdx)); err != nil {
 					return err
@@ -533,6 +555,16 @@ func (s *Splitter) MergeRange(ctx context.Context, table, idxID string, leftIdx 
 		}
 
 		if left.State == bucketmap.MergeDrain {
+			if err := s.drainGrace(ctx, func() error {
+				for _, rb := range []bucketmap.RangeBucket{left, right} {
+					if err := s.migrateRangeTo(ctx, table, idxID, rb.Idx, merged, covering); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
 			for _, rb := range []bucketmap.RangeBucket{left, right} {
 				if _, err := s.cli.Do(ctx, "UNLINK", keycodec.RangeBucketKey(table, idxID, rb.Idx)); err != nil {
 					return err
@@ -586,6 +618,33 @@ func (s *Splitter) migrateRangeTo(ctx context.Context, table, idxID string, from
 			return err
 		}
 		if len(arr)/2 < s.batch {
+			return nil
+		}
+	}
+}
+
+// migrateEqTo 把等值桶 fromIdx 的全部成员搬到 targets（EqSubFor 选目标；合并/宽限排干共用）。
+func (s *Splitter) migrateEqTo(ctx context.Context, table, idxID, encVal string, fromIdx int, targets []int, covering bool) error {
+	fromKey := keycodec.EqBucketKeyEsc(table, idxID, encVal, fromIdx)
+	for {
+		res, err := s.cli.Do(ctx, "ZRANGE", fromKey, 0, s.batch-1)
+		if err != nil {
+			return err
+		}
+		members := utils.Strings(res)
+		if len(members) == 0 {
+			return nil
+		}
+		batch := make([]memberTarget, 0, len(members))
+		for _, m := range members {
+			pk := rowcodec.MemberPK(m, covering)
+			tIdx := targets[keycodec.EqSubFor(pk, len(targets))]
+			batch = append(batch, memberTarget{m, keycodec.EqBucketKeyEsc(table, idxID, encVal, tIdx), "0"})
+		}
+		if err := s.migrateBatch(ctx, table, fromKey, batch, covering); err != nil {
+			return err
+		}
+		if len(members) < s.batch {
 			return nil
 		}
 	}

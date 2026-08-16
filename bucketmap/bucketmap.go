@@ -263,9 +263,12 @@ func (d *Doc) ReadBucketsEq(encVal string) []int {
 	if e.Split != nil {
 		switch e.Split.State {
 		case Draining:
-			return e.Split.Children
+			// v7.0 排干宽限期：快照过期的迟到写仍可能落父桶（无行 Lua bm CAS 后
+			// 无写侧硬阻断）——读父∪子全覆盖，seen 去重；宽限期满排干确认后
+			// 才允许 UNLINK 父桶（docs/08 §8.3）。
+			return append(append([]int{}, e.Split.Parents...), e.Split.Children...)
 		case MergeDrain:
-			return e.Split.Parents
+			return append(append([]int{}, e.Split.Parents...), e.Split.Children...)
 		default: // Splitting / Merging
 			return append(append([]int{}, e.Split.Parents...), e.Split.Children...)
 		}
@@ -311,10 +314,13 @@ func (d *Doc) ReadBucketsRange(lo, hi float64) []int {
 		if len(rb.Children) == 2 {
 			switch rb.State {
 			case Draining:
+				// v7.0 排干宽限期：父桶仍可能有迟到写成员——父∪子全读
+				out = append(out, rb.Idx)
 				for _, c := range rb.Children {
 					out = append(out, c.Idx)
 				}
 			case MergeDrain:
+				out = append(out, rb.Idx) // 旧桶（宽限期可能仍有成员）
 				out = append(out, rb.Children[0].Idx)
 			default: // SPLITTING / MERGING：父+子双读
 				out = append(out, rb.Idx)

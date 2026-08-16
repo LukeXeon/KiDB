@@ -41,16 +41,12 @@ func TestAsyncIndexFlow(t *testing.T) {
 		keycodec.Slot(keycodec.RowKey(tbl.Name, "1")),
 		keycodec.Slot(keycodec.RowKey(tbl.Name, "2")),
 	}
-	// zcardAcross 跨两行 slot 汇总某值的桶成员数（等值查询真实形态）
+	// zcardAcross 汇总某值的桶成员数（v7.0：桶按值寻址，单桶）
 	zcardAcross := func(val string) int {
-		total := 0
-		for _, s := range slots {
-			res, err := cli.Do(ctx, "ZCARD", keycodec.EqBucketKey(tbl.Name, idx.ID, val, s, 0))
-			require.NoError(t, err)
-			n, _ := strconv.Atoi(fmt.Sprint(res))
-			total += n
-		}
-		return total
+		res, err := cli.Do(ctx, "ZCARD", keycodec.EqBucketKey(tbl.Name, idx.ID, val, 0))
+		require.NoError(t, err)
+		n, _ := strconv.Atoi(fmt.Sprint(res))
+		return n
 	}
 	consumeAll := func() int {
 		total := 0

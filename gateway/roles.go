@@ -60,7 +60,6 @@ func AssembleRoles(cli kv.Client, reg *script.Registry, store *meta.CatalogStore
 var (
 	sweepTick   = time.Duration(tuning.Get().Sweeper.TickMs) * time.Millisecond
 	indexerTick = 100 * time.Millisecond
-	sweepRange  = tuning.Get().Sweeper.SweepRangeSlots
 )
 
 // startRoles 启动后台角色循环（ctx 即 Server 生命周期——Close 统一取消；

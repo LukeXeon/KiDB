@@ -46,7 +46,7 @@ type Tuning struct {
 		HotkeyReplicaMax      int     `toml:"hotkey_replica_max"`
 		HotkeyRefreshMs       int     `toml:"hotkey_refresh_ms"`
 		JobTickBudgetMs       int     `toml:"job_tick_budget_ms"`
-		JobSlotsPerTick       int     `toml:"job_slots_per_tick"`
+		JobRowsPerTick        int     `toml:"job_rows_per_tick"`
 		BackfillRowsPerSec    int     `toml:"backfill_rows_per_sec"`
 		ReconcileSlotsPerTick int     `toml:"reconcile_slots_per_tick"`
 		ReconcileRowsPerSlot  int     `toml:"reconcile_rows_per_slot"`

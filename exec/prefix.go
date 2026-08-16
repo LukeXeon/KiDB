@@ -6,6 +6,7 @@ import (
 
 	"kidb/keycodec"
 	"kidb/kv"
+	"kidb/rowcodec"
 	"kidb/tuning"
 	"kidb/utils"
 )
@@ -78,14 +79,14 @@ func (lm *lexMerger) step() error {
 		return nil
 	}
 
-	// member = 值+\x00+pk → 提取（回表校验在 fetchItems 内重做 HasPrefix）
+	// member = 值+\x00+pk+\x1f+ver → 提取（回表校验在 fetchItems 内重做 HasPrefix）
 	items := make([]candItem, 0, len(cand))
 	for _, c := range cand {
 		cut := strings.IndexByte(c.member, 0)
 		if cut <= 0 {
 			continue // 畸形 member 防御（无 \x00 分隔）
 		}
-		pk := c.member[cut+1:]
+		pk := rowcodec.MemberPK(c.member[cut+1:], false) // 去 \x1fver 版本戳
 		if s.seen != nil {
 			if s.seen.Has(pk) {
 				continue

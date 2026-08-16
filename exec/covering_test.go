@@ -159,12 +159,11 @@ func TestCoveringFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	// 手工塞一个裸 member（无 msgp 覆盖数组）进桶——模拟格式损坏
-	slot := keycodec.Slot(keycodec.RowKey(tbl.Name, "2"))
-	bk := keycodec.RangeBucketKey(tbl.Name, "idx_age", slot, 0)
+	bk := keycodec.RangeBucketKey(tbl.Name, "idx_age", 0)
 	_, err = cli.Do(ctx, "ZADD", bk, 42, "2") // pk=2 行不存在
 	require.NoError(t, err)
 	rk2 := keycodec.RowKey(tbl.Name, "2")
-	_, err = cli.Do(ctx, "ZADD", keycodec.ExpKeyN(tbl.Name, slot, keycodec.ExpShardFor("2", 1), 1), 9999999999, "2")
+	_, err = cli.Do(ctx, "ZADD", keycodec.ExpKeyN(tbl.Name, keycodec.ExpShardFor("2", 1), 1), 9999999999, "2")
 	require.NoError(t, err)
 	_, err = cli.Do(ctx, "HSET", rk2, "city", "beijing", "age", "42")
 	require.NoError(t, err)

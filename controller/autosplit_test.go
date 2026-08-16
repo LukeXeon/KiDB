@@ -2,9 +2,9 @@ package controller
 
 import (
 	"context"
-	"math/rand"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -29,14 +29,16 @@ func TestAutoSplitViaTelemetry(t *testing.T) {
 	g := txguard.New(cli, reg, bm)
 	ctx := context.Background()
 	tbl := splitTable()
+	store := meta.NewCatalogStore(cli, reg)
+	require.NoError(t, store.Save(ctx, tbl, 0))
+	require.NoError(t, store.RegisterTable(ctx, tbl.Name))
 
-	slot := uint16(321)
-	pks := sameSlotPKs(tbl.Name, slot, 60, rand.New(rand.NewSource(99)))
+	pks := plainPKs(60)
 	for _, pk := range pks {
 		_, err := g.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: pk, Fields: map[string]string{"city": "hot"}})
 		require.NoError(t, err)
 	}
-	srcKey := keycodec.EqBucketKey(tbl.Name, "idx_city", "hot", slot, 0)
+	srcKey := keycodec.EqBucketKey(tbl.Name, "idx_city", "hot", 0)
 
 	// 遥测登记候选（采样命中后 exec 侧行为，直接模拟）
 	rec := telemetry.New(cli)
@@ -44,12 +46,14 @@ func TestAutoSplitViaTelemetry(t *testing.T) {
 	rec.Sample(ctx, srcKey)
 
 	// Manager 复核：阈值降到 10 → 60 成员触发分裂
-	mgr := NewManager(cli, bm, NewSplitter(cli, reg, bm), NewL4(cli, reg), meta.NewCatalogStore(cli, reg), nil)
+	spt := NewSplitter(cli, reg, bm)
+	spt.grace = 50 * time.Millisecond
+	mgr := NewManager(cli, bm, spt, NewL4(cli, reg), store, nil)
 	mgr.SplitMembers = 10
 	require.NoError(t, mgr.Tick(ctx))
 
 	// 分裂完成断言
-	sh, err := bm.LoadFresh(ctx, tbl.Name, "idx_city", slot)
+	sh, err := bm.LoadFresh(ctx, tbl.Name, "idx_city")
 	require.NoError(t, err)
 	e := sh.Eq["hot"]
 	require.NotNil(t, e, "热值应有分裂条目")
@@ -69,20 +73,22 @@ func TestL4Replicas(t *testing.T) {
 	g := txguard.New(cli, reg, bm)
 	ctx := context.Background()
 	tbl := splitTable()
+	store := meta.NewCatalogStore(cli, reg)
+	require.NoError(t, store.Save(ctx, tbl, 0))
+	require.NoError(t, store.RegisterTable(ctx, tbl.Name))
 
-	slot := uint16(654)
-	pks := sameSlotPKs(tbl.Name, slot, 30, rand.New(rand.NewSource(99)))
+	pks := plainPKs(30)
 	for _, pk := range pks {
 		_, err := g.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: pk, Fields: map[string]string{"city": "hot"}})
 		require.NoError(t, err)
 	}
-	srcKey := keycodec.EqBucketKey(tbl.Name, "idx_city", "hot", slot, 0)
+	srcKey := keycodec.EqBucketKey(tbl.Name, "idx_city", "hot", 0)
 
 	l4 := NewL4(cli, reg)
-	require.NoError(t, l4.Activate(ctx, tbl.Name, "idx_city", "hot", slot, srcKey, 3))
+	require.NoError(t, l4.Activate(ctx, tbl.Name, "idx_city", srcKey, 3))
 
 	// 读路径解析到副本（异 slot）
-	rep, ok := l4.ReplicaFor(ctx, tbl.Name, "idx_city", "hot", srcKey, func(n int) int { return 0 })
+	rep, ok := l4.ReplicaFor(ctx, tbl.Name, "idx_city", srcKey, func(n int) int { return 0 })
 	require.True(t, ok)
 	require.NotEqual(t, keycodec.Slot(srcKey), keycodec.Slot(rep), "副本必须异 slot")
 
@@ -94,8 +100,8 @@ func TestL4Replicas(t *testing.T) {
 	require.Equal(t, 30, m, "副本含全部成员")
 
 	// 回收后回退源桶
-	require.NoError(t, l4.Deactivate(ctx, tbl.Name, "idx_city", "hot", slot, srcKey))
-	_, ok = l4.ReplicaFor(ctx, tbl.Name, "idx_city", "hot", srcKey, func(n int) int { return 0 })
+	require.NoError(t, l4.Deactivate(ctx, tbl.Name, "idx_city", srcKey))
+	_, ok = l4.ReplicaFor(ctx, tbl.Name, "idx_city", srcKey, func(n int) int { return 0 })
 	require.False(t, ok)
 	res, err = cli.Do(ctx, "EXISTS", rep)
 	require.NoError(t, err)

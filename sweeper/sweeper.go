@@ -101,7 +101,6 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, pks []string) 
 	}
 
 	// 3. 按行 slot 分组执行 sweep_batch.lua（活性复查 + 删回执，同 slot 原子）
-	type slotEntry struct{ pk string }
 	groups := map[uint16][]int{} // slot → pk 下标
 	for i, pk := range pks {
 		slot := keycodec.Slot(keycodec.RowKey(t.Name, pk))
@@ -146,8 +145,6 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, pks []string) 
 	var zcmds []kv.Cmd
 	type resvT struct{ rkey, ownerRow string }
 	var reservations []resvT
-	expKey := keycodec.ExpKeyN(t.Name, 0, t.EffectiveExpShards()) // 占位（逐 pk 取分片）
-	_ = expKey
 	for i, pk := range pks {
 		if !cleaned[i] {
 			continue

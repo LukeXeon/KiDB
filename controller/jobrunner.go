@@ -37,7 +37,7 @@ type JobRunner struct {
 	exec       *exec.Executor
 	guard      *txguard.Guard
 	bm         *bucketmap.Store
-	slotsPerT  int           // 每批处理的 slot 数
+	rowsPerT   int           // 每 tick DROP 清理的行数预算（tuning controller.job_rows_per_tick）
 	tickBudget time.Duration // 每 tick 回填时间预算
 	bfLimit    *rate.Limiter // 回填/清理行速率（ddl_backfill_rate_limit 行/s/实例，docs/06 §6.3）
 }
@@ -46,7 +46,7 @@ type JobRunner struct {
 // guard/reg 供 DROP 清理车道（SweepSlot + DeleteRow 走写路径语义）。
 func NewJobRunner(cli kv.Client, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *JobRunner {
 	tn := tuning.Get()
-	return &JobRunner{cli: cli, reg: reg, store: store, cache: cache, exec: e, bm: bm, guard: guard, slotsPerT: tn.Controller.JobSlotsPerTick, tickBudget: tn.JobTickBudget(),
+	return &JobRunner{cli: cli, reg: reg, store: store, cache: cache, exec: e, bm: bm, guard: guard, rowsPerT: tn.Controller.JobRowsPerTick, tickBudget: tn.JobTickBudget(),
 		bfLimit: rate.NewLimiter(rate.Limit(tn.Controller.BackfillRowsPerSec), 1024)}
 }
 
@@ -97,11 +97,11 @@ func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) er
 		// v7.0 游标语义：Cursor = shard×2^32 + 册内 offset（单册常态即 offset；
 		// offset 分页在回填期漂移无害——幂等 ZADD + 写路径覆盖，backfillShard 注）。
 		for {
-			shard := int(job.Cursor >> 32)
+			shard := job.Cursor >> 32
 			if shard >= shards {
 				return r.finish(ctx, def)
 			}
-			off := int(job.Cursor & 0xffffffff)
+			off := job.Cursor & 0xffffffff
 			before := off
 			err := r.backfillShard(ctx, def, idx, shard, &off)
 			if errors.Is(err, errUniqueBackfillConflict) {
@@ -113,9 +113,9 @@ func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) er
 				return err
 			}
 			if off == before { // 本册扫完 → 下一册
-				job.Cursor = int(shard+1) << 32
+				job.Cursor = (shard + 1) << 32
 			} else {
-				job.Cursor = int(shard)<<32 | off
+				job.Cursor = shard<<32 | off
 			}
 			if err := r.store.SetJob(ctx, table, job); err != nil { // 游标落库（断点）
 				return err
@@ -324,8 +324,6 @@ func (r *JobRunner) backfillShard(ctx context.Context, def *meta.TableDef, idx *
 	}
 	return flush()
 }
-
-func sprintOf(v any) string { return fmt.Sprint(v) }
 
 // reserveBatch 唯一索引回填的预约批：SET NX 管线，失败行经自愈复查，
 // 仍冲突 = 存量/并发交错真实重复 → errUniqueBackfillConflict（调用方中止作业）。
