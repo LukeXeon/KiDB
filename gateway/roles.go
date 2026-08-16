@@ -26,11 +26,12 @@ import (
 
 // Roles 后台角色组件集（DI 图节点：wire provider 与测试共用 AssembleRoles）。
 type Roles struct {
-	Elector   *controller.Elector
-	Manager   *controller.Manager
-	JobRunner *controller.JobRunner
-	Sweeper   *sweeper.Sweeper
-	Indexer   *indexer.Indexer
+	Elector    *controller.Elector
+	Manager    *controller.Manager
+	JobRunner  *controller.JobRunner
+	Reconciler *controller.Reconciler
+	Sweeper    *sweeper.Sweeper
+	Indexer    *indexer.Indexer
 }
 
 // AssembleRoles 后台角色组件的唯一构造函数（单一装配点纪律）：
@@ -39,11 +40,12 @@ type Roles struct {
 // provider 完成（di.ProvideExecutor），不在本函数。
 func AssembleRoles(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store) *Roles {
 	return &Roles{
-		Elector:   controller.CtrlLock(cli, reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano())),
-		Manager:   controller.NewManager(cli, bm, controller.NewSplitter(cli, reg, bm), controller.NewL4(cli, reg)),
-		JobRunner: controller.NewJobRunner(cli, store, cache, ex, bm),
-		Sweeper:   sweeper.New(cli, reg),
-		Indexer:   indexer.New(cli),
+		Elector:    controller.CtrlLock(cli, reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano())),
+		Manager:    controller.NewManager(cli, bm, controller.NewSplitter(cli, reg, bm), controller.NewL4(cli, reg)),
+		JobRunner:  controller.NewJobRunner(cli, store, cache, ex, bm),
+		Reconciler: controller.NewReconciler(cli, store, bm, ex.Metrics()),
+		Sweeper:    sweeper.New(cli, reg),
+		Indexer:    indexer.New(cli),
 	}
 }
 
@@ -120,8 +122,9 @@ func (s *Server) controllerRole(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			_ = s.roles.Manager.Tick(ctx)   // 错误不致命：下轮再来（故障安全）
-			_ = s.roles.JobRunner.Tick(ctx) // DDL 作业巡检（docs/06 §6.3）
+			_ = s.roles.Manager.Tick(ctx)    // 错误不致命：下轮再来（故障安全）
+			_ = s.roles.JobRunner.Tick(ctx)  // DDL 作业巡检（docs/06 §6.3）
+			_ = s.roles.Reconciler.Tick(ctx) // 抽样对账（docs/12 §12.8；只观测不修复）
 		}
 	}
 }

@@ -40,17 +40,19 @@ type Tuning struct {
 		LexRefillPage       int `toml:"lex_refill_page"`
 	} `toml:"exec"`
 	Controller struct {
-		SplitMembers        int64   `toml:"split_members"`
-		SplitBytes          int64   `toml:"split_bytes"`
-		SplitQPSRatio       float64 `toml:"split_qps_ratio"`
-		MergeMembers        int64   `toml:"merge_members"`
-		MergeSustainPeriods int     `toml:"merge_sustain_periods"`
-		HotkeyReplicaMax    int     `toml:"hotkey_replica_max"`
-		HotkeyRefreshMs     int     `toml:"hotkey_refresh_ms"`
-		JobTickBudgetMs     int     `toml:"job_tick_budget_ms"`
-		JobSlotsPerTick     int     `toml:"job_slots_per_tick"`
-		BackfillRowsPerSec  int     `toml:"backfill_rows_per_sec"`
-		HotQPS              int64   `toml:"hot_qps"`
+		SplitMembers          int64   `toml:"split_members"`
+		SplitBytes            int64   `toml:"split_bytes"`
+		SplitQPSRatio         float64 `toml:"split_qps_ratio"`
+		MergeMembers          int64   `toml:"merge_members"`
+		MergeSustainPeriods   int     `toml:"merge_sustain_periods"`
+		HotkeyReplicaMax      int     `toml:"hotkey_replica_max"`
+		HotkeyRefreshMs       int     `toml:"hotkey_refresh_ms"`
+		JobTickBudgetMs       int     `toml:"job_tick_budget_ms"`
+		JobSlotsPerTick       int     `toml:"job_slots_per_tick"`
+		BackfillRowsPerSec    int     `toml:"backfill_rows_per_sec"`
+		HotQPS                int64   `toml:"hot_qps"`
+		ReconcileSlotsPerTick int     `toml:"reconcile_slots_per_tick"`
+		ReconcileRowsPerSlot  int     `toml:"reconcile_rows_per_slot"`
 	} `toml:"controller"`
 	Sweeper struct {
 		Batch             int `toml:"batch"`

@@ -28,6 +28,7 @@ type Metrics struct {
 	DDLJobDuration  *prometheus.HistogramVec // ddl_job_duration_seconds{type}
 	ContractViolate prometheus.Counter       // contract_violation_total（应为 0）
 	OwnerTransition prometheus.Counter       // owner_role_transitions_total
+	ReconcileDrift  *prometheus.CounterVec   // reconcile_drift_total{kind}（对账漂移，docs/12 §12.8；正常=0）
 }
 
 // New 注册全部系列；reg 为 nil 时用默认注册表。
@@ -66,13 +67,16 @@ func New(reg prometheus.Registerer) *Metrics {
 		}, []string{"type"}),
 		ContractViolate: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "contract_violation_total"}),
 		OwnerTransition: prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "owner_role_transitions_total"}),
+		ReconcileDrift: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "kidb", Name: "reconcile_drift_total",
+		}, []string{"kind"}),
 	}
 	reg.MustRegister(
 		m.QueryDuration, m.ScatterFanout, m.BucketMembers, m.Splits, m.Merges,
 		m.HotReplicas, m.SweeperLag, m.SweptTotal, m.NearcacheHits, m.NearcacheMiss,
 		m.AsyncBacklog, m.RowsFiltered, m.FullscanTotal, m.LuaStaleRetry, m.LuaNoscript,
 		m.ConfigSet, m.LeaseRefresh, m.DDLJobDuration,
-		m.ContractViolate, m.OwnerTransition,
+		m.ContractViolate, m.OwnerTransition, m.ReconcileDrift,
 	)
 	return m
 }

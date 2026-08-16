@@ -37,6 +37,8 @@ job_tick_budget_ms      = 500     # DDL 回填每 tick 时间预算
 job_slots_per_tick      = 256     # DDL 回填每批 slot 数
 backfill_rows_per_sec   = 10000   # DDL 回填限速（行/s/实例）
 hot_qps                 = 4000    # L4 触发热度（复核参考）
+reconcile_slots_per_tick = 2      # 对账：每 tick 每表抽样 slot 数（docs/12 §12.8）
+reconcile_rows_per_slot  = 64     # 对账：每 slot 登记册首页行数
 
 [sweeper]
 batch                 = 512     # 每 tick 每 slot 到期批
