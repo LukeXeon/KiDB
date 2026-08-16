@@ -22,31 +22,35 @@
 | 分裂-读QPS | > 单节点安全值 40% |
 | 分裂-等值倾斜 | 单值占桶 > 20% |
 
-滞后带（4×）防抖。**合并**：状态机已实现（MergeEq/MergeRange 断点续作）但**自动合并驱动未接线**（热值注册表不记 slot 位，冷桶识别需全量 bm 扫描，收益/成本不成比例）——v6.x review 裁决：不设自动合并，分裂态元数据驻留成本可忽略。范围桶分裂取 score 中位数（`ZRANGE` 搬迁时采样估算）；等值桶子桶数 ×2（pk xxhash64 高位掩码 +1 bit）；字典序副本按值字典序区间分裂。
+滞后带（4×）防抖。**合并**：状态机已实现（MergeEq/MergeRange 断点续作）但**自动合并驱动未接线**（冷桶识别需全量 bm 扫描，收益/成本不成比例）——v6.x review 裁决：不设自动合并，分裂态元数据驻留成本可忽略。范围桶分裂取 score 中位数（`ZRANGE` 搬迁时采样估算）；等值桶子桶数 ×2（v7.0：`xxhash64(pk) % K`，K 翻倍，新旧子桶隶属按取模自然分裂）；字典序副本按值字典序区间分裂。
 
 **同分倾斜兜底（范围桶/字典序副本）**：当采样中位数 == 区间端点（海量成员 score 完全相同，如低基数字段被误建范围索引）时，score 维度裂不开，退化为**复合键分裂**——score 区间保持 `[K,K]` 不动，按 pk xxhash64 高位再分子桶（与等值桶同构）。查询侧对单点 score 追加子桶扇出，由回表校验兜底。该路径纳入 PBT P1 状态机不变式（[12](12-测试方案.md) §12.3）。
 
-## 8.3 在线分裂协议（无停写、无读空洞、无 CROSSSLOT）
+## 8.3 在线分裂协议（无停写、无读空洞；v7.0 异 slot 形态）
 
 > **实现状态**：全协议已落地（controller 包）：SplitEq/SplitRange/MergeEq/MergeRange +
 > 遥测采样（telemetry 包，候选登记）+ Manager 自动复核 + L4 副本生命周期；
 > 写路径双写与读路径双读去重经 PBT P1（rapid 随机交错）验证。
 
-子桶与父桶同 slot（stag 不变），全程单 slot Lua 原子步进（脚本资产见 [05](05-写入路径.md) §5.7）：
+v7.0：子桶与父桶**异 slot**（tag 编入子桶号摊开，[03](03-数据模型与编码.md) §3.3）——搬迁不再是
+单 slot 原子，正确性改由"版本戳 member 幂等 + DRAINING 排干"保证（论证同 [05](05-写入路径.md) §5.1）。
+状态机协调点 = `bucket_state_cas.lua` 对**集中 BucketMap 文档**（单 key）的 version CAS：
 
 ```
-1. bucket_state_cas.lua：父桶置 SPLITTING，BucketMap version+1
-   （HGET bm version 比对 ARGV 期望值，不符返回 stale）
-2. write_row.lua 见 SPLITTING → 双写父桶+子桶（读仍只读父桶）
-3. Controller 分批执行 split_migrate.lua（每批 500 成员，ants 池限速）：
-   逐 member EXISTS 行key（已过期直接丢弃，顺路清理）→ ZADD 子桶 → ZREM 父桶
-4. 搬迁完成 → 父桶 DRAINING，version+1 → 写入只写子桶，读走子桶
+1. bucket_state_cas.lua：父桶置 SPLITTING，bm version+1（期望版本不符返回 stale）
+2. 写路径按客户端 bm 快照（1s 缓存）构造命令组：
+   SPLITTING → 双写父桶+子桶（读仍只读父桶）；DRAINING → 只写子桶（读走子桶）
+   ——快照过期导致的迟到写：落父桶，由第 3/4 步排干循环收容（有界，缓存 1s 内收敛）
+3. Controller 分批搬迁（每批 500 成员，限速）：
+   ZRANGE 父桶取批 → 逐 member EXISTS 行key（已过期直接丢弃，顺路清理）
+   → ZADD 子桶（异 slot，版本戳精确 member，幂等）→ ZREM 父桶（同批精确 member）
+   ——批间崩溃：member 父子双存，读侧 seen 去重；重放幂等
+4. 排干确认：循环重读父桶至空（收容窗口期迟到写）→ 父桶置 DELETED，version+1
 5. UNLINK 父桶 → 子桶 ACTIVE
 ```
 
-- **中断恢复**：状态持久于 BucketMap，Controller 宕机后选主继任者断点续作；客户端旧版本 BucketMap 经 version 校验（写入 Lua 内 CAS）刷新重试；
+- **中断恢复**：状态持久于集中 BucketMap，Controller 宕机后选主继任者断点续作；
 - **合并**为镜像协议（MERGING：双写子桶+父桶 → 搬迁 → 只写父桶 → UNLINK 子桶）；
-- **搬迁 Lua 的调用约束**：KEYS = {父桶, 子桶, 待判行key...} 全部同 slot，KEYS[1]=父桶（带 stag）作为路由依据（契约 R3）；
 - 搬迁期间查询路径：ACTIVE/SPLITTING 读父桶，DRAINING 读子桶——由 BucketMap 版本保证读写双方看到一致状态，回表校验兜底一切中间态。
 
 ## 8.4 热 key 四层防御（读路径，逐级自动启用）
@@ -56,7 +60,7 @@
 | L1 | 近缓存 | **otter/v2**（v3 裁决，见下注）：谓词指纹→pk 列表 + BucketMap 缓存，TTL 3s/容量 1 万（内置常量）；**全扫结果的指纹不入缓存**（W-TinyLFU 自带抗扫描）；回表校验兜底陈旧 |
 | L2 | 请求合并 | `singleflight`（golang.org/x/sync）合并同指纹并发查询：leader 物化 pk 列表（上限 2^20，超出各调用方退回独立流式——有界性优先），followers 共享后各自回表校验；随 L1 装配生效 |
 | L3 | 副本读 | 经 `Client.DoReplica`/`PipelineReplica`（可选能力，[09](09-后端契约与适配器.md) §9.4）：适配器把只读命令路由到 slave/只读集群。exec 全部只读散取/回表经分流出口；开关 = `replica_read` 变量 × 能力位（轮询热更）。适配器不支持则该层自动关闭。回表校验兜底副本滞后 |
-| L4 | 热桶值复制 | 高热候选（成员 ≥ split_members/50）自动建 K 个**异 slot** 只读副本（副本 key = 源桶 key 的 stag 步进替换为 `SlotTag((源slot + k×1820) % 16384)`——确定性寻址、k∈[1,8] 互不撞 slot），随机读其一；**注册按桶粒度** `r4:{encVal}:{slot}`（按值注册会把其他 slot 重定向到单 slot 副本——行凭空消失，v6.x review 实证修复）；生命周期由 Controller Tick 驱动：1s 滚动刷新（`replica_refresh.lua` v2），st 采样信号连续冷却 3 tick 自动回收；读侧对死副本（过期未续）经同 pipeline `EXISTS` 判定**回退源桶**（行不消失——此前无回退无刷新无回收，热值激活 60s 后查询永久空集，v6.x review 实证修复） |
+| L4 | 热桶值复制 | 高热候选（成员 ≥ split_members/50）自动建 K 个**异 slot** 只读副本（副本 key = 源桶 key 的 hash tag 步进替换为 `SlotTag((源slot + k×1820) % 16384)`——确定性寻址、k∈[1,8] 互不撞 slot），随机读其一；**注册按桶粒度** `r4:{桶key}`（按值注册会把其他桶重定向到单桶副本——行凭空消失，v6.x review 实证修复）；生命周期由 Controller Tick 驱动：1s 滚动刷新（`replica_refresh.lua` v2），st 采样信号连续冷却 3 tick 自动回收；读侧对死副本（过期未续）经同 pipeline `EXISTS` 判定**回退源桶**（行不消失——此前无回退无刷新无回收，热值激活 60s 后查询永久空集，v6.x review 实证修复） |
 
 L4 细节：
 
@@ -81,11 +85,25 @@ L4 细节：
   2. 抢到 → 进入 owner 态：启动分裂/合并控制循环 + DDL 作业巡检（[06](06-元数据与Schema演进.md) §6.3）
   3. 在任期间：watchdog 协程每 1/3 TTL 执行 lock_renew.lua 续约
      - 续约失败（锁丢/超时/网络断）→ 【立即】退出 owner 态，停止一切控制动作 → 回第 1 步
+     - 自查忙（见下）→ 主动卸任 release + 冷却 → 回第 1 步（仍带退避）
   4. 没抢到 → 跟随者态，周期重试（带抖动退避）
 ```
 
-- Sweeper 的 slot 区间锁同理（每区间一把锁，抢到才清扫该区，续约失败立即停扫该区）；
-- ReadWriteOnly 节点（引导配置豁免）不启动上述循环、不参与抢锁；
+**角色负载自适应（v7.0 触发二/四：ReadWriteOnly 开关取消 + 空窗上界）**：
+
+- **取消 `ReadWriteOnly` 手动豁免**（引导配置字段删除）——所有节点必须参与全部后台
+  角色竞选（Controller 锁 / Sweeper 册锁 / Indexer 分工）；原"低资源实例/边缘只读
+  代理"豁免场景由退避机制自动承接（低流量节点自然多承担后台）；
+- **忙闲退避式竞选**（无阈值开关）：忙闲信号 = 本实例 inflight 请求计数（请求边界
+  原子增减）；抢锁前按 inflight 比例退避——越忙退避越久，空闲节点自然先拿锁；
+  任职/持锁期间变忙 → 主动卸任让出（当前批做完不再续抢）；
+- **空窗上界（内置 300s，不设开关）**：锁持续无人接管超上界 → 所有节点**无视退避
+  直接竞选**——兜住"全员持续忙 → 自治死透 + 热桶越忙越不分裂的正反馈膨胀"
+  （退避设计唯一的无界点）；空窗时长进指标；
+- **全员忙语义**：空窗（≤300s）期间分裂/L4/异步补写暂停属**设计内行为**——性能与
+  可见性收敛功能让路读写，正确性不依赖（回表校验滤脏 + 行物理 TTL 兜底）；
+- 指标：`role_concede_total{reason=busy}`、空窗时长（"注册即接线"纪律）；
+- Sweeper 册锁 / Indexer 分工同理挂退避与退让；
 - 全部自治角色故障安全：全挂只会变慢/变浪费，不出错行（[01](01-定位架构与TiDB对齐.md) §1.7）。
 
 ## 8.6 写热点的出路
