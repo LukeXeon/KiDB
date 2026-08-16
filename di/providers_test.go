@@ -16,14 +16,14 @@ import (
 func TestProvideRolesRWOnly(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
 	m := metrics.New(prometheus.NewRegistry())
-	ex := ProvideExecutor(cli, reg, m, ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache())
+	ex := ProvideExecutor(cli, reg, m, ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache(), ProvideSyncClock(cli))
 	require.NotNil(t, ex)
 
 	store := ProvideCatalogStore(cli, reg)
-	cache := ProvideCatalogCache(store)
+	cache := ProvideCatalogCache(store, m)
 	bm := ProvideBucketMap(cli, reg)
 
-	roles := ProvideRoles(kidb.Bootstrap{}, cli, reg, store, cache, ex, bm, ProvideGuard(cli, reg, bm))
+	roles := ProvideRoles(kidb.Bootstrap{}, cli, reg, store, cache, ex, bm, ProvideGuard(cli, reg, bm, ProvideSyncClock(cli)))
 	require.NotNil(t, roles)
 	require.NotNil(t, roles.Elector)
 	require.NotNil(t, roles.Manager)
@@ -31,7 +31,7 @@ func TestProvideRolesRWOnly(t *testing.T) {
 	require.NotNil(t, roles.Sweeper)
 	require.NotNil(t, roles.Indexer)
 
-	rwOnly := ProvideRoles(kidb.Bootstrap{ReadWriteOnly: true}, cli, reg, store, cache, ex, bm, ProvideGuard(cli, reg, bm))
+	rwOnly := ProvideRoles(kidb.Bootstrap{ReadWriteOnly: true}, cli, reg, store, cache, ex, bm, ProvideGuard(cli, reg, bm, ProvideSyncClock(cli)))
 	require.Nil(t, rwOnly)
 }
 
@@ -40,8 +40,8 @@ func TestProvideEngineDepsGate(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
 	store := ProvideCatalogStore(cli, reg)
 	m := metrics.New(prometheus.NewRegistry())
-	deps := ProvideEngineDeps(cli, reg, store, ProvideCatalogCache(store),
-		ProvideExecutor(cli, reg, m, ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache()),
-		ProvideGuard(cli, reg, ProvideBucketMap(cli, reg)), m)
+	deps := ProvideEngineDeps(cli, reg, store, ProvideCatalogCache(store, m),
+		ProvideExecutor(cli, reg, m, ProvideTelemetry(cli), ProvideBucketMap(cli, reg), ProvideL4(cli, reg), ProvideNearCache(), ProvideSyncClock(cli)),
+		ProvideGuard(cli, reg, ProvideBucketMap(cli, reg), ProvideSyncClock(cli)), m)
 	require.NotNil(t, deps.FullscanGate)
 }

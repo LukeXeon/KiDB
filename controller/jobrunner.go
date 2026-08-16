@@ -2,8 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
+
+	"strconv"
 
 	"golang.org/x/time/rate"
 
@@ -89,7 +93,13 @@ func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) er
 		deadline := time.Now().Add(r.tickBudget)
 		for job.Cursor < keycodec.NumSlots {
 			hi := min(job.Cursor+r.slotsPerT, keycodec.NumSlots)
-			if err := r.backfillSlots(ctx, def, idx, job.Cursor, hi); err != nil {
+			err := r.backfillSlots(ctx, def, idx, job.Cursor, hi)
+			if errors.Is(err, errUniqueBackfillConflict) {
+				// 回填期预约冲突 = 查重后与并发写入交错产生了真实重复
+				// （MySQL 在线 DDL 同款收尾失败语义）——回滚索引定义，作业终止。
+				return r.abortCreateIndex(ctx, def, job, err)
+			}
+			if err != nil {
 				return err
 			}
 			job.Cursor = hi
@@ -101,6 +111,40 @@ func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) er
 			return r.finish(ctx, def)
 		}
 		return r.store.SetJob(ctx, table, job) // 游标落库（断点）
+	}
+	return nil
+}
+
+// uniqueResv 一条待建的唯一预约（回填收集）。
+type uniqueResv struct{ encVal, pk string }
+
+// errUniqueBackfillConflict 唯一索引回填期预约冲突（存量/并发交错产生重复值）。
+var errUniqueBackfillConflict = errors.New("kidb: unique backfill conflict")
+
+// abortCreateIndex 建索引失败回滚：摘除 Building 索引定义 → 清作业 → 失效缓存。
+// 已回填的桶成员不可见（索引已不在 Catalog）且经对账/后续 DROP 清理面覆盖。
+func (r *JobRunner) abortCreateIndex(ctx context.Context, def *meta.TableDef, job *meta.DDLJob, cause error) error {
+	fresh, err := r.store.Load(ctx, def.Name)
+	if err != nil || fresh == nil {
+		return err
+	}
+	kept := fresh.Indexes[:0]
+	for _, i := range fresh.Indexes {
+		if i.ID != job.Index.ID {
+			kept = append(kept, i)
+		}
+	}
+	fresh.Indexes = kept
+	if err := r.store.Save(ctx, fresh, fresh.Ver); err != nil {
+		return err
+	}
+	if err := r.store.ClearJob(ctx, def.Name); err != nil {
+		return err
+	}
+	r.cache.Invalidate()
+	slog.Warn("kidb 建唯一索引中止（存量/并发交错重复值），索引已回滚", "table", def.Name, "index", job.Index.ID, "cause", cause)
+	if m := r.exec.Metrics(); m != nil {
+		m.DDLJobDuration.WithLabelValues("create_index_abort").Observe(time.Since(time.Unix(job.Started, 0)).Seconds())
 	}
 	return nil
 }
@@ -139,6 +183,9 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 	s := r.exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, SlotLo: lo, SlotHi: hi})
 	defer s.Close()
 	var cmds []kidb.Cmd
+	// 唯一索引回填建预约（review 实证缺失：不建预约 = 存量值对唯一约束不可见）。
+	// 先与 ZADD 同 pipeline SET NX；NX 失败的行经预约自愈复查，仍冲突 = 真实重复 → 中止作业。
+	var resv []uniqueResv
 	rowsInFlight := 0
 	flush := func() error {
 		if len(cmds) == 0 {
@@ -149,10 +196,18 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		if err := r.bfLimit.WaitN(ctx, rowsInFlight); err != nil {
 			return err
 		}
-		_, err := r.cli.Pipeline(ctx, cmds)
+		if _, err := r.cli.Pipeline(ctx, cmds); err != nil {
+			return err
+		}
 		cmds = cmds[:0]
 		rowsInFlight = 0
-		return err
+		if len(resv) > 0 {
+			if err := r.reserveBatch(ctx, def, idx, resv); err != nil {
+				return err
+			}
+			resv = resv[:0]
+		}
+		return nil
 	}
 	for {
 		row, err := s.Next()
@@ -198,6 +253,9 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		member := rowcodec.EncodeMember(pk, covers)
 		slot := keycodec.Slot(keycodec.RowKey(def.Name, pk))
 		rowsInFlight++
+		if idx.Kind == meta.IndexUnique {
+			resv = append(resv, uniqueResv{encVal: enc, pk: pk})
+		}
 		switch idx.Kind {
 		case meta.IndexRange:
 			score, err := rowcodec.ScoreOf(colDef.Type, enc)
@@ -227,3 +285,34 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 }
 
 func sprintOf(v any) string { return fmt.Sprint(v) }
+
+// reserveBatch 唯一索引回填的预约批：SET NX 管线，失败行经自愈复查，
+// 仍冲突 = 存量/并发交错真实重复 → errUniqueBackfillConflict（调用方中止作业）。
+func (r *JobRunner) reserveBatch(ctx context.Context, def *meta.TableDef, idx *meta.IndexDef, resv []uniqueResv) error {
+	cmds := make([]kidb.Cmd, 0, len(resv))
+	for _, rv := range resv {
+		rk := keycodec.RowKey(def.Name, rv.pk)
+		cmds = append(cmds, kidb.Cmd{Name: "SET", Args: []any{
+			keycodec.UniqueKey(def.Name, idx.ID, rv.encVal),
+			rk + "|" + strconv.FormatInt(time.Now().Unix(), 10), "NX",
+		}})
+	}
+	results, err := r.cli.Pipeline(ctx, cmds)
+	if err != nil {
+		return err
+	}
+	for i, res := range results {
+		if res != nil && fmt.Sprint(res) == "OK" {
+			continue
+		}
+		// NX 失败：占有者活检查 + 自愈（与写路径同一纪律，txguard 导出方法）
+		ok, err := r.guard.ReserveUniqueForBackfill(ctx, def, idx.ID, resv[i].encVal, resv[i].pk)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: %s on %s (rows ...%s)", errUniqueBackfillConflict, resv[i].encVal, idx.ID, resv[i].pk)
+		}
+	}
+	return nil
+}

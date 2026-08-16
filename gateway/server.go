@@ -28,22 +28,33 @@ type Server struct {
 	cfg   *config.Store // 配置存储（SET GLOBAL 持久化桥 + 远端变更轮询，docs/10 §10.2）
 	roles *Roles        // 后台角色（nil = ReadWriteOnly 豁免，docs/08 §8.5）
 
-	roleCancel context.CancelFunc
+	lifeCancel context.CancelFunc // 进程级生命周期：角色循环与配置轮询同归
 }
 
 // ConfigActor 配置变更的修改者标识（cfg:global _audit 字段）。
 const ConfigActor = "kidb-server"
 
-// NewServer 组装网关（DI 入口）：引擎 + wire server + 账号/变量/后台角色。
-// roles 为 nil 且非 ReadWriteOnly 时由本函数装配（测试路径）；
-// 生产路径 DI 图（di.ProvideRoles）按 ReadWriteOnly 决定构造与否。
+// NewServer 组装网关（DI 生产入口）：引擎 + wire server + 账号/变量/后台角色。
+// fail-fast 纪律（review 实证）：依赖缺口即装配事故，直接报错——
+// 不在这里自愈装配（nil-fill 自愈是"装配缺口"模式的小型复活；
+// 测试路径的默认补齐收敛在 newServerWithListener 一处，与生产不共享语义）。
 func NewServer(deps engine.Deps, boot kidb.Bootstrap, roles *Roles, cfgStore *config.Store) (*Server, error) {
+	if deps.FullscanGate == nil {
+		return nil, fmt.Errorf("gateway: FullscanGate 未装配")
+	}
+	if cfgStore == nil {
+		return nil, fmt.Errorf("gateway: config.Store 未装配")
+	}
+	if roles == nil && !boot.ReadWriteOnly {
+		return nil, fmt.Errorf("gateway: 后台角色未装配且非 ReadWriteOnly")
+	}
 	return newServerWithListener(deps, boot, nil, roles, cfgStore)
 }
 
 // newServerWithListener 允许注入自定义 listener（测试走随机端口）。
 func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener, roles *Roles, cfgStore *config.Store) (*Server, error) {
-	// 全扫闸门（docs/07 §7.4）：引擎层全扫的唯一执法点（nil = 装配缺口，补齐）
+	// 测试路径补齐（仅本函数；生产 NewServer fail-fast 不经过这里）。
+	// 注意：roles 与 exec 共享同一 bm 实例（双实例 = 分裂状态双缓存不一致）。
 	if deps.FullscanGate == nil {
 		deps.FullscanGate = engine.NewFullscanGate(deps.Exec.Metrics())
 	}
@@ -69,10 +80,12 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 		ed.Close()
 	}
 
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	s := &Server{
-		deps:  deps,
-		cfg:   cfgStore,
-		roles: roles,
+		deps:       deps,
+		cfg:        cfgStore,
+		roles:      roles,
+		lifeCancel: lifeCancel,
 	}
 
 	// 会话构造：engine.Session（角色 + 配置存储句柄；事务显式拒绝内建于类型）
@@ -117,14 +130,15 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 
 	// 配置即数据（docs/10 §10.2）：启动种子（cfg:global → gms 注册表）+
 	// 版本轮询（远端 SET GLOBAL 秒级收敛到本实例）
-	if err := s.syncSysvars(context.Background()); err != nil {
+	if err := s.syncSysvars(lifeCtx); err != nil {
+		lifeCancel()
 		return nil, fmt.Errorf("gateway: 配置种子加载: %w", err)
 	}
-	go s.pollSysvars(context.Background())
+	go s.pollSysvars(lifeCtx)
 
 	// 后台角色自动选举（docs/08 §8.5：默认参与，ReadWriteOnly 显式豁免）
 	if s.roles != nil {
-		s.startRoles(context.Background())
+		s.startRoles(lifeCtx)
 	}
 	return s, nil
 }
@@ -132,10 +146,13 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 // Start 启动监听（阻塞）。
 func (s *Server) Start() error { return s.srv.Start() }
 
-// Close 停服：先停后台角色再关协议层。
+// Close 停服：统一取消生命周期（角色循环 + 配置轮询）→ 执行器附件 → 协议层。
 func (s *Server) Close() error {
-	if s.roleCancel != nil {
-		s.roleCancel()
+	if s.lifeCancel != nil {
+		s.lifeCancel()
+	}
+	if s.deps.Exec != nil {
+		_ = s.deps.Exec.Close() // L1 维护协程等（review 实证：此前随 Server 泄漏）
 	}
 	return s.srv.Close()
 }

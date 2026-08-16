@@ -6,8 +6,8 @@ package sweeper
 
 import (
 	"context"
-	"math"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -117,7 +117,10 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, s
 		keyIdx[k] = len(extraKeys)
 		return len(extraKeys)
 	}
-	var reservations []string
+	// 预约收集为 (rkey, 期望占有者行 key) 对——释放时占有者比对
+	// （review 实证：无比对会在"清扫途中新写入同值"窗口误删活行预约）。
+	type resvT struct{ rkey, ownerRow string }
+	var reservations []resvT
 
 	argv := []any{strconv.FormatInt(now, 10), strconv.Itoa(len(pks))}
 	for i, pk := range pks {
@@ -130,7 +133,7 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, s
 					buckets = append(buckets, [2]string{parts[0], parts[1]})
 				}
 			} else if strings.HasPrefix(f, "__uniq:") {
-				reservations = append(reservations, v)
+				reservations = append(reservations, resvT{v, keycodec.RowKey(t.Name, pk)})
 			}
 		}
 		argv = append(argv, pk, strconv.Itoa(ref(keycodec.ReceiptKey(t.Name, pk))), strconv.Itoa(len(buckets)))
@@ -149,9 +152,17 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, s
 		return 0, err
 	}
 
-	// 4. 释放唯一预约（异 slot DEL；占有者行已死，releaseUnique 的占有者比对在 Lua 提交后安全）
-	for _, rkey := range reservations {
-		_, _ = s.cli.Do(ctx, "DEL", rkey)
+	// 4. 释放唯一预约（异 slot；占有者比对——只删仍属于死行的预约，
+	// 防误删"清扫窗口内同值新写入"的活预约；占有者变更 = 已自愈，不动）
+	for _, rv := range reservations {
+		cur, err := s.cli.Do(ctx, "GET", rv.rkey)
+		if err != nil || cur == nil {
+			continue
+		}
+		if strings.SplitN(fmt.Sprint(cur), "|", 2)[0] != rv.ownerRow {
+			continue
+		}
+		_, _ = s.cli.Do(ctx, "DEL", rv.rkey)
 	}
 
 	n, _ := strconv.Atoi(fmt.Sprint(out))

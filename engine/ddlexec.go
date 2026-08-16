@@ -13,8 +13,8 @@ import (
 	"kidb/i18n"
 	"kidb/keycodec"
 	"kidb/meta"
-	"kidb/tuning"
 	"kidb/rowcodec"
+	"kidb/tuning"
 )
 
 // ddlexec.go：DDL 执行（docs/06 §6.3 作业流）——gms 引擎的 DDL 接口实现。
@@ -45,6 +45,16 @@ func (d *Database) createTable(ctx *sql.Context, name string, schema sql.Primary
 	if cur != nil {
 		return sql.ErrTableAlreadyExists.New(name)
 	}
+	// DROP 清理作业在途的同名表拒绝重建（review 实证：不挡住则旧作业被
+	// "Catalog 在" 防护永久卡死，且旧代行与新表同 key 命名空间——幽灵行
+	// 对新表可见）。作业完成后（秒级~分钟级）重试即可。
+	if jobs, err := d.p.deps.Store.ListDropJobs(ctx); err == nil {
+		for _, j := range jobs {
+			if j.Table == name {
+				return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.dropjob_in_progress", name))
+			}
+		}
+	}
 	if err := d.p.deps.Store.Save(ctx, def, 0); err != nil {
 		return err
 	}
@@ -55,9 +65,8 @@ func (d *Database) createTable(ctx *sql.Context, name string, schema sql.Primary
 	return nil
 }
 
-// DropTable 删表（sql.TableDropper）：同步清理数据（逐行 DeleteRow 保证
-// 索引/回执/登记册/预约全清）→ Catalog 删除 + 注销注册表。
-// 大表后台清理作业化是 C 组后续项（ROADMAP 在案）。
+// DropTable 删表（sql.TableDropper）：行数 ≤ drop_sync_max_rows 同步清理
+// （逐行 DeleteRow 全清语义）；超出走 c:dropjobs 后台清理作业（下文大表分支）。
 func (d *Database) DropTable(ctx *sql.Context, name string) error {
 	return sqlErr(d.dropTable(ctx, name))
 }
@@ -172,6 +181,15 @@ func (t *Table) createIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
 		return err
 	}
 
+	// 唯一索引存量查重（MySQL 语义：存量重复值拒建——ERROR 1062）。
+	// 同步全扫流式去重；去重集超上限拒建（诚实红线，docs/14）。
+	// 查重与并发写入的交错窗口由回填期预约冲突中止兜底（docs/06 §6.3）。
+	if idx.Kind == meta.IndexUnique {
+		if err := t.checkUniqueNoDup(ctx, def, idx); err != nil {
+			return err
+		}
+	}
+
 	// 先以 Building 追加（写入路径即刻双写覆盖——无数据空洞窗口）
 	idxCopy := *idx
 	idxCopy.Building = true
@@ -182,7 +200,7 @@ func (t *Table) createIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
 	def.Ver++ // Save 成功即版本递增——后续同函数内再 Save 必须换基线
 
 	// 空表快速通道：无回填对象，直接转可见（无需作业）
-	n, err := deps.Exec.RowCount(ctx, def, time.Now().Unix())
+	n, err := deps.Exec.RowCount(ctx, def)
 	if err != nil {
 		return err
 	}
@@ -215,6 +233,45 @@ func (t *Table) createIndex(ctx *sql.Context, idxDef sql.IndexDef) error {
 	}
 	deps.Cache.Invalidate()
 	return nil
+}
+
+// checkUniqueNoDup 唯一索引存量查重：全扫投影单列，流式去重；
+// 命中重复 → 1062；distinct 超 l2_max_collect → 拒建（内存有界红线）。
+// NULL 不入唯一约束（MySQL 语义：多 NULL 合法——写路径对 NULL 不建预约同源）。
+func (t *Table) checkUniqueNoDup(ctx *sql.Context, def *meta.TableDef, idx *meta.IndexDef) error {
+	col := idx.Columns[0]
+	colDef, ok := def.Column(col)
+	if !ok {
+		return fmt.Errorf("%s", i18n.T("err.column_missing", col))
+	}
+	s := t.deps.Exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, Projection: []string{col}})
+	defer s.Close()
+	seen := make(map[string]struct{}, 1024)
+	cap_ := tuning.Get().Exec.L2MaxCollect
+	for {
+		row, err := s.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if len(row) == 0 || row[0] == nil {
+			continue
+		}
+		enc, err := rowcodec.Encode(colDef.Type, row[0])
+		if err != nil {
+			return err
+		}
+		if _, dup := seen[enc]; dup {
+			return sql.NewUniqueKeyErr(fmt.Sprintf("%s on %s", enc, idx.ID), false, nil)
+		}
+		seen[enc] = struct{}{}
+		if len(seen) > cap_ {
+			return fmt.Errorf("%w: %s", kidb.ErrUnsupported,
+				i18n.T("ddl.unique_dedup_overflow", def.Name, idx.ID, cap_))
+		}
+	}
 }
 
 // DropIndex 删索引（sql.IndexAlterableTable）：Catalog 移除 → 桶清理

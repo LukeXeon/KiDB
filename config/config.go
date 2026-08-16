@@ -13,6 +13,7 @@ import (
 	"kidb"
 	"kidb/i18n"
 	"kidb/keycodec"
+	"kidb/metrics"
 	"kidb/script"
 )
 
@@ -40,7 +41,11 @@ type Store struct {
 	reg   *script.Registry
 	actor string // 修改者标识（_audit）
 	clock func() time.Time
+	m     *metrics.Metrics // nil = no-op（config_set_total{result}）
 }
+
+// SetMetrics 接入指标。
+func (s *Store) SetMetrics(m *metrics.Metrics) { s.m = m }
 
 // New 构造。
 func New(cli kidb.KvClient, reg *script.Registry, actor string) *Store {
@@ -87,9 +92,18 @@ func (s *Store) Set(ctx context.Context, name, value string) error {
 		}
 		arr, _ := out.([]any)
 		if len(arr) > 0 && fmt.Sprint(arr[0]) == "stale" {
+			if s.m != nil {
+				s.m.ConfigSet.WithLabelValues("stale").Inc()
+			}
 			continue // 并发写冲突重试（docs/10 §10.2）
 		}
+		if s.m != nil {
+			s.m.ConfigSet.WithLabelValues("ok").Inc()
+		}
 		return nil
+	}
+	if s.m != nil {
+		s.m.ConfigSet.WithLabelValues("conflict").Inc()
 	}
 	return fmt.Errorf("%w: %s", kidb.ErrStaleMetadata, i18n.T("cfg.set_conflict", name))
 }
@@ -104,34 +118,6 @@ func (s *Store) Version(ctx context.Context) (uint64, error) {
 		return 0, nil
 	}
 	return strconv.ParseUint(fmt.Sprint(res), 10, 64)
-}
-
-// All 返回全部变量当前值（SHOW GLOBAL VARIABLES 数据源）。
-func (s *Store) All(ctx context.Context) (map[string]string, error) {
-	res, err := s.cli.Do(ctx, "HGETALL", keycodec.CfgGlobalKey())
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	for n, d := range Vars {
-		out[n] = d.Default
-	}
-	switch v := res.(type) {
-	case map[string]string:
-		for k, val := range v {
-			if !strings.HasPrefix(k, "_") {
-				out[k] = val
-			}
-		}
-	case []any:
-		for i := 0; i+1 < len(v); i += 2 {
-			k := fmt.Sprint(v[i])
-			if !strings.HasPrefix(k, "_") {
-				out[k] = fmt.Sprint(v[i+1])
-			}
-		}
-	}
-	return out, nil
 }
 
 func boolValidator(s string) error {

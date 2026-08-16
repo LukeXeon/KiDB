@@ -40,9 +40,15 @@ type Roles struct {
 // 读路径附件（telemetry/bm/l4/L1 近缓存）的 executor 接线在 DI executor
 // provider 完成（di.ProvideExecutor），不在本函数。
 func AssembleRoles(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *Roles {
+	sp := controller.NewSplitter(cli, reg, bm)
+	sp.SetMetrics(ex.Metrics())
+	l4 := controller.NewL4(cli, reg)
+	l4.SetMetrics(ex.Metrics())
+	el := controller.CtrlLock(cli, reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano()))
+	el.SetMetrics(ex.Metrics())
 	return &Roles{
-		Elector:    controller.CtrlLock(cli, reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano())),
-		Manager:    controller.NewManager(cli, bm, controller.NewSplitter(cli, reg, bm), controller.NewL4(cli, reg)),
+		Elector:    el,
+		Manager:    controller.NewManager(cli, bm, sp, l4, store, ex.Metrics()),
 		JobRunner:  controller.NewJobRunner(cli, reg, store, cache, ex, bm, guard),
 		Reconciler: controller.NewReconciler(cli, store, bm, ex.Metrics()),
 		Sweeper:    sweeper.New(cli, reg),
@@ -57,20 +63,15 @@ var (
 	sweepRange  = tuning.Get().Sweeper.SweepRangeSlots
 )
 
-// startRoles 启动后台角色循环。
+// startRoles 启动后台角色循环（ctx 即 Server 生命周期——Close 统一取消；
+// 角色循环与配置轮询同生命周期，review 实证曾有两套取消源）。
 func (s *Server) startRoles(ctx context.Context) {
-	if s.roleCancel != nil {
-		return
-	}
-	roleCtx, cancel := context.WithCancel(ctx)
-	s.roleCancel = cancel
-
 	// 语义开关轮询装配（L3 副本读 / 行级近缓存；值读 gms 注册表）
-	s.attachSemanticSwitches(roleCtx)
+	s.attachSemanticSwitches(ctx)
 
-	go s.roles.Elector.Campaign(roleCtx, s.controllerRole)
-	go s.sweeperLoop(roleCtx)
-	go s.indexerLoop(roleCtx)
+	go s.roles.Elector.Campaign(ctx, s.controllerRole)
+	go s.sweeperLoop(ctx)
+	go s.indexerLoop(ctx)
 }
 
 // attachSemanticSwitches 语义开关轮询（1s，与 schema lease 同节奏）：

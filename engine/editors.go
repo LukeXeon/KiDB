@@ -113,7 +113,9 @@ func (e *editor) Replace(ctx *sql.Context, row sql.Row) error {
 }
 
 // Update 单行更新：主键不变 → 写入新行（Lua 撤旧建新）；
-// 主键变更 → 删旧行 + 写新行（两步非原子——无跨 slot 事务定位，docs/01 §1.2）。
+// 主键变更 → 判重（撞活行 = 1062，MySQL 语义）→ 删旧行 + 写新行
+// （两步非原子——无跨 slot 事务定位，docs/01 §1.2；判重是预读，
+// 并发交错窗口如实声明在 docs/05 §5.5）。
 func (e *editor) Update(ctx *sql.Context, old, new sql.Row) error {
 	return sqlErr(e.update(ctx, old, new))
 }
@@ -131,6 +133,13 @@ func (e *editor) update(ctx *sql.Context, old, new sql.Row) error {
 		return err
 	}
 	if oldPK != newPK {
+		// 新主键撞活行 = 1062（review 实证：不判重会静默覆盖受害者行——
+		// WriteRow 是 upsert 语义，行 key 写入无内建判重）。
+		if existing, err := e.readExisting(ctx, newPK); err != nil {
+			return err
+		} else if existing != nil {
+			return sql.NewUniqueKeyErr(newPK, true, existing)
+		}
 		if _, err := e.t.deps.Guard.DeleteRow(ctx, e.t.def, oldPK); err != nil {
 			return err
 		}
@@ -187,9 +196,6 @@ func (e *editor) readExisting(ctx *sql.Context, pk string) (sql.Row, error) {
 	}
 	return rowcodec.DecodeRow(e.t.def, pk, raw), nil
 }
-
-// rowKeyOf 行 key（keycodec 布局）。
-func rowKeyOf(table, pk string) string { return "d:" + table + ":{" + pk + "}" }
 
 // splitRow 把 gms 行拆为 pk 与编码字段（nil → NULL = 字段缺失）。
 // 末位 _ttl 伪列（docs/07 §7.1）：>0 行 TTL 秒 / 0 显式无 TTL（覆盖表级

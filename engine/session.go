@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"strings"
+
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
@@ -38,6 +40,33 @@ func RejectRO(ctx *sql.Context) error {
 		return kidb.ErrReadOnly
 	}
 	return nil
+}
+
+// SetSessionVariable 会话变量执法（review 实证修复）：autocommit=0 在无事务
+// 定位下是数据谎言——用户以为进入了可 ROLLBACK 的事务，写入却逐语句即时提交。
+// 显式拒绝（1235），与显式 BEGIN 同一口径。
+func (s *Session) SetSessionVariable(ctx *sql.Context, name string, value any) error {
+	if strings.EqualFold(name, sql.AutoCommitSessionVar) && isFalsy(value) {
+		return sqlErr(kidb.ErrUnsupported)
+	}
+	return s.BaseSession.SetSessionVariable(ctx, name, value)
+}
+
+// isFalsy 识别 autocommit 的关闭形态（gms 契约：0/OFF/false 关闭）。
+func isFalsy(v any) bool {
+	switch t := v.(type) {
+	case int8:
+		return t == 0
+	case int64:
+		return t == 0
+	case int:
+		return t == 0
+	case bool:
+		return !t
+	case string:
+		return strings.EqualFold(t, "0") || strings.EqualFold(t, "off") || strings.EqualFold(t, "false")
+	}
+	return false
 }
 
 // ==== TransactionSession（docs/02 §2.1：缓存定位无事务）====

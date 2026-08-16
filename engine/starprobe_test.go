@@ -37,7 +37,7 @@ func TestProbeStarProjection(t *testing.T) {
 	}
 	deps := Deps{
 		Client: cli, Reg: reg, Store: store, Cache: meta.NewCatalogCache(store),
-		Exec:  exec.New(cli, reg), Guard: g,
+		Exec: exec.New(cli, reg), Guard: g,
 		FullscanGate: func(ctx *sql.Context, table string, rows uint64) error { return nil },
 	}
 	if err := store.Save(context.Background(), def, 0); err != nil {

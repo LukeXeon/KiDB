@@ -53,6 +53,11 @@ type Options struct {
 }
 
 // New 构造适配器。返回的对象可直接作为 kidb.KvClient 使用。
+//
+// 协议钉住 RESP2（docs/09 §9.2）：go-redis v9.22 起未显式设置的 Protocol
+// 被静默改为 RESP3（options.go init: <2→3）——RESP3 激活 push 通知处理器，
+// 读回复前 PeekReplyType 的竞态曾实证挂死测试（miniredis），且 HELLO 3 对
+// RESP2-only 代理/老服务端直接断连。KiDB 不消费任何 push 语义，显式钉 2。
 func New(addrs []string, opt Options) *Adapter {
 	base := &redis.ClusterOptions{
 		Addrs:        addrs,
@@ -60,6 +65,7 @@ func New(addrs []string, opt Options) *Adapter {
 		ReadTimeout:  opt.ReadTimeout,
 		WriteTimeout: opt.WriteTimeout,
 		ClusterSlots: opt.ClusterSlots,
+		Protocol:     2,
 	}
 	a := &Adapter{
 		cli:     redis.NewClusterClient(base),
@@ -93,7 +99,21 @@ func (a *Adapter) Do(ctx context.Context, cmd string, args ...any) (any, error) 
 	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}
-	return normalizeReply(res), err
+	return normalizeCmdReply(cmd, res), err
+}
+
+// normalizeCmdReply 按命令名归一泛化回复（契约 docs/09 §9.3 R2）：
+// Hash 类回复（HGETALL）统一为 map[string]string——RESP2 下 go-redis 泛化 Do
+// 对 HGETALL 返回扁平数组（RESP3 才给 map），由适配器补齐契约形态。
+func normalizeCmdReply(cmd string, v any) any {
+	if arr, ok := v.([]any); ok && strings.EqualFold(cmd, "HGETALL") && len(arr)%2 == 0 {
+		m := make(map[string]string, len(arr)/2)
+		for i := 0; i < len(arr); i += 2 {
+			m[fmt.Sprint(arr[i])] = fmt.Sprint(arr[i+1])
+		}
+		return m
+	}
+	return normalizeReply(v)
 }
 
 // normalizeReply 归一 go-redis 泛化命令的宽松返回形态：
@@ -145,7 +165,7 @@ func (a *Adapter) Pipeline(ctx context.Context, cmds []kidb.Cmd) ([]any, error) 
 				firstErr = err
 			}
 		default:
-			results[i] = normalizeReply(v)
+			results[i] = normalizeCmdReply(cmds[i].Name, v)
 		}
 	}
 	if firstErr != nil {
@@ -204,7 +224,7 @@ func (a *Adapter) DoReplica(ctx context.Context, cmd string, args ...any) (any, 
 	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}
-	return normalizeReply(res), err
+	return normalizeCmdReply(cmd, res), err
 }
 
 // PipelineReplica 批级副本读（契约 R4 同形，路由到从节点）。
@@ -237,7 +257,7 @@ func (a *Adapter) PipelineReplica(ctx context.Context, cmds []kidb.Cmd) ([]any, 
 				firstErr = err
 			}
 		default:
-			results[i] = normalizeReply(v)
+			results[i] = normalizeCmdReply(cmds[i].Name, v)
 		}
 	}
 	if firstErr != nil {

@@ -23,17 +23,18 @@ func InitializeServer(boot kidb.Bootstrap) (*gateway.Server, error) {
 	}
 	registry := ProvideScripts(kernel)
 	catalogStore := ProvideCatalogStore(kvClient, registry)
-	catalogCache := ProvideCatalogCache(catalogStore)
 	metrics := ProvideMetrics()
+	catalogCache := ProvideCatalogCache(catalogStore, metrics)
 	recorder := ProvideTelemetry(kvClient)
 	store := ProvideBucketMap(kvClient, registry)
 	l4Manager := ProvideL4(kvClient, registry)
 	shardedCache := ProvideNearCache()
-	executor := ProvideExecutor(kvClient, registry, metrics, recorder, store, l4Manager, shardedCache)
-	guard := ProvideGuard(kvClient, registry, store)
+	syncClock := ProvideSyncClock(kvClient)
+	executor := ProvideExecutor(kvClient, registry, metrics, recorder, store, l4Manager, shardedCache, syncClock)
+	guard := ProvideGuard(kvClient, registry, store, syncClock)
 	deps := ProvideEngineDeps(kvClient, registry, catalogStore, catalogCache, executor, guard, metrics)
 	roles := ProvideRoles(boot, kvClient, registry, catalogStore, catalogCache, executor, store, guard)
-	configStore := ProvideConfigStore(kvClient, registry)
+	configStore := ProvideConfigStore(kvClient, registry, metrics)
 	server, err := gateway.NewServer(deps, boot, roles, configStore)
 	if err != nil {
 		return nil, err

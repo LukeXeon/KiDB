@@ -18,13 +18,6 @@ type PriorityQueue[T any, P cmp.Ordered] struct {
 	min   bool
 }
 
-// cmpOrdered 优先级约束（数值/字符串）。
-type cmpOrdered interface {
-	~int | ~int8 | ~int16 | ~int32 | ~int64 |
-		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr |
-		~float32 | ~float64 | ~string
-}
-
 // NewMinPriorityQueue 小顶堆（最小优先级先出）。
 func NewMinPriorityQueue[T any, P cmp.Ordered]() *PriorityQueue[T, P] {
 	return &PriorityQueue[T, P]{min: true}

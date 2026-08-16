@@ -74,6 +74,8 @@ func ParseIndexComment(comment string) (indexOpts, error) {
 // ColumnTypeOf 列存储类映射（类型语义以 gms 为准；本函数只决定编码/索引形态）。
 // 白名单：整数/浮点/字符串/二进制/时间戳/JSON；DECIMAL/DATE/TIME/枚举等
 // 明确报错（范围索引 score 语义与编码精度不担保的类型不放行）。
+// DATETIME/TIMESTAMP 带 (p) 小数秒精度拒绝——存储形态是 Unix 秒，
+// 放行会产生写入即静默截断（review 实证：datetime(6) 往返丢 .123456）。
 func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
 	switch {
 	case types.IsInteger(ct):
@@ -89,6 +91,9 @@ func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
 	case types.IsText(ct):
 		return meta.ColString, nil
 	case types.IsDatetimeType(ct) || types.IsTimestampType(ct):
+		if p, ok := ct.(interface{ Precision() int }); ok && p.Precision() > 0 {
+			return 0, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.datetime_precision", ct.String()))
+		}
 		return meta.ColTimestamp, nil
 	}
 	return 0, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.column_type_unsupported", ct))
@@ -99,6 +104,9 @@ func ColumnTypeOf(ct sql.Type) (meta.ColumnType, error) {
 // TableFromSchema 由 gms 主键 schema 与表 COMMENT 构造表定义（校验全规则）。
 // 忠实类型记录：列定义存 存储类（ColumnTypeOf）+ 规范类型文本（c.Type.String()）。
 func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*meta.TableDef, error) {
+	if err := meta.ValidateIdent(name); err != nil {
+		return nil, fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
+	}
 	if len(sch.Schema) == 0 || len(sch.Schema) > 256 {
 		return nil, fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.column_count_range", len(sch.Schema)))
 	}
@@ -113,6 +121,9 @@ func TableFromSchema(name string, sch sql.PrimaryKeySchema, comment string) (*me
 	seen := map[string]bool{}
 	for i, c := range sch.Schema {
 		if err := meta.ValidateReserved(c.Name); err != nil {
+			return nil, fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
+		}
+		if err := meta.ValidateIdent(c.Name); err != nil {
 			return nil, fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
 		}
 		if seen[strings.ToLower(c.Name)] {
@@ -206,6 +217,9 @@ func IndexFromDef(idxDef sql.IndexDef) (*meta.IndexDef, error) {
 
 // validateIndexShape 索引形态校验（不依赖表定义的部分）。
 func validateIndexShape(idx *meta.IndexDef) error {
+	if err := meta.ValidateIdent(idx.ID); err != nil {
+		return fmt.Errorf("%w: %v", kidb.ErrUnsupported, err)
+	}
 	if len(idx.Columns) != 1 {
 		return fmt.Errorf("%w: %s", kidb.ErrUnsupported, i18n.T("ddl.index_single_column", idx.ID, len(idx.Columns)))
 	}

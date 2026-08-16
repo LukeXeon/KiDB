@@ -92,10 +92,23 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		return nil
 	}
 
-	// 1. 登记册取样（首页 rows_per_slot 行）
+	// 1. 登记册取样（随机页——首页恒取最早到期批次，有系统偏倚：
+	// 无 TTL 行（+inf score）永远沉在尾部不被抽到。ZCARD + 随机 offset 修正）
 	rowsPerSlot := tuning.Get().Controller.ReconcileRowsPerSlot
 	expKey := keycodec.ExpKeyN(def.Name, slot, 0, def.EffectiveExpShards())
-	res, err := r.cli.Do(ctx, "ZRANGE", expKey, 0, rowsPerSlot-1)
+	card, err := r.cli.Do(ctx, "ZCARD", expKey)
+	if err != nil {
+		return err
+	}
+	total, _ := strconv.ParseInt(fmt.Sprint(card), 10, 64)
+	if total == 0 {
+		return nil
+	}
+	off := int64(0)
+	if total > int64(rowsPerSlot) {
+		off = r.rng.Int63n(total - int64(rowsPerSlot))
+	}
+	res, err := r.cli.Do(ctx, "ZRANGE", expKey, off, off+int64(rowsPerSlot)-1)
 	if err != nil {
 		return err
 	}
@@ -159,7 +172,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 			}
 			switch idx.Kind {
 			case meta.IndexEq, meta.IndexUnique:
-				for _, b := range sh.ReadBucketsEq(encVal) {
+				for _, b := range sh.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
 					fcmds = append(fcmds, kidb.Cmd{Name: "ZSCORE", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, encVal, slot, b), row.pk}})
 					checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID + "=" + encVal})
 				}
@@ -238,7 +251,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 			if err != nil {
 				continue
 			}
-			for _, b := range sh.ReadBucketsEq(encVal) {
+			for _, b := range sh.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
 				bk := keycodec.EqBucketKey(def.Name, idx.ID, encVal, slot, b)
 				if doneBucket[bk] {
 					continue
@@ -295,8 +308,9 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		}
 	}
 
-	// 5. 唯一预约残留巡检：数据侧推导预约 key → 占有者行活性
-	// （预约在但占有行已死 = 自愈路径之外的长期泄漏）。
+	// 5. 唯一预约巡检（双向）：残留 = 预约在而占有行死；缺失 = 活行无预约
+	// （缺失侧 review 实证：CREATE UNIQUE INDEX 回填曾不建预约，存量值对
+	// 唯一约束不可见——正向桶成员检查照不出这个洞，必须单独断言）。
 	var ucmds []kidb.Cmd
 	var ukeys []string
 	for _, row := range live {
@@ -318,7 +332,8 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		var okeys []string
 		for i, ures1 := range ures {
 			if ures1 == nil {
-				continue // 无预约 = 无残留（缺失侧由正向检查覆盖）
+				r.drift("uniq_reservation_missing", def.Name, ukeys[i], "") // 活行无预约
+				continue
 			}
 			owner := strings.SplitN(fmt.Sprint(ures1), "|", 2)[0] // 占有者行 key
 			ocmds = append(ocmds, kidb.Cmd{Name: "EXISTS", Args: []any{owner}})

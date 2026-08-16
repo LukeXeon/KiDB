@@ -109,20 +109,6 @@ func (s *RowStream) parsePushdownReply(out any) ([][]any, error) {
 	return rows, nil
 }
 
-func asAnySlice(res any) []any {
-	switch v := res.(type) {
-	case []any:
-		return v
-	case []string:
-		out := make([]any, len(v))
-		for i, e := range v {
-			out[i] = e
-		}
-		return out
-	}
-	return nil
-}
-
 func bool01(b bool) string {
 	if b {
 		return "1"

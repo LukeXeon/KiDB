@@ -55,8 +55,10 @@ func ProvideCatalogStore(cli kidb.KvClient, reg *script.Registry) *meta.CatalogS
 }
 
 // ProvideCatalogCache Catalog 本地缓存（schema lease，docs/06 §6.2）。
-func ProvideCatalogCache(store *meta.CatalogStore) *meta.CatalogCache {
-	return meta.NewCatalogCache(store)
+func ProvideCatalogCache(store *meta.CatalogStore, m *metrics.Metrics) *meta.CatalogCache {
+	c := meta.NewCatalogCache(store)
+	c.SetMetrics(m)
+	return c
 }
 
 // ProvideBucketMap BucketMap 存储（docs/06）。
@@ -79,29 +81,37 @@ func ProvideNearCache() *nearcache.ShardedCache[[]string] {
 	return nearcache.NewSharded[[]string](tuning.Get().Nearcache.Capacity, tuning.Get().NearcacheTTL())
 }
 
+// ProvideSyncClock 服务端钟对齐组件（docs/11 §11.1：内核时钟全面对齐 Redis TIME）。
+func ProvideSyncClock(cli kidb.KvClient) *kidb.SyncClock { return kidb.NewSyncClock(cli) }
+
 // ProvideExecutor 查询执行器——读路径附件全部在此接线（单一装配点：
-// 指标/遥测/BucketMap/L4/L1 近缓存；运行时开关项 replica_read/行缓存
+// 指标/遥测/BucketMap/L4/L1 近缓存/服务端钟；运行时开关项 replica_read/行缓存
 // 由 gateway 语义开关轮询驱动，docs/02 §2.7）。
 func ProvideExecutor(cli kidb.KvClient, reg *script.Registry, m *metrics.Metrics,
 	tel *telemetry.Recorder, bm *bucketmap.Store, l4 *controller.L4Manager,
-	nc *nearcache.ShardedCache[[]string]) *exec.Executor {
+	nc *nearcache.ShardedCache[[]string], clock *kidb.SyncClock) *exec.Executor {
 	ex := exec.New(cli, reg)
 	ex.SetMetrics(m)
 	ex.SetTelemetry(tel)
 	ex.SetBucketMap(bm)
 	ex.SetL4(l4)
 	ex.SetNearCache(nc)
+	ex.SetClock(clock.Now)
 	return ex
 }
 
-// ProvideGuard 写入事务卫护（单 slot Lua 编排，docs/05）。
-func ProvideGuard(cli kidb.KvClient, reg *script.Registry, bm *bucketmap.Store) *txguard.Guard {
-	return txguard.New(cli, reg, bm)
+// ProvideGuard 写入事务卫护（单 slot Lua 编排，docs/05；服务端钟对齐）。
+func ProvideGuard(cli kidb.KvClient, reg *script.Registry, bm *bucketmap.Store, clock *kidb.SyncClock) *txguard.Guard {
+	g := txguard.New(cli, reg, bm)
+	g.SetClock(clock.Now)
+	return g
 }
 
 // ProvideConfigStore 配置存储（cfg:global，docs/10 §10.2）。
-func ProvideConfigStore(cli kidb.KvClient, reg *script.Registry) *config.Store {
-	return config.New(cli, reg, gateway.ConfigActor)
+func ProvideConfigStore(cli kidb.KvClient, reg *script.Registry, m *metrics.Metrics) *config.Store {
+	s := config.New(cli, reg, gateway.ConfigActor)
+	s.SetMetrics(m)
+	return s
 }
 
 // ProvideEngineDeps 引擎依赖面 + 全扫闸门（docs/07 §7.4）。

@@ -6,7 +6,7 @@ package indexer
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"net/url"
 	"strings"
 
 	"kidb"
@@ -47,7 +47,14 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 		if len(parts) != 4 {
 			continue // 畸形条目跳过（对账兜底，docs/12 §12.8）
 		}
-		pk, oldV, newV := parts[0], parts[1], parts[2]
+		pk := parts[0]
+		// 日志字段是 url.QueryEscape 可逆形态（txguard escLogField）——
+		// 解回原始值再按 keycodec 规则建桶（直接复用转义串会双重转义错位）。
+		oldV, err1 := url.QueryUnescape(parts[1])
+		newV, err2 := url.QueryUnescape(parts[2])
+		if err1 != nil || err2 != nil {
+			continue // 畸形条目跳过（对账兜底，docs/12 §12.8）
+		}
 		rowSlot := keycodec.Slot(keycodec.RowKey(t.Name, pk))
 		switch idx.Kind {
 		case meta.IndexRange:
@@ -95,13 +102,4 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 		return 0, fmt.Errorf("indexer: LTRIM %s: %w", logkey, err)
 	}
 	return len(entries), nil
-}
-
-// LogBacklog 返回日志积压量（async_index_log_backlog 指标挂点）。
-func (i *Indexer) LogBacklog(ctx context.Context, t *meta.TableDef, idx *meta.IndexDef, slot uint16) (int64, error) {
-	res, err := i.cli.Do(ctx, "LLEN", keycodec.AsyncLogKey(t.Name, idx.ID, slot))
-	if err != nil {
-		return 0, err
-	}
-	return strconv.ParseInt(fmt.Sprint(res), 10, 64)
 }

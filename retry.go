@@ -2,8 +2,12 @@ package kidb
 
 import (
 	"context"
+	"errors"
+	"io"
 	"kidb/tuning"
 	"kidb/utils"
+	"math/rand"
+	"net"
 	"strings"
 	"time"
 )
@@ -26,9 +30,22 @@ const (
 )
 
 // ClassifyError 把 Redis 错误归类。
+// 类型化判定优先（字符串嗅探对值内容误报脆弱——错误消息里带 "MOVED" 的
+// 业务值不该被归类为重定向）；字符串兜底适配器/老版本 go-redis 的裸文本错误。
 func ClassifyError(err error) ErrClass {
 	if err == nil {
 		return ClassUnknown
+	}
+	// 类型化通道：网络/ctx 错误
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return ClassTransient // 超时/断连（含 i/o timeout）
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return ClassTransient
+	}
+	if errors.Is(err, context.Canceled) {
+		return ClassUnknown // 调用方取消不重试
 	}
 	msg := err.Error()
 	switch {
@@ -101,6 +118,8 @@ func WithRetry(ctx context.Context, pol RetryPolicy, fn func() error) error {
 		if backoff > pol.Max {
 			backoff = pol.Max
 		}
+		// ±25% 抖动（CLUSTERDOWN 全集群同时退避的惊群效应，client-go 同款）
+		backoff = backoff*3/4 + time.Duration(rand.Int63n(int64(backoff/2)+1))
 		if !utils.SleepCtx(ctx, backoff) {
 			return ctx.Err()
 		}

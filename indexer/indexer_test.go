@@ -86,10 +86,9 @@ func TestAsyncIndexFlow(t *testing.T) {
 	require.Equal(t, 0, zcardAcross("rust"), "删除后新值桶空")
 
 	// 日志已截断
-	ix := New(cli)
 	for _, s := range slots {
-		n, err := ix.LogBacklog(ctx, tbl, idx, s)
+		res, err := cli.Do(ctx, "LLEN", keycodec.AsyncLogKey(tbl.Name, idx.ID, s))
 		require.NoError(t, err)
-		require.EqualValues(t, 0, n)
+		require.Equal(t, "0", fmt.Sprint(res))
 	}
 }

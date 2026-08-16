@@ -257,7 +257,7 @@ func (t *Table) RowCount(ctx *sql.Context) (uint64, bool, error) {
 	if time.Since(t.stats.at) < time.Second && t.stats.at.Unix() > 0 {
 		return t.stats.count, true, nil
 	}
-	n, err := t.deps.Exec.RowCount(ctx, t.def, time.Now().Unix())
+	n, err := t.deps.Exec.RowCount(ctx, t.def)
 	if err != nil {
 		return 0, false, err
 	}

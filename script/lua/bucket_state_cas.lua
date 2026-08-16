@@ -8,7 +8,7 @@
 -- 注意（v5.0 修订）：bm key 按 slot 分片（bm:{table}:{idx}:{stag}）——
 -- 全局 bm key 无法进入行写入 Lua（跨 slot），分片后写路径 CAS 物理可达。
 --
--- ARGV: [1] expect_version（-1=不校验）, [2] field, [3] new_value_json
+-- ARGV: [1] expect_version（-1=不校验）, [2] field, [3] new_value（msgp/十进制串）
 -- 返回：{"ok", newVer} / {"stale", curVer}
 
 local cur = tonumber(redis.call('HGET', KEYS[1], 'version') or '0')

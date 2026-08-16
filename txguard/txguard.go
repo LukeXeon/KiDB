@@ -7,6 +7,7 @@ package txguard
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -96,7 +97,7 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 		res.StaleRetries = attempt
 		stale, err := g.writeAttempt(ctx, req, rowkey, slot, &acquired, &res)
 		if err != nil {
-			g.rollbackReservations(ctx, acquired)
+			g.rollbackReservations(ctx, acquired, rowkey)
 			return Result{}, err
 		}
 		if !stale {
@@ -112,7 +113,7 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 			g.m.LuaStaleRetry.Inc() // lua_stale_retry_total
 		}
 	}
-	g.rollbackReservations(ctx, acquired)
+	g.rollbackReservations(ctx, acquired, rowkey)
 	return Result{}, fmt.Errorf("%w: write %s after %d attempts", kidb.ErrStaleMetadata, rowkey, tuning.Get().Txguard.StaleRetries)
 }
 
@@ -182,6 +183,18 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 		rcptkey,
 	)
 
+	// 撤字段面（write_row v6）：旧有新无 = UPDATE 置 NULL——HSET 不覆盖即
+	// 幽灵残留，展开为显式 HDEL 清单（_ver 是内部字段，永不撤销）。
+	var dropped []string
+	for f := range oldRow {
+		if f == "_ver" {
+			continue
+		}
+		if _, ok := req.Fields[f]; !ok {
+			dropped = append(dropped, f)
+		}
+	}
+
 	// _ver 语义（docs/05 §5.6）：
 	//  - ARGV[5] 恒为本次预读观察到的 old_ver——Lua 内再读不符说明预读→提交间
 	//    有并发写入，stale 让网关以新旧行重展开整体重试（"按当前 old 重放合并"）；
@@ -198,14 +211,20 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	} else if req.TTL < 0 {
 		ttlms = 1 // 软删除：立即过期走清扫
 	}
+	tn := tuning.Get()
 	argv := []any{
 		"W", req.PK, strconv.FormatInt(ttlms, 10), strconv.FormatInt(now.Unix(), 10),
 		strconv.FormatInt(observed, 10), strconv.Itoa(len(ops)),
+		strconv.Itoa(tn.Txguard.AsyncLogCapacity), strconv.Itoa(tn.Sweeper.ReceiptGraceMs),
 	}
 	argv = append(argv, argvTail...)
 	argv = append(argv, strconv.Itoa(len(req.Fields)))
 	for f, v := range req.Fields {
 		argv = append(argv, f, v)
+	}
+	argv = append(argv, strconv.Itoa(len(dropped)))
+	for _, f := range dropped {
+		argv = append(argv, f)
 	}
 	argv = append(argv, strconv.Itoa(len(uniqEntries)))
 	for _, e := range uniqEntries {
@@ -283,9 +302,11 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(pk, expShards), expShards),
 			keycodec.ReceiptKey(t.Name, pk),
 		)
+		tn := tuning.Get()
 		argv := []any{
 			"D", pk, "0", strconv.FormatInt(g.clock().Unix(), 10),
 			strconv.FormatUint(oldVerOf(oldRow), 10), strconv.Itoa(len(ops)),
+			strconv.Itoa(tn.Txguard.AsyncLogCapacity), strconv.Itoa(tn.Sweeper.ReceiptGraceMs),
 		}
 		argv = append(argv, argvTail...)
 
@@ -316,6 +337,15 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		return false, nil
 	}
 	return false, fmt.Errorf("%w: delete %s after %d attempts", kidb.ErrStaleMetadata, rowkey, tuning.Get().Txguard.StaleRetries)
+}
+
+// ReserveUniqueForBackfill 供 DDL 回填为存量行补建唯一预约（docs/06 §6.3）。
+// 与写路径同一预约纪律（SET NX + 占有者活检查 + 死占有者自愈）；
+// ok=false = 真实冲突（占有者活行存在）——调用方据此中止建索引作业。
+func (g *Guard) ReserveUniqueForBackfill(ctx context.Context, t *meta.TableDef, idxID, encVal, pk string) (bool, error) {
+	rkey := keycodec.UniqueKey(t.Name, idxID, encVal)
+	rowkey := keycodec.RowKey(t.Name, pk)
+	return g.reserveUnique(ctx, rkey, rowkey, g.clock())
 }
 
 // NextAutoID 取 AUTO_INCREMENT 序列值（docs/05 §5.4：
@@ -394,9 +424,14 @@ func (g *Guard) releaseUnique(ctx context.Context, rkey, rowkey string) error {
 	return err
 }
 
-func (g *Guard) rollbackReservations(ctx context.Context, keys []string) {
+// rollbackReservations 回滚本次占有的预约（错误路径）。
+// 占有者比对（releaseUnique 同款）而不是裸 DEL：歧义超时（Lua 或已提交）下
+// 预约可能已被自愈/继任者占有，裸 DEL 会误杀活预约（review 实证窗口）。
+// 注意诚实边界：歧义超时后"行已提交但预约被我方回滚"的极小窗口仍存——
+// 由对账 uniq_reservation_missing 观测，docs/05 §5.3 已知窗口如实声明。
+func (g *Guard) rollbackReservations(ctx context.Context, keys []string, rowkey string) {
 	for _, k := range keys {
-		_, _ = g.cli.Do(ctx, "DEL", k)
+		_ = g.releaseUnique(ctx, k, rowkey)
 	}
 }
 
@@ -558,8 +593,11 @@ func coveringMember(pk string, idx meta.IndexDef, fields map[string]string) stri
 	return rowcodec.EncodeMember(pk, covers)
 }
 
-// escLogField 异步日志字段转义（URL escape 消除 \x1f 歧义；值原样可读性由对账工具保证）。
-func escLogField(v string) string { return keycodec.EscapeValue(v) }
+// escLogField 异步日志字段转义：url.QueryEscape（**可逆**——Indexer 解回原始值
+// 再按 keycodec 规则建桶 key/lex member）。review 实证教训：此前复用
+// keycodec.EscapeValue（>128B 或含分隔符即摘要），摘要不可逆 → Indexer 二次转义
+// 建出与查询侧错位的桶 key，含空格/中文的值对异步索引永久不可见。
+func escLogField(v string) string { return url.QueryEscape(v) }
 
 // lexMember 字典序副本 member（编码单点在 rowcodec.LexMember——回填/写入同路）。
 func lexMember(value, pk string) string {
@@ -634,13 +672,4 @@ func oldVerOf(oldRow map[string]string) uint64 {
 		return 0
 	}
 	return utils.ParseUint64(oldRow["_ver"])
-}
-
-func contains(sp *[]string, s string) bool {
-	for _, x := range *sp {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

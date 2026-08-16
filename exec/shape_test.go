@@ -45,7 +45,7 @@ func TestCommandShape(t *testing.T) {
 		map[string]int{"ZRANGEBYSCORE": keycodec.NumSlots})
 	shape("Fullscan(空册)", &Request{Table: tbl, Kind: FullScan},
 		map[string]int{"ZRANGE": keycodec.NumSlots})
-	_, err := e.RowCount(ctx, tbl, 0)
+	_, err := e.RowCount(ctx, tbl)
 	require.NoError(t, err)
 	require.Equal(t, keycodec.NumSlots, cc.Count("ZCOUNT"), "COUNT(*) = Σ ZCOUNT 固定扇出")
 }

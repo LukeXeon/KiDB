@@ -80,7 +80,7 @@ func TestFullScanAndPointGet(t *testing.T) {
 	require.Equal(t, int64(3), rows[0][0])
 
 	// 精确行数（exp 登记册 ZCOUNT 汇总）
-	n, err := e.RowCount(ctx, tbl, time.Now().Unix())
+	n, err := e.RowCount(ctx, tbl)
 	require.NoError(t, err)
 	require.Equal(t, uint64(100), n)
 }

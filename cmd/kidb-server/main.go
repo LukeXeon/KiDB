@@ -31,7 +31,7 @@ func main() {
 		rwOnly       = flag.Bool("read-write-only", false, i18n.T("cli.flag_rw_only"))
 		replicaRead  = flag.Bool("replica-read", false, i18n.T("cli.flag_replica_read"))
 		metricsAddr  = flag.String("metrics-addr", "", i18n.T("cli.flag_metrics_addr"))
-		accounts     = flag.String("accounts", "root:%:kidb:rw", i18n.T("cli.flag_accounts"))
+		accounts     = flag.String("accounts", "root:127.0.0.1:kidb:rw", i18n.T("cli.flag_accounts"))
 		lang         = flag.String("lang", "", i18n.T("cli.flag_lang"))
 	)
 	flag.Parse()
@@ -55,6 +55,9 @@ func main() {
 		ReplicaRead:   *replicaRead,
 		ReadWriteOnly: *rwOnly,
 		ListenAddr:    *listen,
+	}
+	if !isFlagSet("accounts") {
+		slog.Warn(i18n.T("cli.default_account_warn")) // 出厂默认账号仅本机可达；生产必须显式配置
 	}
 	for _, a := range strings.Split(*accounts, ",") {
 		parts := strings.SplitN(a, ":", 4)
@@ -89,4 +92,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// isFlagSet 报告 flag 是否被显式设置。
+func isFlagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }

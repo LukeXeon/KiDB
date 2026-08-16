@@ -19,6 +19,7 @@ func InitializeServer(boot kidb.Bootstrap) (*gateway.Server, error) {
 		ProvideKernel,
 		ProvideScripts,
 		ProvideMetrics,
+		ProvideSyncClock,
 		ProvideCatalogStore,
 		ProvideCatalogCache,
 		ProvideBucketMap,

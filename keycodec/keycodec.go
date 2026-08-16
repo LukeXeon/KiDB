@@ -52,7 +52,13 @@ func ExpShardFor(pk string, shards int) int {
 // EqBucketKey 等值索引桶：`i:{table}:{idx}={value}:{stag}#b{n}`。
 // value 经 EscapeValue 转义/摘要。
 func EqBucketKey(table, idx, value string, slot uint16, n int) string {
-	return fmt.Sprintf("i:%s:%s=%s:%s#b%d", table, idx, EscapeValue(value), SlotTag(slot), n)
+	return EqBucketKeyEsc(table, idx, EscapeValue(value), slot, n)
+}
+
+// EqBucketKeyEsc 以**已转义** value 段直接建桶 key（bm 注册表/回执/分裂协议
+// 内部流通的都是转义形态——经 EqBucketKey 二次转义会错位（review 实证））。
+func EqBucketKeyEsc(table, idx, encVal string, slot uint16, n int) string {
+	return fmt.Sprintf("i:%s:%s=%s:%s#b%d", table, idx, encVal, SlotTag(slot), n)
 }
 
 // RangeBucketKey 范围索引桶：`i:{table}:{idx}:{stag}#r{n}`。

@@ -40,13 +40,8 @@ func TestConfigStore(t *testing.T) {
 	require.Error(t, s.Set(ctx, "no_such_var", "1"))
 	require.Error(t, s.Set(ctx, "bucket_split_members", "60000"), "调优参数已转内置常量")
 
-	// All（SHOW GLOBAL VARIABLES 数据源）
-	all, err := s.All(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "true", all["replica_read"])
-	require.Equal(t, "t1,t2", all["query_allow_fullscan_tables"])
-	require.Len(t, all, 3, "变量表个位数纪律（docs/01 §1.0）")
-	require.NotContains(t, all, "_ver", "内部字段不外露")
+	// 变量表个位数纪律（docs/01 §1.0）
+	require.Len(t, Vars, 3)
 
 	ver2, _ := s.Version(ctx)
 	require.Equal(t, ver1+1, ver2, "每次 SET 递增 _ver（传播锚点）")

@@ -315,6 +315,15 @@ func (e *Executor) acquireFullscan(ctx context.Context) (chan struct{}, error) {
 // SetNearCache 接入 L1（nearcache_ttl 变量热更新的挂点）。
 func (e *Executor) SetNearCache(c L1Cache) { e.nc = c }
 
+// Close 释放执行器附件的后台资源（L1 的维护协程；行缓存由 gateway 开关循环管理）。
+// Server.Close 调用；幂等。
+func (e *Executor) Close() error {
+	if c, ok := e.nc.(interface{ Close() error }); ok {
+		_ = c.Close()
+	}
+	return nil
+}
+
 // RowStream 是流式行游标（io.EOF 结束）。调用方负责 Close。
 type RowStream struct {
 	req  *Request
@@ -352,12 +361,17 @@ type RowStream struct {
 	fsSem chan struct{} // 全扫限流槽位（持有至 EOF/Close，docs/07 §7.4）
 
 	startedAt time.Time // 首个 Next 时间（query_duration_seconds 挂点）
+	fanout    int       // 本查询散取桶命令总数（query_scatter_fanout 挂点）
 }
 
 type bucketScan struct {
 	key    string
 	cursor int    // ZRANGE/ZRANGEBYSCORE LIMIT 的偏移游标
 	val    string // EqLookup：该桶的等值编码值（覆盖索引读路径重建 raw 用）
+	// fallback 非空 = 本桶是 L4 副本读（源桶 key 在此）：分页轮同 pipeline
+	// 附 EXISTS 活性判定，副本死（过期未续）则回退源桶重取同游标
+	// （docs/08 §8.4——review 实证：无回退时热值在副本过期后查询永久空集）。
+	fallback string
 }
 
 // candItem 一个散取/归并候选：桶 member + 提取的 pk + 索引列编码值。
@@ -477,11 +491,23 @@ func (e *Executor) collectEqPKs(ctx context.Context, req *Request) ([]string, er
 	}
 }
 
-// l1Fingerprint 谓词指纹（table|idx|values 排序后拼接）。
+// l1Fingerprint 谓词指纹（table|idx|长度前缀值列表）。
+// 长度前缀编码（len:v 段）——朴素分隔符拼接对含分隔符的值有歧义
+// （"a,b"+"c" 与 "a"+"b,c" 撞指纹 = 跨查询串缓存漏行，review 实证）。
 func l1Fingerprint(req *Request) string {
 	vs := append([]string(nil), req.Values...)
 	sort.Strings(vs)
-	return req.Table.Name + "|" + req.Index.ID + "|" + strings.Join(vs, ",")
+	var b strings.Builder
+	b.WriteString(req.Table.Name)
+	b.WriteByte('|')
+	b.WriteString(req.Index.ID)
+	for _, v := range vs {
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(len(v)))
+		b.WriteByte(':')
+		b.WriteString(v)
+	}
+	return b.String()
 }
 
 // Next 产出下一行（已解码、已过校验）；结束返回 io.EOF。
@@ -523,6 +549,9 @@ func (s *RowStream) Close() error {
 	s.releaseFullscan()
 	if s.exec.m != nil && !s.startedAt.IsZero() {
 		s.exec.m.QueryDuration.WithLabelValues(s.planName()).Observe(time.Since(s.startedAt).Seconds())
+		if s.fanout > 0 {
+			s.exec.m.ScatterFanout.Observe(float64(s.fanout))
+		}
 	}
 	return nil
 }
@@ -618,19 +647,35 @@ func (s *RowStream) fillScatter() error {
 				continue
 			}
 		}
-		// 一轮分页：每个未完成桶拉一页
+		// 一轮分页：每个未完成桶拉一页（L4 副本桶同 pipeline 附 EXISTS 活性判定）
 		cmds := make([]kidb.Cmd, 0, len(s.pending))
 		for _, b := range s.pending {
 			cmds = append(cmds, s.pageCmd(b))
+			if b.fallback != "" {
+				cmds = append(cmds, kidb.Cmd{Name: "EXISTS", Args: []any{b.key}})
+			}
 		}
+		s.fanout += len(cmds)
 		results, err := e.readPipeline(s.ctx, cmds)
 		if err != nil {
 			return fmt.Errorf("exec: scatter page: %w", err)
 		}
 		var items []candItem
 		rest := s.pending[:0]
-		for i, b := range s.pending {
-			members := utils.Strings(results[i])
+		ri := 0
+		for _, b := range s.pending {
+			members := utils.Strings(results[ri])
+			ri++
+			if b.fallback != "" {
+				alive := fmt.Sprint(results[ri]) == "1"
+				ri++
+				if !alive {
+					// 副本死：回退源桶重取（游标不动；下轮生效）
+					b.key, b.fallback = b.fallback, ""
+					rest = append(rest, b)
+					continue
+				}
+			}
 			for _, m := range members {
 				pk := s.stripCovering(m)
 				if s.seen != nil { // 分裂窗口父子桶双读去重
@@ -679,16 +724,18 @@ func (s *RowStream) buildGroup(from, to int) []bucketScan {
 			for _, v := range s.req.Values {
 				for _, b := range s.eqBucketsAt(s16, v) {
 					bk := keycodec.EqBucketKey(t.Name, s.req.Index.ID, v, s16, b)
-					// L4：热值副本替换源桶读（异 slot 摊开读 QPS，docs/08 §8.4）
+					bs := bucketScan{key: bk, val: v}
+					// L4：热值副本替换源桶读（异 slot 摊开读 QPS，docs/08 §8.4）——
+					// 副本死由分页轮的 EXISTS 判定回退源桶（fallback 字段）。
 					if s.exec.l4 != nil && b == 0 {
 						if rep, ok := s.exec.l4.ReplicaFor(s.ctx, t.Name, s.req.Index.ID, keycodec.EscapeValue(v), bk, func(n int) int { return rand.Intn(n) }); ok {
-							bk = rep
+							bs.key, bs.fallback = rep, bk
 						}
 					}
 					if s.exec.telemetry != nil {
 						s.exec.telemetry.Sample(s.ctx, bk)
 					}
-					out = append(out, bucketScan{key: bk, val: v})
+					out = append(out, bs)
 				}
 			}
 		case FullScan:
@@ -798,6 +845,11 @@ func (s *RowStream) fetchColumns() []string {
 		if len(cols) >= nonPK {
 			return nil
 		}
+	}
+	// 活性哨兵：HMGET 对死行返回全 nil——捎上活行恒有的 _ver 字段区分
+	// "死行"与"请求列全 NULL 的活行"（少了它两类都呈全 nil，会把死行放产出）。
+	if len(cols) > 0 {
+		cols = append(cols, "_ver")
 	}
 	return cols
 }
@@ -925,50 +977,63 @@ func (s *RowStream) fetchRows(pks []string) error {
 			ri := 0
 			for _, j := range miss {
 				withPTTL := rc != nil || needTTL
-				readTTL := func(raw map[string]string) int64 {
+				// PTTL 纪律（review 实证）：回复无条件消费（跳读让同批后续行
+				// ri 失步），但 _ttl 标记只写给活行（先消费后判空，顺序不能反——
+				// 写进空 map 会把死行变"活"）。
+				consumeTTL := func() int64 {
 					if !withPTTL {
 						return -1
 					}
 					pttlMs, _ := strconv.ParseInt(fmt.Sprint(results[ri]), 10, 64)
 					ri++
+					return pttlMs
+				}
+				applyTTL := func(raw map[string]string, pttlMs int64) {
+					if !withPTTL {
+						return // 非 _ttl 投影路径不写标记（DecodeRow 呈 NULL）
+					}
 					// 剩余秒（上取整：亚秒 TTL 不呈 0 混淆"无 TTL"语义；-1 永不过期原样）
-					if raw != nil && pttlMs > 0 {
+					if pttlMs > 0 {
 						raw[meta.TTLPseudoColumn] = strconv.FormatInt((pttlMs+999)/1000, 10)
-					} else if raw != nil {
+					} else {
 						raw[meta.TTLPseudoColumn] = "-1"
 					}
-					return pttlMs
 				}
 				switch {
 				case rc != nil:
 					raw, _ := utils.StringMap(results[ri])
 					ri++
+					pttlMs := consumeTTL()
 					if len(raw) == 0 {
 						continue // 空 Hash = 行过期/不存在
 					}
-					pttlMs := readTTL(raw)
+					applyTTL(raw, pttlMs)
 					rc.Add(keycodec.RowKey(t.Name, batch[j]), raw, time.Duration(pttlMs)*time.Millisecond) // 条目寿命 ≤ 行剩余 TTL（过期行绝不返回）
 					raws[j] = raw
 				case cols == nil:
 					raw, _ := utils.StringMap(results[ri])
 					ri++
+					pttlMs := consumeTTL()
 					if len(raw) == 0 {
 						continue
 					}
-					readTTL(raw)
+					applyTTL(raw, pttlMs)
 					raws[j] = raw
 				case len(cols) == 0:
-					if fmt.Sprint(results[ri]) == "1" {
-						raws[j] = map[string]string{}
-					}
+					exists := fmt.Sprint(results[ri]) == "1"
 					ri++
-					if raws[j] != nil {
-						readTTL(raws[j])
+					pttlMs := consumeTTL()
+					if exists {
+						raws[j] = map[string]string{}
+						applyTTL(raws[j], pttlMs)
 					}
 				default:
 					raws[j] = hmgetMap(cols, results[ri])
 					ri++
-					readTTL(raws[j])
+					pttlMs := consumeTTL() // 死行（nil）也要消费 PTTL 回复
+					if raws[j] != nil {
+						applyTTL(raws[j], pttlMs)
+					}
 				}
 			}
 		}
@@ -991,12 +1056,13 @@ func (s *RowStream) fetchRows(pks []string) error {
 }
 
 // hmgetMap 把 HMGET 的位置式回复（nil = 字段缺失）装配为字段映射。
+// 活性哨兵：cols 末位恒为 _ver——缺失即死行，返回 nil（调用方按行不存在跳过）。
 func hmgetMap(cols []string, res any) map[string]string {
-	raw := make(map[string]string, len(cols))
 	vals, ok := res.([]any)
-	if !ok {
-		return raw
+	if !ok || len(vals) == 0 || vals[len(vals)-1] == nil {
+		return nil // _ver 缺失 = 死行（或无哨兵的非法调用）
 	}
+	raw := make(map[string]string, len(cols))
 	for k, v := range vals {
 		if k >= len(cols) || v == nil {
 			continue
@@ -1016,8 +1082,9 @@ func (s *RowStream) stripCovering(member string) string {
 }
 
 // RowCount 精确行数（docs/04 §4.1：Σ ZCOUNT(exp, (now, +inf))，任意时刻精确）。
-// 供 StatisticsTable 与后续 COUNT(*) 下推使用。
-func (e *Executor) RowCount(ctx context.Context, t *meta.TableDef, nowUnixSec int64) (uint64, error) {
+// now 取执行器时钟（SetClock 注入；生产 = SyncClock 服务端钟对齐）。
+func (e *Executor) RowCount(ctx context.Context, t *meta.TableDef) (uint64, error) {
+	nowUnixSec := e.clock().Unix()
 	var cmds []kidb.Cmd
 	for slot := 0; slot < keycodec.NumSlots; slot++ {
 		for shard := 0; shard < t.EffectiveExpShards(); shard++ {

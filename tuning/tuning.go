@@ -43,14 +43,11 @@ type Tuning struct {
 		SplitMembers          int64   `toml:"split_members"`
 		SplitBytes            int64   `toml:"split_bytes"`
 		SplitQPSRatio         float64 `toml:"split_qps_ratio"`
-		MergeMembers          int64   `toml:"merge_members"`
-		MergeSustainPeriods   int     `toml:"merge_sustain_periods"`
 		HotkeyReplicaMax      int     `toml:"hotkey_replica_max"`
 		HotkeyRefreshMs       int     `toml:"hotkey_refresh_ms"`
 		JobTickBudgetMs       int     `toml:"job_tick_budget_ms"`
 		JobSlotsPerTick       int     `toml:"job_slots_per_tick"`
 		BackfillRowsPerSec    int     `toml:"backfill_rows_per_sec"`
-		HotQPS                int64   `toml:"hot_qps"`
 		ReconcileSlotsPerTick int     `toml:"reconcile_slots_per_tick"`
 		ReconcileRowsPerSlot  int     `toml:"reconcile_rows_per_slot"`
 		DropSyncMaxRows       int     `toml:"drop_sync_max_rows"`
@@ -63,10 +60,9 @@ type Tuning struct {
 		SweepRangeSlots   int `toml:"sweep_range_slots"`
 	} `toml:"sweeper"`
 	Txguard struct {
-		StaleRetries       int     `toml:"stale_retries"`
-		AsyncLogCapacity   int     `toml:"async_log_capacity"`
-		AsyncLogAlertRatio float64 `toml:"async_log_alert_ratio"`
-		MaxRowBytes        int     `toml:"max_row_bytes"`
+		StaleRetries     int `toml:"stale_retries"`
+		AsyncLogCapacity int `toml:"async_log_capacity"`
+		MaxRowBytes      int `toml:"max_row_bytes"`
 	} `toml:"txguard"`
 	Telemetry struct {
 		SampleRatio int `toml:"sample_ratio"`

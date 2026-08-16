@@ -150,7 +150,8 @@ func (t *TableDef) EffectiveExpShards() int {
 }
 
 // TTLPseudoColumn 行级 TTL 伪列（docs/07 §7.1）：写入 >0 秒设行 TTL /
-// 0 或 NULL 承表级 default_ttl / <0 软删除；读出 = 剩余 TTL 秒（-1 无 TTL）。
+// 0 = 显式无 TTL（覆盖表级 default_ttl）/ NULL（不提及）承表级默认 /
+// <0 软删除；读出 = 剩余 TTL 秒（-1 无 TTL）。
 // 引擎元数据列（`_` 前缀命名空间），用户 DDL 不可声明（ValidateReserved 拒绝）。
 const TTLPseudoColumn = "_ttl"
 
@@ -158,6 +159,23 @@ const TTLPseudoColumn = "_ttl"
 func ValidateReserved(name string) error {
 	if strings.HasPrefix(name, "_") {
 		return fmt.Errorf("%s", i18n.T("meta.reserved_prefix", name))
+	}
+	return nil
+}
+
+// ValidateIdent 标识符字符集白名单（docs/02 §2.3）：表/列/索引名只允许
+// [A-Za-z0-9_]、长度 1-64。标识符原样进入 key 布局（keycodec），反引号包名的
+// 任意字符（: { } # 等）会腐蚀分隔符与 hash tag 语义（review 实证：含冒号表名
+// 曾被接受）——唯一写入点 TableFromSchema/IndexFromDef 统一调用。
+func ValidateIdent(name string) error {
+	if len(name) == 0 || len(name) > 64 {
+		return fmt.Errorf("%s", i18n.T("ddl.bad_ident", name))
+	}
+	for _, r := range name {
+		if r == '_' || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || ('0' <= r && r <= '9') {
+			continue
+		}
+		return fmt.Errorf("%s", i18n.T("ddl.bad_ident", name))
 	}
 	return nil
 }

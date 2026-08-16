@@ -15,6 +15,7 @@ import (
 
 	"kidb"
 	"kidb/keycodec"
+	"kidb/metrics"
 	"kidb/script"
 	"kidb/utils"
 )
@@ -32,6 +33,7 @@ type Elector struct {
 	token   string
 	ttl     time.Duration
 	isOwner atomic.Bool
+	m       *metrics.Metrics // 指标（nil = no-op；owner_role_transitions_total）
 }
 
 // NewElector 构造。ttl 默认 10s（锁即选举，docs/08 §8.5）。
@@ -43,6 +45,9 @@ func NewElector(cli kidb.KvClient, reg *script.Registry, lockKey, token string, 
 		cli: cli, reg: reg, lockKey: lockKey, token: token, ttl: ttl,
 	}
 }
+
+// SetMetrics 接入指标。
+func (e *Elector) SetMetrics(m *metrics.Metrics) { e.m = m }
 
 // CtrlLock 返回全局控制锁选举器（lk:ctrl）。
 func CtrlLock(cli kidb.KvClient, reg *script.Registry, instanceID string) *Elector {
@@ -76,6 +81,9 @@ func (e *Elector) Campaign(ctx context.Context, role func(ctx context.Context) e
 		// 任职：角色与续约**并发**跑（角色阻塞在前台，watchdog 在后台盯续约；
 		// 任一结束——角色退出或续约失败——都收掉另一方）
 		e.isOwner.Store(true)
+		if e.m != nil {
+			e.m.OwnerTransition.Inc()
+		}
 		roleCtx, cancel := context.WithCancel(ctx)
 		watchDone := make(chan struct{})
 		go func() {

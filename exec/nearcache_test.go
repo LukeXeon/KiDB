@@ -32,7 +32,7 @@ func TestL1NearCache(t *testing.T) {
 	// 首轮：散取填充
 	rows := drain(t, e.Run(ctx, &Request{Table: tbl, Kind: EqLookup, Index: idx, Values: []string{"shanghai"}, Pred: pred}))
 	require.Len(t, rows, 10)
-	_, ok := nc.Get("users|idx_city|shanghai")
+	_, ok := nc.Get("users|idx_city|8:shanghai") // 长度前缀指纹（v6.x review 修复分隔符歧义）
 	require.True(t, ok, "完全排空后指纹应入缓存")
 
 	// 缓存窗口内的变更：行 1 换值（缓存列表陈旧仍含它，校验必须拦）

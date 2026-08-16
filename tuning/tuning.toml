@@ -29,14 +29,11 @@ lex_refill_page       = 16      # 前缀搜索归并补页
 split_members           = 50000   # 桶分裂：成员阈值
 split_bytes             = 8388608 # 桶分裂：体积阈值（< 16MB rebalance 红线）
 split_qps_ratio         = 0.4     # 桶分裂：读 QPS 占单节点安全值比例
-merge_members           = 12500   # 桶合并：成员阈值
-merge_sustain_periods   = 3       # 桶合并：持续周期
 hotkey_replica_max      = 8       # L4 副本上限
 hotkey_refresh_ms       = 1000    # L4 副本滚动刷新周期
 job_tick_budget_ms      = 500     # DDL 回填每 tick 时间预算
 job_slots_per_tick      = 256     # DDL 回填每批 slot 数
 backfill_rows_per_sec   = 10000   # DDL 回填限速（行/s/实例）
-hot_qps                 = 4000    # L4 触发热度（复核参考）
 reconcile_slots_per_tick = 2      # 对账：每 tick 每表抽样 slot 数（docs/12 §12.8）
 reconcile_rows_per_slot  = 64     # 对账：每 slot 登记册首页行数
 drop_sync_max_rows       = 4096   # DROP TABLE 同步清理的行数上限（超出走后台作业）
@@ -51,7 +48,6 @@ sweep_range_slots     = 1024    # slot 区间锁粒度
 [txguard]
 stale_retries        = 3      # BucketMap/行版本冲突整体重试上限
 async_log_capacity   = 100000 # 异步索引日志容量上限/slot（背压）
-async_log_alert_ratio = 0.8   # 日志水位告警比例
 max_row_bytes        = 1048576 # 单行体积上限（大 key 防线，须显著低于 8MB 迁移红线）
 
 [telemetry]

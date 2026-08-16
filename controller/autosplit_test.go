@@ -13,6 +13,7 @@ import (
 	"kidb/bucketmap"
 	"kidb/exec"
 	"kidb/keycodec"
+	"kidb/meta"
 	"kidb/telemetry"
 	"kidb/testutil"
 	"kidb/txguard"
@@ -43,7 +44,7 @@ func TestAutoSplitViaTelemetry(t *testing.T) {
 	rec.Sample(ctx, srcKey)
 
 	// Manager 复核：阈值降到 10 → 60 成员触发分裂
-	mgr := NewManager(cli, bm, NewSplitter(cli, reg, bm), NewL4(cli, reg))
+	mgr := NewManager(cli, bm, NewSplitter(cli, reg, bm), NewL4(cli, reg), meta.NewCatalogStore(cli, reg), nil)
 	mgr.SplitMembers = 10
 	require.NoError(t, mgr.Tick(ctx))
 
@@ -78,7 +79,7 @@ func TestL4Replicas(t *testing.T) {
 	srcKey := keycodec.EqBucketKey(tbl.Name, "idx_city", "hot", slot, 0)
 
 	l4 := NewL4(cli, reg)
-	require.NoError(t, l4.Activate(ctx, tbl.Name, "idx_city", "hot", srcKey, 3))
+	require.NoError(t, l4.Activate(ctx, tbl.Name, "idx_city", "hot", slot, srcKey, 3))
 
 	// 读路径解析到副本（异 slot）
 	rep, ok := l4.ReplicaFor(ctx, tbl.Name, "idx_city", "hot", srcKey, func(n int) int { return 0 })
@@ -93,7 +94,7 @@ func TestL4Replicas(t *testing.T) {
 	require.Equal(t, 30, m, "副本含全部成员")
 
 	// 回收后回退源桶
-	require.NoError(t, l4.Deactivate(ctx, tbl.Name, "idx_city", "hot", srcKey))
+	require.NoError(t, l4.Deactivate(ctx, tbl.Name, "idx_city", "hot", slot, srcKey))
 	_, ok = l4.ReplicaFor(ctx, tbl.Name, "idx_city", "hot", srcKey, func(n int) int { return 0 })
 	require.False(t, ok)
 	res, err = cli.Do(ctx, "EXISTS", rep)

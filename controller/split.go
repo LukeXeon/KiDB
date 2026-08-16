@@ -89,7 +89,7 @@ func (s *Splitter) SplitEq(ctx context.Context, table, idxID, encVal string, slo
 			if err != nil {
 				return err
 			}
-			e2 := sh.Eq[encVal]
+			e2 := sh2.Eq[encVal] // 必须读新鲜分片（review 实证曾误用旧 sh）
 			if e2 == nil || e2.Split == nil {
 				continue // 中间态被并发改写 → 重读收敛
 			}
@@ -275,22 +275,39 @@ func (s *Splitter) SplitRange(ctx context.Context, table, idxID string, slot uin
 	return fmt.Errorf("%w: SplitRange %s/%s slot %d", kidb.ErrStaleMetadata, table, idxID, slot)
 }
 
-// sampleMedian 采样估算区间中位数（首页 WITHSCORES，docs/08 §8.2）。
+// sampleMedian 采样估算区间中位数（docs/08 §8.2）。
+// 多分位采样（review 实证修正：首页 511 个是 score 最低的成员——分裂点系统性
+// 偏低、大桶退化为多次裂变）：ZCARD 后按 4 分位点各取 1 个 score 取中位。
 func (s *Splitter) sampleMedian(ctx context.Context, table, idxID string, slot uint16, bucketIdx int) (float64, error) {
-	res, err := s.cli.Do(ctx, "ZRANGE", keycodec.RangeBucketKey(table, idxID, slot, bucketIdx), 0, 511, "WITHSCORES")
+	bk := keycodec.RangeBucketKey(table, idxID, slot, bucketIdx)
+	card, err := s.cli.Do(ctx, "ZCARD", bk)
 	if err != nil {
 		return 0, err
 	}
-	arr := utils.AnySlice(res)
+	n, _ := strconv.ParseInt(fmt.Sprint(card), 10, 64)
+	if n == 0 {
+		return 0, fmt.Errorf("controller: range bucket empty, nothing to split")
+	}
+	var cmds []kidb.Cmd
+	for _, q := range []int64{1, 2, 3} { // 25%/50%/75% 分位点
+		off := n * q / 4
+		cmds = append(cmds, kidb.Cmd{Name: "ZRANGE", Args: []any{bk, off, off, "WITHSCORES"}})
+	}
+	results, err := s.cli.Pipeline(ctx, cmds)
+	if err != nil {
+		return 0, err
+	}
 	var scores []float64
-	for i := 1; i < len(arr); i += 2 {
-		f, err := strconv.ParseFloat(fmt.Sprint(arr[i]), 64)
-		if err == nil {
-			scores = append(scores, f)
+	for _, res := range results {
+		arr := utils.AnySlice(res)
+		if len(arr) >= 2 {
+			if f, err := strconv.ParseFloat(fmt.Sprint(arr[1]), 64); err == nil {
+				scores = append(scores, f)
+			}
 		}
 	}
 	if len(scores) == 0 {
-		return 0, fmt.Errorf("controller: range bucket empty, nothing to split")
+		return 0, fmt.Errorf("controller: range bucket sample failed")
 	}
 	return scores[len(scores)/2], nil
 }
@@ -453,7 +470,7 @@ func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, slo
 			if err != nil {
 				return err
 			}
-			e2 := sh.Eq[encVal]
+			e2 := sh2.Eq[encVal] // 同上：新鲜分片
 			if e2 == nil || e2.Split == nil {
 				continue
 			}
@@ -477,6 +494,9 @@ func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, slo
 			final := &bucketmap.EqEntry{Buckets: e.Split.Parents}
 			if _, err := s.bm.CAS(ctx, key, sh2.Version, "e:"+encVal, final); err != nil {
 				continue
+			}
+			if s.m != nil {
+				s.m.Merges.Inc()
 			}
 			return nil
 		}
@@ -582,6 +602,9 @@ func (s *Splitter) MergeRange(ctx context.Context, table, idxID string, slot uin
 			}
 			if _, err := s.bm.CAS(ctx, key, sh2.Version, "r", nr); err != nil {
 				continue
+			}
+			if s.m != nil {
+				s.m.Merges.Inc()
 			}
 			return nil
 		}

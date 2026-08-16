@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 
+	"kidb/metrics"
 	"kidb/tuning"
 	"sync"
 	"time"
@@ -18,7 +19,11 @@ type CatalogCache struct {
 	mu     sync.RWMutex
 	tables map[string]*TableDef
 	clock  func() time.Time
+	m      *metrics.Metrics // nil = no-op（schema_lease_refresh_total）
 }
+
+// SetMetrics 接入指标（版本变化触发的缓存重建计数）。
+func (c *CatalogCache) SetMetrics(m *metrics.Metrics) { c.m = m }
 
 // NewCatalogCache 构造（lease 默认 1s）。
 func NewCatalogCache(store *CatalogStore) *CatalogCache {
@@ -86,6 +91,9 @@ func (c *CatalogCache) checkLease(ctx context.Context) error {
 		c.mu.Lock()
 		c.tables = make(map[string]*TableDef)
 		c.mu.Unlock()
+		if c.m != nil {
+			c.m.LeaseRefresh.Inc()
+		}
 	}
 	return nil
 }
