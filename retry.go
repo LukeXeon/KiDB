@@ -3,6 +3,7 @@ package kidb
 import (
 	"context"
 	"kidb/tuning"
+	"kidb/utils"
 	"strings"
 	"time"
 )
@@ -100,7 +101,7 @@ func WithRetry(ctx context.Context, pol RetryPolicy, fn func() error) error {
 		if backoff > pol.Max {
 			backoff = pol.Max
 		}
-		if !sleepRetryable(ctx, backoff) {
+		if !utils.SleepCtx(ctx, backoff) {
 			return ctx.Err()
 		}
 	}
@@ -120,14 +121,3 @@ func (e *retryError) Unwrap() error { return e.err }
 
 // Is 让 errors.Is(err, ErrRedirectExhausted/ErrClusterUnavailable) 生效。
 func (e *retryError) Is(target error) bool { return target == e.sentinel }
-
-func sleepRetryable(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}

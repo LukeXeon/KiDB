@@ -10,6 +10,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
+	"kidb/keycodec"
 	"kidb/exec"
 	"kidb/i18n"
 	"kidb/meta"
@@ -289,14 +290,12 @@ func (a *autoIncr) AcquireAutoIncrementLock(ctx *sql.Context) (func(), error) {
 
 // SetAutoIncrementValue 设置序列当前值（ALTER AUTO_INCREMENT / 导入用）。
 func (a *autoIncr) SetAutoIncrementValue(ctx *sql.Context, val uint64) error {
-	_, err := a.t.deps.Client.Do(ctx, "SET", seqKeyOf(a.t.def.Name), val)
+	_, err := a.t.deps.Client.Do(ctx, "SET", keycodec.SeqKey(a.t.def.Name), val)
 	return err
 }
 
 // Close 关闭。
 func (a *autoIncr) Close(*sql.Context) error { return nil }
-
-func seqKeyOf(table string) string { return "seq:" + table }
 
 // 编译期接口断言。
 var (

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"kidb"
+	"kidb/utils"
 	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/script"
@@ -70,7 +71,7 @@ func (m *L4Manager) Refresh(ctx context.Context, srcBucketKey string, k int) err
 	if err != nil {
 		return err
 	}
-	arr := asAnySlice(res)
+	arr := utils.AnySlice(res)
 	ver := strconv.FormatInt(time.Now().UnixNano(), 10)
 	for ri := 1; ri <= k; ri++ {
 		argv := []any{ver, strconv.FormatInt(m.ttlMs, 10), strconv.Itoa(len(arr) / 2)}

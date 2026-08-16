@@ -24,13 +24,13 @@ import (
 
 	"kidb"
 	"kidb/bucketmap"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/rowcodec"
 	"kidb/script"
 	"kidb/tuning"
+	"kidb/utils"
 )
 
 // 批大小/组宽等调优值统一收敛 internal/tuning（docs/01 §1.0：开发者参数单一调优面）。
@@ -630,7 +630,7 @@ func (s *RowStream) fillScatter() error {
 		var items []candItem
 		rest := s.pending[:0]
 		for i, b := range s.pending {
-			members := ds.Strings(results[i])
+			members := utils.Strings(results[i])
 			for _, m := range members {
 				pk := s.stripCovering(m)
 				if s.seen != nil { // 分裂窗口父子桶双读去重
@@ -898,7 +898,7 @@ func (s *RowStream) fetchRows(pks []string) error {
 			for _, j := range miss {
 				switch {
 				case rc != nil:
-					raw, _ := ds.StringMap(results[ri])
+					raw, _ := utils.StringMap(results[ri])
 					pttlMs, _ := strconv.ParseInt(fmt.Sprint(results[ri+1]), 10, 64)
 					ri += 2
 					if len(raw) == 0 {
@@ -907,7 +907,7 @@ func (s *RowStream) fetchRows(pks []string) error {
 					rc.Add(keycodec.RowKey(t.Name, batch[j]), raw, time.Duration(pttlMs)*time.Millisecond)
 					raws[j] = raw
 				case cols == nil:
-					raw, _ := ds.StringMap(results[ri])
+					raw, _ := utils.StringMap(results[ri])
 					ri++
 					if len(raw) == 0 {
 						continue

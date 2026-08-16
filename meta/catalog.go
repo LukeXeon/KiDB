@@ -6,9 +6,9 @@ import (
 	"strconv"
 
 	"kidb"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/script"
+	"kidb/utils"
 )
 
 // CatalogStore 是 Catalog 的读写存储（docs/06 §6.1：`c:table:{table}` Hash，
@@ -31,7 +31,7 @@ func (s *CatalogStore) Load(ctx context.Context, table string) (*TableDef, error
 	if err != nil {
 		return nil, err
 	}
-	fields, err := ds.StringMap(res)
+	fields, err := utils.StringMap(res)
 	if err != nil {
 		return nil, err
 	}

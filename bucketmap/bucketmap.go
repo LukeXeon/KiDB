@@ -20,9 +20,9 @@ import (
 	"github.com/tinylib/msgp/msgp"
 
 	"kidb"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/script"
+	"kidb/utils"
 )
 
 // State 桶状态机（docs/03 §3.3）。
@@ -123,10 +123,10 @@ func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shar
 		return nil, err
 	}
 	sh := DefaultShard()
-	fields, _ := ds.StringMap(res)
+	fields, _ := utils.StringMap(res)
 	if len(fields) > 0 {
-		sh.Version = parseUint(fields["version"])
-		sh.Next = int(parseUint(fields["next"]))
+		sh.Version = utils.ParseUint64(fields["version"])
+		sh.Next = int(utils.ParseUint64(fields["next"]))
 		if sh.Next == 0 {
 			sh.Next = 1
 		}
@@ -168,7 +168,7 @@ func (s *Store) Registry(ctx context.Context, table, idx string) (map[string]boo
 		return nil, err
 	}
 	out := map[string]bool{}
-	bmReply, _ := ds.StringMap(res)
+	bmReply, _ := utils.StringMap(res)
 	for f := range bmReply {
 		out[f] = true
 	}
@@ -207,7 +207,7 @@ func (s *Store) CAS(ctx context.Context, key string, expectVer uint64, field str
 	}
 	switch fmt.Sprint(arr[0]) {
 	case "ok":
-		return parseUint(fmt.Sprint(arr[1])), nil
+		return utils.ParseUint64(fmt.Sprint(arr[1])), nil
 	case "stale":
 		s.Invalidate()
 		return 0, fmt.Errorf("%w: bm %s expect %d got %s", kidb.ErrStaleMetadata, key, expectVer, fmt.Sprint(arr[1]))
@@ -357,10 +357,6 @@ func FormatBound(v float64) string {
 	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
-func parseUint(s string) uint64 {
-	n, _ := strconv.ParseUint(s, 10, 64)
-	return n
-}
 
 // encodeBMValue bm 字段值编码（msgp 生成版；int 走十进制字符串）。
 func encodeBMValue(v any) ([]byte, error) {

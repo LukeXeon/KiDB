@@ -2,7 +2,6 @@ package txguard
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"strconv"
 	"testing"
@@ -37,54 +36,6 @@ func testTable() *meta.TableDef {
 // ColIntAlias 避免测试样板里重复点号（本地别名）。
 const ColIntAlias = meta.ColInt
 
-type probe struct {
-	t   *testing.T
-	cli interface {
-		Do(ctx context.Context, cmd string, args ...any) (any, error)
-	}
-	tbl *meta.TableDef
-}
-
-func (p probe) zscore(key, member string) string {
-	res, err := p.cli.Do(context.Background(), "ZSCORE", key, member)
-	require.NoError(p.t, err)
-	if res == nil {
-		return ""
-	}
-	return fmt.Sprint(res)
-}
-
-func (p probe) hget(key, field string) string {
-	res, err := p.cli.Do(context.Background(), "HGET", key, field)
-	require.NoError(p.t, err)
-	if res == nil {
-		return ""
-	}
-	return fmt.Sprint(res)
-}
-
-func (p probe) get(key string) string {
-	res, err := p.cli.Do(context.Background(), "GET", key)
-	require.NoError(p.t, err)
-	if res == nil {
-		return ""
-	}
-	return fmt.Sprint(res)
-}
-
-func (p probe) exists(key string) bool {
-	res, err := p.cli.Do(context.Background(), "EXISTS", key)
-	require.NoError(p.t, err)
-	return fmt.Sprint(res) == "1"
-}
-
-func (p probe) pttl(key string) int64 {
-	res, err := p.cli.Do(context.Background(), "PTTL", key)
-	require.NoError(p.t, err)
-	n, _ := strconv.ParseInt(fmt.Sprint(res), 10, 64)
-	return n
-}
-
 func slotOf(tbl *meta.TableDef, pk string) uint16 {
 	return keycodec.Slot(keycodec.RowKey(tbl.Name, pk))
 }
@@ -95,7 +46,7 @@ func TestWriteRowInvariants(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
 	g := New(cli, reg, nil)
 	tbl := testTable()
-	p := probe{t: t, cli: cli, tbl: tbl}
+	p := testutil.NewProbe(t, cli)
 	ctx := context.Background()
 
 	slot := slotOf(tbl, "1")
@@ -115,16 +66,16 @@ func TestWriteRowInvariants(t *testing.T) {
 		TTL:    time.Hour,
 	})
 	require.NoError(t, err)
-	require.Equal(t, "shanghai", p.hget(row, "city"), "行字段")
-	require.Equal(t, "1", p.hget(row, "_ver"), "行 _ver")
-	require.Equal(t, "0", p.zscore(eq, "1"), "等值桶 member")
-	require.Equal(t, "30", p.zscore(rg, "1"), "范围桶 score")
-	require.Equal(t, "0", p.zscore(lex, "shanghai\x001"), "字典序副本 member")
-	require.NotEmpty(t, p.zscore(exp, "1"), "exp 登记")
-	require.Equal(t, "1", p.get(cnt), "cnt")
-	require.True(t, p.exists(rcpt), "TTL 行必须有回执")
-	require.Contains(t, p.get(resv), row, "唯一预约指向行")
-	require.Greater(t, p.pttl(row), int64(0), "行 TTL")
+	require.Equal(t, "shanghai", p.HGet(row, "city"), "行字段")
+	require.Equal(t, "1", p.HGet(row, "_ver"), "行 _ver")
+	require.Equal(t, "0", p.ZScore(eq, "1"), "等值桶 member")
+	require.Equal(t, "30", p.ZScore(rg, "1"), "范围桶 score")
+	require.Equal(t, "0", p.ZScore(lex, "shanghai\x001"), "字典序副本 member")
+	require.NotEmpty(t, p.ZScore(exp, "1"), "exp 登记")
+	require.Equal(t, "1", p.Get(cnt), "cnt")
+	require.True(t, p.Exists(rcpt), "TTL 行必须有回执")
+	require.Contains(t, p.Get(resv), row, "唯一预约指向行")
+	require.Greater(t, p.PTTL(row), int64(0), "行 TTL")
 
 	// 2. 更新：改等值/范围值，换唯一值 → 旧桶撤销、新桶建立、预约换绑
 	_, err = g.WriteRow(ctx, WriteReq{
@@ -133,15 +84,15 @@ func TestWriteRowInvariants(t *testing.T) {
 		TTL:    time.Hour,
 	})
 	require.NoError(t, err)
-	require.Empty(t, p.zscore(eq, "1"), "旧等值桶应撤销")
-	require.Equal(t, "0", p.zscore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "1"))
-	require.Equal(t, "31", p.zscore(rg, "1"))
-	require.Empty(t, p.zscore(lex, "shanghai\x001"))
-	require.Equal(t, "0", p.zscore(lex, "beijing\x001"))
-	require.Equal(t, "1", p.get(cnt), "更新不动计数")
-	require.Equal(t, "2", p.hget(row, "_ver"))
-	require.Empty(t, p.get(resv), "旧预约应释放")
-	require.Contains(t, p.get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), row)
+	require.Empty(t, p.ZScore(eq, "1"), "旧等值桶应撤销")
+	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "1"))
+	require.Equal(t, "31", p.ZScore(rg, "1"))
+	require.Empty(t, p.ZScore(lex, "shanghai\x001"))
+	require.Equal(t, "0", p.ZScore(lex, "beijing\x001"))
+	require.Equal(t, "1", p.Get(cnt), "更新不动计数")
+	require.Equal(t, "2", p.HGet(row, "_ver"))
+	require.Empty(t, p.Get(resv), "旧预约应释放")
+	require.Contains(t, p.Get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), row)
 
 	// 3. 唯一冲突：另一行占同值
 	_, err = g.WriteRow(ctx, WriteReq{
@@ -156,9 +107,9 @@ func TestWriteRowInvariants(t *testing.T) {
 		Fields: map[string]string{"city": "beijing", "age": "31", "email": "b@x.com"},
 	})
 	require.NoError(t, err)
-	require.False(t, p.exists(rcpt), "无 TTL 行无回执")
-	require.Equal(t, int64(-1), p.pttl(row), "PERSIST 后无 TTL")
-	expScore := p.zscore(exp, "1")
+	require.False(t, p.Exists(rcpt), "无 TTL 行无回执")
+	require.Equal(t, int64(-1), p.PTTL(row), "PERSIST 后无 TTL")
+	expScore := p.ZScore(exp, "1")
 	expScoreF, _ := strconv.ParseFloat(expScore, 64)
 	require.True(t, math.IsInf(expScoreF, 1), "无 TTL 行 exp score 应为 +inf，got %s", expScore)
 
@@ -166,12 +117,12 @@ func TestWriteRowInvariants(t *testing.T) {
 	ok, err := g.DeleteRow(ctx, tbl, "1")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.False(t, p.exists(row))
-	require.Empty(t, p.zscore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "1"))
-	require.Empty(t, p.zscore(rg, "1"))
-	require.Empty(t, p.zscore(exp, "1"))
-	require.Equal(t, "0", p.get(cnt))
-	require.Empty(t, p.get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), "删除释放预约")
+	require.False(t, p.Exists(row))
+	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "1"))
+	require.Empty(t, p.ZScore(rg, "1"))
+	require.Empty(t, p.ZScore(exp, "1"))
+	require.Equal(t, "0", p.Get(cnt))
+	require.Empty(t, p.Get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), "删除释放预约")
 
 	// 6. 删除不存在/已过期行 → false，无副作用
 	ok, err = g.DeleteRow(ctx, tbl, "1")
@@ -185,7 +136,7 @@ func TestResurrection(t *testing.T) {
 	cli, reg, m := testutil.New(t)
 	g := New(cli, reg, nil)
 	tbl := testTable()
-	p := probe{t: t, cli: cli, tbl: tbl}
+	p := testutil.NewProbe(t, cli)
 	ctx := context.Background()
 
 	_, err := g.WriteRow(ctx, WriteReq{
@@ -197,7 +148,7 @@ func TestResurrection(t *testing.T) {
 	// 行物理过期，但回执仍在宽限期内（行 TTL 1h + grace 300s，快进到 1h+100s）。
 	// 注意：快进超过宽限期回执也会被回收——生产上 sweeper 早已清扫（docs/07 §7.3）。
 	m.FastForward(time.Hour + 100*time.Second)
-	require.False(t, p.exists(keycodec.RowKey(tbl.Name, "9")))
+	require.False(t, p.Exists(keycodec.RowKey(tbl.Name, "9")))
 
 	// 复活：同名主键重新写入
 	_, err = g.WriteRow(ctx, WriteReq{
@@ -207,10 +158,10 @@ func TestResurrection(t *testing.T) {
 	require.NoError(t, err)
 
 	slot := slotOf(tbl, "9")
-	require.Empty(t, p.zscore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0), "9"),
+	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0), "9"),
 		"复活必须按旧回执撤销旧索引")
-	require.Equal(t, "0", p.zscore(keycodec.EqBucketKey(tbl.Name, "idx_city", "hangzhou", slot, 0), "9"))
-	require.Equal(t, "1", p.get(keycodec.CntKey(tbl.Name, slot)), "复活不重复 INCR（docs/05 跨脚本不变式）")
+	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "hangzhou", slot, 0), "9"))
+	require.Equal(t, "1", p.Get(keycodec.CntKey(tbl.Name, slot)), "复活不重复 INCR（docs/05 跨脚本不变式）")
 }
 
 // TestCASWriteGuard 调用方 CAS 写语义：期望版本与预读不符 → fail-fast 不重试
@@ -231,7 +182,7 @@ func TestCASWriteGuard(t *testing.T) {
 		ExpectedOldVer: &zero,
 	})
 	require.ErrorIs(t, err, kidb.ErrStaleMetadata)
-	require.Equal(t, "x", probe{t: t, cli: cli}.hget(keycodec.RowKey(tbl.Name, "5"), "city"))
+	require.Equal(t, "x", testutil.NewProbe(t, cli).HGet(keycodec.RowKey(tbl.Name, "5"), "city"))
 
 	// 期望与当前一致（_ver=1）→ 正常写入
 	one := int64(1)

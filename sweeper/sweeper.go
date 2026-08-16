@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"kidb"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/script"
 	"kidb/tuning"
+	"kidb/utils"
 )
 
 // Sweeper 执行清扫。
@@ -73,7 +73,7 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 	if err != nil {
 		return 0, err
 	}
-	pks := ds.Strings(res)
+	pks := utils.Strings(res)
 	if len(pks) == 0 {
 		return 0, nil
 	}
@@ -103,7 +103,7 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 
 	argv := []any{strconv.FormatInt(now, 10), strconv.Itoa(len(pks))}
 	for i, pk := range pks {
-		fields, _ := ds.StringMap(rcpts[i])
+		fields, _ := utils.StringMap(rcpts[i])
 		var buckets [][2]string
 		for f, v := range fields {
 			if strings.HasPrefix(f, "idx:") {
@@ -153,7 +153,7 @@ func (s *Sweeper) nowUnix(ctx context.Context) (int64, error) {
 	if s.cli.Capabilities().ServerTime {
 		res, err := s.cli.Do(ctx, "TIME")
 		if err == nil {
-			if ss := ds.Strings(res); len(ss) > 0 {
+			if ss := utils.Strings(res); len(ss) > 0 {
 				if n, err := strconv.ParseInt(ss[0], 10, 64); err == nil {
 					return n, nil
 				}

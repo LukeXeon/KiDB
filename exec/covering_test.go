@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"kidb"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/script"
@@ -18,38 +16,6 @@ import (
 	"kidb/txguard"
 )
 
-// cmdCounter 命令计数包装（断言覆盖路径不回表 / 投影路径用 HMGET）。
-type cmdCounter struct {
-	kidb.KvClient
-	mu     sync.Mutex
-	counts map[string]int
-}
-
-func newCmdCounter(inner kidb.KvClient) *cmdCounter {
-	return &cmdCounter{KvClient: inner, counts: map[string]int{}}
-}
-
-func (c *cmdCounter) Do(ctx context.Context, cmd string, args ...any) (any, error) {
-	c.mu.Lock()
-	c.counts[cmd]++
-	c.mu.Unlock()
-	return c.KvClient.Do(ctx, cmd, args...)
-}
-
-func (c *cmdCounter) Pipeline(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
-	c.mu.Lock()
-	for _, cmd := range cmds {
-		c.counts[cmd.Name]++
-	}
-	c.mu.Unlock()
-	return c.KvClient.Pipeline(ctx, cmds)
-}
-
-func (c *cmdCounter) count(name string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.counts[name]
-}
 
 func seedCoverTable() *meta.TableDef {
 	return &meta.TableDef{
@@ -70,7 +36,7 @@ func seedCoverTable() *meta.TableDef {
 // 投影∪谓词 ⊆ {索引列,覆盖列,pk} → 零回表（无 HGETALL/HMGET），活性经 exp ZSCORE。
 func TestCoveringReadPath(t *testing.T) {
 	cli, reg, m := testutil.New(t)
-	cc := newCmdCounter(cli)
+	cc := testutil.NewCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := seedCoverTable()
 	ctx := context.Background()
@@ -109,10 +75,10 @@ func TestCoveringReadPath(t *testing.T) {
 		Covering:   true,
 	}
 
-	before := cc.count("HGETALL") + cc.count("HMGET")
+	before := cc.Count("HGETALL") + cc.Count("HMGET")
 	rows := drain(t, e.Run(ctx, req))
-	require.Equal(t, before, cc.count("HGETALL")+cc.count("HMGET"), "覆盖路径禁止回表")
-	require.Positive(t, cc.count("ZSCORE"), "覆盖路径必须做 exp 活性校验")
+	require.Equal(t, before, cc.Count("HGETALL")+cc.Count("HMGET"), "覆盖路径禁止回表")
+	require.Positive(t, cc.Count("ZSCORE"), "覆盖路径必须做 exp 活性校验")
 
 	// 结果：age 25..60 的种子行（36 行）+ ghost（age 66，尚未过期）= 37，
 	// 按 score 全局有序（ghost 排最后）
@@ -136,7 +102,7 @@ func TestCoveringReadPath(t *testing.T) {
 // TestProjectionFetch 投影下推（docs/04 §4.3）：非覆盖时回表用 HMGET 子集。
 func TestProjectionFetch(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
-	cc := newCmdCounter(cli)
+	cc := testutil.NewCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	// 4 列表：投影 [city] + 谓词 age → 取列 {city,age} ⊊ 非主键列 {city,age,note}
 	tbl := &meta.TableDef{
@@ -170,10 +136,10 @@ func TestProjectionFetch(t *testing.T) {
 		Pred:       &Predicate{Column: "age", Ranges: []RangeBound{rng}},
 		Projection: []string{"city"},
 	}
-	hgetBefore := cc.count("HGETALL")
+	hgetBefore := cc.Count("HGETALL")
 	rows := drain(t, e.Run(ctx, req))
-	require.Equal(t, hgetBefore, cc.count("HGETALL"), "投影子集禁止 HGETALL")
-	require.Positive(t, cc.count("HMGET"), "投影子集必须 HMGET")
+	require.Equal(t, hgetBefore, cc.Count("HGETALL"), "投影子集禁止 HGETALL")
+	require.Positive(t, cc.Count("HMGET"), "投影子集必须 HMGET")
 	require.Len(t, rows, 20)
 	for _, r := range rows {
 		require.Len(t, r, 1, "行宽=投影宽度")

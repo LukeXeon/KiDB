@@ -39,7 +39,7 @@ func TestSweepExpired(t *testing.T) {
 	g.SetClock(clock)
 	tbl := sweepTable()
 	ctx := context.Background()
-	p := probe{t: t, cli: cli}
+	p := testutil.NewProbe(t, cli)
 
 	_, err := g.WriteRow(ctx, txguard.WriteReq{
 		Table: tbl, PK: "1",
@@ -50,7 +50,7 @@ func TestSweepExpired(t *testing.T) {
 
 	m.FastForward(time.Hour + time.Second) // 行物理过期（miniredis TTL 钟）
 	now = now.Add(time.Hour + time.Second) // 共享钟同步推进（回执 grace 内）
-	require.False(t, p.exists(keycodec.RowKey(tbl.Name, "1")))
+	require.False(t, p.Exists(keycodec.RowKey(tbl.Name, "1")))
 
 	sw := New(cli, reg)
 	sw.SetClock(clock)
@@ -60,11 +60,11 @@ func TestSweepExpired(t *testing.T) {
 	require.Equal(t, 1, n)
 
 	// 全清断言（docs/12 §12.2 清扫不变式）
-	require.Empty(t, p.zscore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0), "1"), "索引桶")
-	require.Empty(t, p.zscore(keycodec.ExpKeyN(tbl.Name, slot, keycodec.ExpShardFor("1", 1), 1), "1"), "登记册")
-	require.Equal(t, "0", p.get(keycodec.CntKey(tbl.Name, slot)), "计数")
-	require.False(t, p.exists(keycodec.ReceiptKey(tbl.Name, "1")), "回执")
-	require.False(t, p.exists(keycodec.UniqueKey(tbl.Name, "uk_email", "a@x.com")), "唯一预约")
+	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0), "1"), "索引桶")
+	require.Empty(t, p.ZScore(keycodec.ExpKeyN(tbl.Name, slot, keycodec.ExpShardFor("1", 1), 1), "1"), "登记册")
+	require.Equal(t, "0", p.Get(keycodec.CntKey(tbl.Name, slot)), "计数")
+	require.False(t, p.Exists(keycodec.ReceiptKey(tbl.Name, "1")), "回执")
+	require.False(t, p.Exists(keycodec.UniqueKey(tbl.Name, "uk_email", "a@x.com")), "唯一预约")
 
 	// 幂等：再扫为零
 	n, err = sw.SweepSlot(ctx, tbl, slot)
@@ -82,7 +82,7 @@ func TestSweepSkipsResurrected(t *testing.T) {
 	g.SetClock(clock)
 	tbl := sweepTable()
 	ctx := context.Background()
-	p := probe{t: t, cli: cli}
+	p := testutil.NewProbe(t, cli)
 
 	_, err := g.WriteRow(ctx, txguard.WriteReq{
 		Table: tbl, PK: "2",
@@ -110,40 +110,9 @@ func TestSweepSkipsResurrected(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, n, "复活行必须被复查跳过")
 
-	require.True(t, p.exists(keycodec.RowKey(tbl.Name, "2")))
-	require.Equal(t, "0", p.zscore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "2"))
-	require.Equal(t, "1", p.get(keycodec.CntKey(tbl.Name, slot)))
-}
-
-type probe struct {
-	t   *testing.T
-	cli interface {
-		Do(ctx context.Context, cmd string, args ...any) (any, error)
-	}
-}
-
-func (p probe) zscore(key, member string) string {
-	res, err := p.cli.Do(context.Background(), "ZSCORE", key, member)
-	require.NoError(p.t, err)
-	if res == nil {
-		return ""
-	}
-	return sprint(res)
-}
-
-func (p probe) get(key string) string {
-	res, err := p.cli.Do(context.Background(), "GET", key)
-	require.NoError(p.t, err)
-	if res == nil {
-		return ""
-	}
-	return sprint(res)
-}
-
-func (p probe) exists(key string) bool {
-	res, err := p.cli.Do(context.Background(), "EXISTS", key)
-	require.NoError(p.t, err)
-	return sprint(res) == "1"
+	require.True(t, p.Exists(keycodec.RowKey(tbl.Name, "2")))
+	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "2"))
+	require.Equal(t, "1", p.Get(keycodec.CntKey(tbl.Name, slot)))
 }
 
 func sprint(v any) string {

@@ -18,7 +18,7 @@
 - **历史组件全拆**：前置分类器、双解析器分工、网关快速路径（COUNT/MIN/MAX）、自定义 EXPLAIN、plan cache 判定缓存、自写指纹归一化器；**go.mod 移除 TiDB parser（零代码依赖）**。承接面：COUNT(*) 由 gms `replaceCountStar`→`StatisticsTable`（精确 RowCount=Σ ZCOUNT）；MIN/MAX 经引擎聚合（端点加速写法 `ORDER BY col LIMIT 1`）；EXPLAIN 走 gms 原生；JOIN 分档由全扫闸门统一裁决；
 - **ddl 包并入 engine**（转换/校验即 `engine/ddlconvert.go`）；
 - **DI 装配**：引入 `github.com/google/wire`，全项目组件统一进 DI 图；
-- **工具包收敛**：`ds/` 通用工具包——自研泛型优先队列（container/heap 封装）替代并移除 `gopkg.in/dnaeon/go-priorityqueue.v1`；重复工具函数归拢；`internal/` 平铺（`internal/tuning`→`tuning`、`internal/redistest`→`testutil`——独立进程非库，internal 约束无对象）；
+- **工具包收敛**：`utils/` 通用工具包——自研泛型优先队列（container/heap 封装）替代并移除 `gopkg.in/dnaeon/go-priorityqueue.v1`；同名/同体函数脚本扫描 + 归拢（`Strings`/`StringMap`/`AnySlice`/`ParseUint64`/`SleepCtx`；`contains`→stdlib `slices.Contains`；engine 手工拼 key 的 `rowKeyOf`/`seqKeyOf` 回收至 keycodec——key 布局单点所有纪律的执行面漏洞）；测试断言探针 `Probe` 与命令计数器 `CmdCounter` 入 `testutil`（此前 sweeper/txguard/exec/gateway 测试各抄一份）；`internal/` 平铺（`internal/tuning`→`tuning`、`internal/redistest`→`testutil`）；
 - **i18n**：引入 `github.com/nicksnyder/go-i18n/v2`——用户面向消息全部走消息目录（en 默认 + zh）；**消息不得含技术文档引用**（docs 引用只留代码注释）；
 - **泛型使用点审计**：扫描结果与库推荐见审计记录（ROADMAP v6.0 第 8 项）。
 

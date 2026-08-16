@@ -8,11 +8,12 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
-	"kidb/ds"
+	"kidb/keycodec"
 	"kidb/i18n"
 	"kidb/rowcodec"
 	"kidb/tuning"
 	"kidb/txguard"
+	"kidb/utils"
 )
 
 // editors.go：DML 写路径的 gms 编辑器实现（docs/05）。
@@ -175,11 +176,11 @@ func (e *editor) delete(ctx *sql.Context, row sql.Row) error {
 
 // readExisting 预读既有行（判重用）：返回解码后的行，不存在/已过期返回 nil。
 func (e *editor) readExisting(ctx *sql.Context, pk string) (sql.Row, error) {
-	res, err := e.t.deps.Client.Do(ctx, "HGETALL", rowKeyOf(e.t.def.Name, pk))
+	res, err := e.t.deps.Client.Do(ctx, "HGETALL", keycodec.RowKey(e.t.def.Name, pk))
 	if err != nil {
 		return nil, err
 	}
-	raw, _ := ds.StringMap(res)
+	raw, _ := utils.StringMap(res)
 	if len(raw) == 0 {
 		return nil, nil
 	}

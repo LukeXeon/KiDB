@@ -20,7 +20,7 @@ import (
 // 全部调用方结果一致（回表校验各自执行）。
 func TestL2Singleflight(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
-	cc := newCmdCounter(cli)
+	cc := testutil.NewCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{
 		Name: "ev",
@@ -70,11 +70,11 @@ func TestL2Singleflight(t *testing.T) {
 			results[k] = ids
 		}(w)
 	}
-	zBefore := cc.count("ZRANGE")
+	zBefore := cc.Count("ZRANGE")
 	close(start)
 	wg.Wait()
 
-	zAfter := cc.count("ZRANGE")
+	zAfter := cc.Count("ZRANGE")
 	scatterVolume := zAfter - zBefore
 	// 单次散取 = 16384 slot 各一页；L2 合并后 32 路并发总量应 ≈ 1 次（容忍竞态 2 次）
 	require.LessOrEqual(t, scatterVolume, 2*16384,
@@ -87,7 +87,7 @@ func TestL2Singleflight(t *testing.T) {
 // TestL2FollowersDuringRefill 已有 L1 缓存时并发直接命中（L1/L2 接力）。
 func TestL2FollowersDuringRefill(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
-	cc := newCmdCounter(cli)
+	cc := testutil.NewCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{
 		Name: "ev2",
@@ -117,9 +117,9 @@ func TestL2FollowersDuringRefill(t *testing.T) {
 	}
 	rows := drain(t, e.Run(ctx, req()))
 	require.Len(t, rows, 10)
-	zAfterFirst := cc.count("ZRANGE")
+	zAfterFirst := cc.Count("ZRANGE")
 	// 第二次同指纹查询：L1 命中，零散取
 	rows = drain(t, e.Run(ctx, req()))
 	require.Len(t, rows, 10)
-	require.Equal(t, zAfterFirst, cc.count("ZRANGE"), "L1 命中后零散取")
+	require.Equal(t, zAfterFirst, cc.Count("ZRANGE"), "L1 命中后零散取")
 }

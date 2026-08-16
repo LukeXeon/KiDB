@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"kidb"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/tuning"
+	"kidb/utils"
 )
 
 // prefix.go：前缀搜索 LIKE 'abc%' 的字典序副本查询路径（docs/04 §4.5）：
@@ -31,7 +31,7 @@ type lexItem struct {
 // lexMerger 字典序副本的 k 路归并器（ds 泛型堆，member 为优先级 = 小顶堆字典序）。
 type lexMerger struct {
 	s      *RowStream
-	heap   *ds.PriorityQueue[lexItem, string]
+	heap   *utils.PriorityQueue[lexItem, string]
 	ways   []mergeWay
 	seeded bool
 }
@@ -39,7 +39,7 @@ type lexMerger struct {
 // fillPrefix 驱动字典序归并（单区间：[LexLo, LexHi) 无多区间概念）。
 func (s *RowStream) fillPrefix() error {
 	if s.lm == nil {
-		s.lm = &lexMerger{s: s, heap: ds.NewMinPriorityQueue[lexItem, string]()}
+		s.lm = &lexMerger{s: s, heap: utils.NewMinPriorityQueue[lexItem, string]()}
 	}
 	return s.lm.step()
 }
@@ -129,7 +129,7 @@ func (lm *lexMerger) seed() error {
 		return err
 	}
 	for i, res := range results {
-		members := ds.Strings(res)
+		members := utils.Strings(res)
 		if len(members) == 0 {
 			lm.ways[i].done = true
 			continue
@@ -159,7 +159,7 @@ func (lm *lexMerger) refillWays(idxs []int) error {
 	}
 	for j, res := range results {
 		w := &lm.ways[idxs[j]]
-		members := ds.Strings(res)
+		members := utils.Strings(res)
 		if len(members) == 0 {
 			w.done = true
 			continue

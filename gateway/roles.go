@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"kidb"
+	"kidb/utils"
 	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/engine"
@@ -135,7 +136,7 @@ func (s *Server) sweeperLoop(ctx context.Context) {
 		}
 		tables, err := s.deps.Store.ListTables(ctx)
 		if err != nil {
-			sleepCtx(ctx, sweepTick)
+			_ = utils.SleepCtx(ctx, sweepTick)
 			continue
 		}
 		for _, name := range tables {
@@ -161,7 +162,7 @@ func (s *Server) sweeperLoop(ctx context.Context) {
 				}
 			}
 		}
-		sleepCtx(ctx, sweepTick) // 空闲降频由"一轮有产出则立即再来"后续精化
+		_ = utils.SleepCtx(ctx, sweepTick) // 空闲降频由"一轮有产出则立即再来"后续精化
 	}
 }
 
@@ -175,7 +176,7 @@ func (s *Server) indexerLoop(ctx context.Context) {
 		}
 		tables, err := s.deps.Store.ListTables(ctx)
 		if err != nil {
-			sleepCtx(ctx, indexerTick)
+			_ = utils.SleepCtx(ctx, indexerTick)
 			continue
 		}
 		for _, name := range tables {
@@ -198,15 +199,7 @@ func (s *Server) indexerLoop(ctx context.Context) {
 				}
 			}
 		}
-		sleepCtx(ctx, indexerTick)
+		_ = utils.SleepCtx(ctx, indexerTick)
 	}
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
-}

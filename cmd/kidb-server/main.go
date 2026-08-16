@@ -36,7 +36,7 @@ func main() {
 	flag.Parse()
 
 	boot := kidb.Bootstrap{
-		Lang:         *lang,
+		Lang:          *lang,
 		Addrs:         strings.Split(*addrs, ","),
 		PoolSize:      *poolSize,
 		ReadTimeout:   *readTimeout,

@@ -1,7 +1,7 @@
-// Package ds 是 KiDB 的通用数据结构与回复归一工具包（v6.0 工具收敛面，
-// docs/01 §1.6）：泛型优先队列（container/heap 封装，替代第三方微库）、
-// Redis 回复形态归一等跨包共享的小工具。只放真正通用的部分。
-package ds
+// Package utils 是 KiDB 的通用工具包（v6.0 工具收敛面，docs/01 §1.6）：
+// 泛型容器（container/heap 封装的优先队列，替代第三方微库）、Redis 回复
+// 归一、ctx 睡眠等跨包共享的小工具。只放真正通用、不含领域语义的部分。
+package utils
 
 import (
 	"cmp"

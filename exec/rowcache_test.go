@@ -19,7 +19,7 @@ import (
 //   - 更新/删除的陈旧窗口 ≤ 默认 TTL（文档化取舍，默认关闭的原因）。
 func TestRowCache(t *testing.T) {
 	cli, reg, m := testutil.New(t)
-	cc := newCmdCounter(cli)
+	cc := testutil.NewCmdCounter(cli)
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{
 		Name: "rc",
@@ -45,15 +45,15 @@ func TestRowCache(t *testing.T) {
 	}
 
 	write("1", "a", 0)
-	before := cc.count("HGETALL")
+	before := cc.Count("HGETALL")
 	rows := get("1")
 	require.Len(t, rows, 1)
 	require.Equal(t, "a", rows[0][1])
-	mid := cc.count("HGETALL")
+	mid := cc.Count("HGETALL")
 	require.Equal(t, before+1, mid, "冷读回表一次")
 	rows = get("1")
 	require.Len(t, rows, 1)
-	require.Equal(t, mid, cc.count("HGETALL"), "热读命中缓存零回表")
+	require.Equal(t, mid, cc.Count("HGETALL"), "热读命中缓存零回表")
 
 	// 更新陈旧窗口：写入新值后立即读仍见旧值（文档化取舍；默认关闭的根因）
 	write("1", "b", 0)

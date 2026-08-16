@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"kidb"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
+	"kidb/utils"
 )
 
 // Indexer 消费一个 (表, 索引, slot) 的日志。
@@ -34,7 +34,7 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 	if err != nil {
 		return 0, err
 	}
-	entries := ds.Strings(res)
+	entries := utils.Strings(res)
 	if len(entries) == 0 {
 		return 0, nil
 	}

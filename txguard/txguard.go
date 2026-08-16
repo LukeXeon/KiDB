@@ -7,13 +7,13 @@ package txguard
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"kidb"
 	"kidb/bucketmap"
-	"kidb/ds"
 	"kidb/i18n"
 	"kidb/keycodec"
 	"kidb/meta"
@@ -21,6 +21,7 @@ import (
 	"kidb/rowcodec"
 	"kidb/script"
 	"kidb/tuning"
+	"kidb/utils"
 )
 
 // maxStaleRetries 由调用点读取 tuning.Get().Txguard.StaleRetries（docs/05 §5.5）。
@@ -163,7 +164,7 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 		if !ok2 {
 			return false, fmt.Errorf("%w: %s on %s", kidb.ErrDuplicateKey, newVal, idx.ID)
 		}
-		if !contains(acquired, rkey) {
+		if !slices.Contains(*acquired, rkey) {
 			*acquired = append(*acquired, rkey)
 		}
 		uniqEntries = append(uniqEntries, [2]string{idx.ID, rkey})
@@ -227,9 +228,9 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	case "log_full":
 		return false, fmt.Errorf("%w: %s", kidb.ErrIndexLogFull, i18n.T("tx.index_log_full", rowkey))
 	case "ok":
-		res.OldVer = parseUint64(fmt.Sprint(arr[1]))
+		res.OldVer = utils.ParseUint64(fmt.Sprint(arr[1]))
 		if len(arr) > 2 {
-			res.NewVer = parseUint64(fmt.Sprint(arr[2]))
+			res.NewVer = utils.ParseUint64(fmt.Sprint(arr[2]))
 		}
 	default:
 		return false, fmt.Errorf("txguard: write_row unknown status %v", arr[0])
@@ -251,7 +252,7 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	// （跳过本次新占有的预约——同值复约场景防误删）。
 	if len(oldRow) == 0 {
 		for f, v := range oldRcpt {
-			if strings.HasPrefix(f, "__uniq:") && !contains(acquired, v) {
+			if strings.HasPrefix(f, "__uniq:") && !slices.Contains(*acquired, v) {
 				_ = g.releaseUnique(ctx, v, rowkey)
 			}
 		}
@@ -624,20 +625,16 @@ func (g *Guard) hgetall(ctx context.Context, key string) (map[string]string, err
 	if err != nil || res == nil {
 		return nil, err
 	}
-	return ds.StringMap(res)
+	return utils.StringMap(res)
 }
 
 func oldVerOf(oldRow map[string]string) uint64 {
 	if len(oldRow) == 0 {
 		return 0
 	}
-	return parseUint64(oldRow["_ver"])
+	return utils.ParseUint64(oldRow["_ver"])
 }
 
-func parseUint64(s string) uint64 {
-	n, _ := strconv.ParseUint(s, 10, 64)
-	return n
-}
 
 func contains(sp *[]string, s string) bool {
 	for _, x := range *sp {

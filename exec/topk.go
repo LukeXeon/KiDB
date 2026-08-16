@@ -6,10 +6,10 @@ import (
 	"strconv"
 
 	"kidb"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/tuning"
+	"kidb/utils"
 )
 
 // topk.go：RangeLookup 的全局 score 有序流（docs/04 §4.1：ORDER BY num LIMIT k
@@ -51,7 +51,7 @@ type mergeWay struct {
 type orderedMerger struct {
 	s      *RowStream
 	r      RangeBound
-	pq     *ds.PriorityQueue[topkItem, float64]
+	pq     *utils.PriorityQueue[topkItem, float64]
 	ways   []mergeWay
 	desc   bool
 	seeded bool
@@ -61,9 +61,9 @@ type orderedMerger struct {
 // newOrderedMerger 构造（不发起 IO；首个 fill 时种子）。
 func newOrderedMerger(s *RowStream, r RangeBound, desc bool) *orderedMerger {
 	if desc {
-		return &orderedMerger{s: s, r: r, desc: desc, pq: ds.NewMaxPriorityQueue[topkItem, float64]()}
+		return &orderedMerger{s: s, r: r, desc: desc, pq: utils.NewMaxPriorityQueue[topkItem, float64]()}
 	}
-	return &orderedMerger{s: s, r: r, desc: desc, pq: ds.NewMinPriorityQueue[topkItem, float64]()}
+	return &orderedMerger{s: s, r: r, desc: desc, pq: utils.NewMinPriorityQueue[topkItem, float64]()}
 }
 
 // fillOrderedRange 驱动归并：区间耗尽推进下一区间，全部耗尽 io.EOF。
@@ -220,7 +220,7 @@ func (om *orderedMerger) refillWays(idxs []int) error {
 	}
 	for j, res := range results {
 		w := &om.ways[idxs[j]]
-		members := ds.Strings(res)
+		members := utils.Strings(res)
 		n := len(members) / 2 // WITHSCORES 扁平对
 		if n == 0 {
 			w.done = true
@@ -258,7 +258,7 @@ func (om *orderedMerger) pageCmd(key string, off, count int) kidb.Cmd {
 
 // parseWithScores 解析 WITHSCORES 扁平返回的首个 (member, score) 对。
 func (om *orderedMerger) parseWithScores(res any) (float64, string, bool) {
-	arr := ds.Strings(res)
+	arr := utils.Strings(res)
 	if len(arr) < 2 {
 		return 0, "", false
 	}

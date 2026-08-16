@@ -16,7 +16,7 @@ type Bootstrap struct {
 	Accounts      []Account // 账号表（docs/02 §2.9：两级权限 rw/ro）
 	TLSCertFile   string    // 可选 TLS（docs/02 §2.1）
 	TLSKeyFile    string
-	Lang          string    // 用户面向消息语言（"en" 默认 / "zh"，docs/10 §10.1 i18n 选型）
+	Lang          string // 用户面向消息语言（"en" 默认 / "zh"，docs/10 §10.1 i18n 选型）
 }
 
 // Account 是一个网关账号。Role ∈ {"rw","ro"}；ro 执行写/DDL/SET GLOBAL

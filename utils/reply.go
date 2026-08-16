@@ -1,6 +1,9 @@
-package ds
+package utils
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // reply.go：KvClient 泛化 Do/Pipeline 回复的形态归一（契约 docs/09 §9.3：
 // 适配器对 Hash 类回复可返回 map[string]string 或 map[any]any，
@@ -46,4 +49,26 @@ func StringMap(res any) (map[string]string, error) {
 		return map[string]string{}, nil
 	}
 	return nil, fmt.Errorf("hgetall 回复形态未知 %T", res)
+}
+
+// AnySlice 归一 EVAL 类返回的数组形态（[]any / []string → []any）。
+func AnySlice(res any) []any {
+	switch v := res.(type) {
+	case []any:
+		return v
+	case []string:
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = e
+		}
+		return out
+	}
+	return nil
+}
+
+// ParseUint64 十进制字符串解析（错误归零——调用点均为内核自产字段，
+// 防御性解析语义统一在此）。
+func ParseUint64(s string) uint64 {
+	n, _ := strconv.ParseUint(s, 10, 64)
+	return n
 }

@@ -9,11 +9,11 @@ import (
 
 	"kidb"
 	"kidb/bucketmap"
-	"kidb/ds"
 	"kidb/keycodec"
 	"kidb/metrics"
 	"kidb/rowcodec"
 	"kidb/script"
+	"kidb/utils"
 )
 
 // split.go：桶分裂协议驱动（docs/08 §8.3）：
@@ -139,7 +139,7 @@ func (s *Splitter) migrateEq(ctx context.Context, table, idxID, encVal string, s
 			if err != nil {
 				return err
 			}
-			members := ds.Strings(res)
+			members := utils.Strings(res)
 			if len(members) == 0 {
 				break
 			}
@@ -281,7 +281,7 @@ func (s *Splitter) sampleMedian(ctx context.Context, table, idxID string, slot u
 	if err != nil {
 		return 0, err
 	}
-	arr := asAnySlice(res)
+	arr := utils.AnySlice(res)
 	var scores []float64
 	for i := 1; i < len(arr); i += 2 {
 		f, err := strconv.ParseFloat(fmt.Sprint(arr[i]), 64)
@@ -309,7 +309,7 @@ func (s *Splitter) migrateRange(ctx context.Context, table, idxID string, slot u
 		if err != nil {
 			return err
 		}
-		arr := asAnySlice(res)
+		arr := utils.AnySlice(res)
 		if len(arr) == 0 {
 			return nil
 		}
@@ -383,14 +383,6 @@ func boundOf(s string) float64 {
 	return f
 }
 
-func asAnySlice(res any) []any {
-	switch v := res.(type) {
-	case []any:
-		return v
-	default:
-		return nil
-	}
-}
 
 // ==== 合并（分裂的镜像协议，docs/08 §8.3 末段）====
 
@@ -444,7 +436,7 @@ func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, slo
 					if err != nil {
 						return err
 					}
-					members := ds.Strings(res)
+					members := utils.Strings(res)
 					if len(members) == 0 {
 						break
 					}
@@ -608,7 +600,7 @@ func (s *Splitter) migrateRangeTo(ctx context.Context, table, idxID string, slot
 		if err != nil {
 			return err
 		}
-		arr := asAnySlice(res)
+		arr := utils.AnySlice(res)
 		if len(arr) == 0 {
 			return nil
 		}

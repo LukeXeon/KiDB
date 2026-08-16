@@ -16,6 +16,7 @@ import (
 	"kidb"
 	"kidb/keycodec"
 	"kidb/script"
+	"kidb/utils"
 )
 
 // Elector 是 Redis 锁选举器。语义闭环（对齐 TiDB owner/manager.go）：
@@ -61,13 +62,13 @@ func (e *Elector) Campaign(ctx context.Context, role func(ctx context.Context) e
 		ok, err := e.tryAcquire(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			// 瞬时错误退避后重竞选
-			if !sleepCtx(ctx, e.ttl/3) {
+			if !utils.SleepCtx(ctx, e.ttl/3) {
 				return ctx.Err()
 			}
 			continue
 		}
 		if !ok {
-			if !sleepCtx(ctx, e.ttl/3+jitter()) {
+			if !utils.SleepCtx(ctx, e.ttl/3+jitter()) {
 				return ctx.Err()
 			}
 			continue
@@ -155,16 +156,6 @@ func (e *Elector) release(ctx context.Context) {
 }
 
 // 竞选循环经 ctx 取消停止。
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
 
 func jitter() time.Duration {
 	return time.Duration(time.Now().UnixNano()%100) * time.Millisecond // 轻量抖动

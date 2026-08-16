@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -21,75 +19,12 @@ import (
 	"kidb/txguard"
 )
 
-// wireCounter 统计内核发出的 Redis 命令（覆盖路径零回表的端到端证据）。
-// 回表计数只算行 key（d: 前缀）——Catalog lease 刷新等元数据 HGETALL 不算。
-type wireCounter struct {
-	kidb.KvClient
-	mu         sync.Mutex
-	counts     map[string]int
-	rowHGETALL int // 行 key HGETALL（回表）
-	rowHMGET   int // 行 key HMGET（投影下推回表）
-}
-
-func (w *wireCounter) Do(ctx context.Context, cmd string, args ...any) (any, error) {
-	w.mu.Lock()
-	w.counts[cmd]++
-	w.trackFetch(cmd, args)
-	w.mu.Unlock()
-	return w.KvClient.Do(ctx, cmd, args...)
-}
-
-func (w *wireCounter) Pipeline(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
-	w.mu.Lock()
-	for _, c := range cmds {
-		w.counts[c.Name]++
-		w.trackFetch(c.Name, c.Args)
-	}
-	w.mu.Unlock()
-	return w.KvClient.Pipeline(ctx, cmds)
-}
-
-func (w *wireCounter) trackFetch(cmd string, args []any) {
-	if len(args) == 0 {
-		return
-	}
-	k, ok := args[0].(string)
-	if !ok || !strings.HasPrefix(k, "d:") {
-		return
-	}
-	switch cmd {
-	case "HGETALL":
-		w.rowHGETALL++
-	case "HMGET":
-		w.rowHMGET++
-	}
-}
-
-func (w *wireCounter) count(name string) int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.counts[name]
-}
-
-func (w *wireCounter) rowFetches() (hgetall, hmget int) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.rowHGETALL, w.rowHMGET
-}
-
-func (w *wireCounter) reset() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.counts = map[string]int{}
-	w.rowHGETALL, w.rowHMGET = 0, 0
-}
-
 // TestCoveringWire 覆盖索引读路径的端到端验证（docs/03 §3.5）：
 // 经 gms 全链路（pruneTables 投影下推 → ITA → translate 覆盖判定），
 // 命中覆盖的投影查询零回表（无 HGETALL/HMGET），结果精确。
 func TestCoveringWire(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
-	wc := &wireCounter{KvClient: cli, counts: map[string]int{}}
+	wc := testutil.NewCmdCounter(cli)
 
 	store := meta.NewCatalogStore(cli, reg)
 	deps := engine.Deps{
@@ -138,7 +73,7 @@ func TestCoveringWire(t *testing.T) {
 	}
 
 	// 覆盖命中：投影 {city,age} ⊆ {age(索引列), city(覆盖), uid(pk)}
-	wc.reset()
+	wc.Reset()
 	rows, err := db.QueryContext(ctx, "SELECT city, age FROM cov WHERE age >= 25 ORDER BY age DESC LIMIT 5")
 	require.NoError(t, err)
 	var got [][2]any
@@ -154,12 +89,12 @@ func TestCoveringWire(t *testing.T) {
 		require.GreaterOrEqual(t, got[i-1][1].(int64), got[i][1].(int64), "DESC 序")
 	}
 	require.Equal(t, int64(59), got[0][1]) // age 最大 = 20+39=59
-	hg, hm := wc.rowFetches()
+	hg, hm := wc.RowFetches()
 	require.Equal(t, 0, hg+hm, "覆盖命中零回表（行 key HGETALL=%d HMGET=%d）", hg, hm)
-	require.Positive(t, wc.count("ZSCORE"), "活性校验必经 exp ZSCORE")
+	require.Positive(t, wc.Count("ZSCORE"), "活性校验必经 exp ZSCORE")
 
 	// 非覆盖投影（含 note）：投影下推 HMGET（不取 HGETALL），结果同样精确
-	wc.reset()
+	wc.Reset()
 	rows, err = db.QueryContext(ctx, "SELECT note FROM cov WHERE age = 33")
 	require.NoError(t, err)
 	var notes []string
@@ -170,7 +105,7 @@ func TestCoveringWire(t *testing.T) {
 	}
 	rows.Close()
 	require.NotEmpty(t, notes)
-	hg, hm = wc.rowFetches()
+	hg, hm = wc.RowFetches()
 	require.Equal(t, 0, hg, "投影查询应走 HMGET 子集（行 key HGETALL=%d）", hg)
 	require.Positive(t, hm, "投影查询应 HMGET（行 key HMGET=%d）", hm)
 

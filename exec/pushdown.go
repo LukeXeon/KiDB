@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 
+	"kidb/utils"
 	"kidb/keycodec"
 	"kidb/rowcodec"
 )
@@ -82,7 +83,7 @@ func (s *RowStream) fetchRowsPushdown(ctx context.Context, pks []string) error {
 
 // parsePushdownReply 解析扁平返回 [pk, fieldCount, (f, v)×n, ...]。
 func (s *RowStream) parsePushdownReply(out any) ([][]any, error) {
-	arr := asAnySlice(out)
+	arr := utils.AnySlice(out)
 	var rows [][]any
 	i := 0
 	for i < len(arr) {
