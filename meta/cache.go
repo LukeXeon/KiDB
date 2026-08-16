@@ -3,10 +3,11 @@ package meta
 import (
 	"context"
 
-	"kidb/metrics"
-	"kidb/tuning"
 	"sync"
 	"time"
+
+	"kidb/metrics"
+	"kidb/tuning"
 )
 
 // CatalogCache 是 Catalog 的本地缓存（docs/06 §6.2 lease 纪律）：

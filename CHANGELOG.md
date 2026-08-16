@@ -140,3 +140,8 @@
 **裁决回退**：JSON 列 msgpack 二进制 → 归一化文本直存（用户裁决：15% 体积收益不值得双格式编解码器与二进制不可观测；归一化保 MySQL 语义对齐）。
 
 **docs 对齐**：02/03/05/06/08/09/10/11/12/14 全面同步（含 docs/14 的 SELECT * 含 _ttl 订正、TiDB parser 残留清除、docs/08 §8.4 L4 承诺落地对齐、docs/10 §10.3 指标表诚实化）。
+
+### 同日后续（结构收敛）
+
+- 客户端面全收 `kidb/kv` 包：`KvClient` → `kv.Client`（Kv 前缀移除），retry/退避装饰器、SyncClock、参考适配器（`kv/goredis`）同迁；根包收敛为 Bootstrap/错误码/Kernel 组装面；Querier 死接口删除。
+- 文件名修订：`controller/autosplit.go` → `manager.go`（Manager 驱动 L4/分裂决策，不止 split）；`engine/starprobe_test.go` → `star_projection_test.go`。

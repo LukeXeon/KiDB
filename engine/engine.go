@@ -12,8 +12,8 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 
-	"kidb"
 	"kidb/exec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/script"
 	"kidb/txguard"
@@ -21,7 +21,7 @@ import (
 
 // Deps 是引擎层对内核的依赖面。
 type Deps struct {
-	Client kidb.KvClient
+	Client kv.Client
 	Reg    *script.Registry
 	Cache  *meta.CatalogCache
 	Store  *meta.CatalogStore

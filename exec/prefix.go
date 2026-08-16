@@ -4,8 +4,8 @@ import (
 	"io"
 	"strings"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/tuning"
 	"kidb/utils"
 )
@@ -120,7 +120,7 @@ func (lm *lexMerger) seed() error {
 		}
 	}
 
-	cmds := make([]kidb.Cmd, 0, len(lm.ways))
+	cmds := make([]kv.Cmd, 0, len(lm.ways))
 	for _, w := range lm.ways {
 		cmds = append(cmds, lm.pageCmd(w.key, 0, 1))
 	}
@@ -148,7 +148,7 @@ func (lm *lexMerger) seed() error {
 // refillWays 批量补页。
 func (lm *lexMerger) refillWays(idxs []int) error {
 	s := lm.s
-	cmds := make([]kidb.Cmd, 0, len(idxs))
+	cmds := make([]kv.Cmd, 0, len(idxs))
 	for _, wi := range idxs {
 		w := &lm.ways[wi]
 		cmds = append(cmds, lm.pageCmd(w.key, w.cursor, tuning.Get().Exec.LexRefillPage))
@@ -177,8 +177,8 @@ func (lm *lexMerger) refillWays(idxs []int) error {
 }
 
 // pageCmd 单桶 ZRANGEBYLEX 分页（有界纪律）。
-func (lm *lexMerger) pageCmd(key string, off, count int) kidb.Cmd {
-	return kidb.Cmd{Name: "ZRANGEBYLEX", Args: []any{
+func (lm *lexMerger) pageCmd(key string, off, count int) kv.Cmd {
+	return kv.Cmd{Name: "ZRANGEBYLEX", Args: []any{
 		key, "[" + lm.s.req.LexLo, "[" + lm.s.req.LexHi, "LIMIT", off, count,
 	}}
 }

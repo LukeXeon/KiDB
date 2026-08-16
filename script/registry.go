@@ -8,11 +8,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
-	"kidb/i18n"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"kidb/i18n"
 
 	"embed"
 )

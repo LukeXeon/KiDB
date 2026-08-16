@@ -1,4 +1,4 @@
-package kidb
+package kv
 
 import (
 	"context"

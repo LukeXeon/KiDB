@@ -10,11 +10,11 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/stretchr/testify/require"
 
-	"kidb"
 	"kidb/bucketmap"
 	"kidb/engine"
 	"kidb/exec"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/script"
 	"kidb/testutil"
@@ -220,4 +220,4 @@ func TestDropJobBlocksRecreate(t *testing.T) {
 	require.False(t, testutil.NewProbe(t, cli).Exists(keycodec.RowKey("dr", "1")), "旧代行必须已被清理")
 }
 
-func bm2(cli kidb.KvClient, reg *script.Registry) *bucketmap.Store { return bucketmap.New(cli, reg) }
+func bm2(cli kv.Client, reg *script.Registry) *bucketmap.Store { return bucketmap.New(cli, reg) }

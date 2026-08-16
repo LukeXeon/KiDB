@@ -1,4 +1,4 @@
-package kidb
+package kv
 
 import (
 	"context"
@@ -16,13 +16,13 @@ import (
 // "重复应用同写入不产生变化"）；读路径天然安全。pipeline 是逻辑批
 // （无 MULTI），整批重试语义 = 逐命令重试。
 
-// NewRetryingClient 包装 KvClient 为退避重试形态。
-func NewRetryingClient(inner KvClient, pol RetryPolicy) KvClient {
+// NewRetryingClient 包装 Client 为退避重试形态。
+func NewRetryingClient(inner Client, pol RetryPolicy) Client {
 	return &retryingClient{inner: inner, pol: pol}
 }
 
 type retryingClient struct {
-	inner KvClient
+	inner Client
 	pol   RetryPolicy
 }
 
@@ -78,4 +78,4 @@ func (c *retryingClient) PipelineReplica(ctx context.Context, cmds []Cmd) ([]any
 
 func (c *retryingClient) Capabilities() Capabilities { return c.inner.Capabilities() }
 
-var _ KvClient = (*retryingClient)(nil)
+var _ Client = (*retryingClient)(nil)

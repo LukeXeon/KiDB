@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/metrics"
 	"kidb/script"
 	"kidb/utils"
@@ -27,7 +27,7 @@ import (
 //	续约失败（锁丢/超时）→ 【立即】退出角色，停止一切控制动作
 //	锁到期/主动退出 → 回竞选循环
 type Elector struct {
-	cli     kidb.KvClient
+	cli     kv.Client
 	reg     *script.Registry
 	lockKey string
 	token   string
@@ -37,7 +37,7 @@ type Elector struct {
 }
 
 // NewElector 构造。ttl 默认 10s（锁即选举，docs/08 §8.5）。
-func NewElector(cli kidb.KvClient, reg *script.Registry, lockKey, token string, ttl time.Duration) *Elector {
+func NewElector(cli kv.Client, reg *script.Registry, lockKey, token string, ttl time.Duration) *Elector {
 	if ttl <= 0 {
 		ttl = 10 * time.Second
 	}
@@ -50,7 +50,7 @@ func NewElector(cli kidb.KvClient, reg *script.Registry, lockKey, token string, 
 func (e *Elector) SetMetrics(m *metrics.Metrics) { e.m = m }
 
 // CtrlLock 返回全局控制锁选举器（lk:ctrl）。
-func CtrlLock(cli kidb.KvClient, reg *script.Registry, instanceID string) *Elector {
+func CtrlLock(cli kv.Client, reg *script.Registry, instanceID string) *Elector {
 	return NewElector(cli, reg, keycodec.CtrlLockKey(), instanceID, 0)
 }
 

@@ -5,8 +5,8 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/tuning"
 )
 
@@ -35,7 +35,7 @@ func HLLCompensation() uint64 { return uint64(tuning.Get().HLL.SampleRate) }
 // hllSample 写入成功后的采样 PFADD（尽力而为，失败仅损统计精度）。
 func (g *Guard) hllSample(ctx context.Context, req WriteReq) {
 	t := req.Table
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	for i := range t.Indexes {
 		idx := &t.Indexes[i]
 		if len(idx.Columns) != 1 {
@@ -48,7 +48,7 @@ func (g *Guard) hllSample(ctx context.Context, req WriteReq) {
 		if !HLLSampledValue(idx.ID, v) {
 			continue
 		}
-		cmds = append(cmds, kidb.Cmd{Name: "PFADD", Args: []any{keycodec.HLLKey(t.Name, idx.ID), v}})
+		cmds = append(cmds, kv.Cmd{Name: "PFADD", Args: []any{keycodec.HLLKey(t.Name, idx.ID), v}})
 	}
 	if len(cmds) == 0 {
 		return

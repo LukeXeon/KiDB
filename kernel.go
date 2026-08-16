@@ -13,12 +13,13 @@ import (
 	"fmt"
 	"log/slog"
 
+	"kidb/kv"
 	"kidb/script"
 )
 
 // Kernel 是内核组装体。构造见 NewKernel。
 type Kernel struct {
-	cli      KvClient
+	cli      kv.Client
 	boot     Bootstrap
 	logger   *slog.Logger
 	scripts  *script.Registry
@@ -41,9 +42,9 @@ func WithLogger(h slog.Handler) Option {
 //  2. 能力探测：EVAL 必须，缺失返回 ErrCapability。
 //
 // 后台角色循环由 gateway 装配（startRoles，ReadWriteOnly 豁免，docs/08 §8.5）。
-func NewKernel(cli KvClient, boot Bootstrap, opts ...Option) (*Kernel, error) {
+func NewKernel(cli kv.Client, boot Bootstrap, opts ...Option) (*Kernel, error) {
 	if cli == nil {
-		return nil, errors.New("kidb: nil KvClient")
+		return nil, errors.New("kidb: nil kv.Client")
 	}
 	reg, err := script.Load()
 	if err != nil {

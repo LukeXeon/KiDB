@@ -22,9 +22,9 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"kidb"
 	"kidb/bucketmap"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/rowcodec"
@@ -190,7 +190,7 @@ type Request struct {
 
 // Executor 执行 Request，产出流式行。
 type Executor struct {
-	cli           kidb.KvClient
+	cli           kv.Client
 	reg           *script.Registry   // 谓词下推脚本（nil = 不下推）
 	nc            L1Cache            // L1 近缓存（nil = 关闭，docs/08 §8.4）
 	bm            *bucketmap.Store   // 桶路由（分裂状态）；nil = 永远默认单桶
@@ -227,7 +227,7 @@ func (e *Executor) SetReplicaRead(on bool) { e.replicaRead.Store(on) }
 
 // readPipeline 读路径批命令出口：L3 开启且适配器声明能力时分流到副本
 // （exec 发出的 Pipeline 命令全部是只读族——分流安全；Lua/元数据不经此路）。
-func (e *Executor) readPipeline(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
+func (e *Executor) readPipeline(ctx context.Context, cmds []kv.Cmd) ([]any, error) {
 	if e.replicaRead.Load() && e.cli.Capabilities().ReplicaRead {
 		return e.cli.PipelineReplica(ctx, cmds)
 	}
@@ -280,7 +280,7 @@ type TelemetrySink interface {
 }
 
 // New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
-func New(cli kidb.KvClient, reg *script.Registry) *Executor {
+func New(cli kv.Client, reg *script.Registry) *Executor {
 	tn := tuning.Get()
 	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: tn.Exec.Batch, slotsPerRound: tn.Exec.SlotsPerRound,
 		fsSem: make(chan struct{}, tn.Exec.FullscanConcurrency)}
@@ -648,11 +648,11 @@ func (s *RowStream) fillScatter() error {
 			}
 		}
 		// 一轮分页：每个未完成桶拉一页（L4 副本桶同 pipeline 附 EXISTS 活性判定）
-		cmds := make([]kidb.Cmd, 0, len(s.pending))
+		cmds := make([]kv.Cmd, 0, len(s.pending))
 		for _, b := range s.pending {
 			cmds = append(cmds, s.pageCmd(b))
 			if b.fallback != "" {
-				cmds = append(cmds, kidb.Cmd{Name: "EXISTS", Args: []any{b.key}})
+				cmds = append(cmds, kv.Cmd{Name: "EXISTS", Args: []any{b.key}})
 			}
 		}
 		s.fanout += len(cmds)
@@ -761,9 +761,9 @@ func (s *RowStream) eqBucketsAt(slot uint16, encVal string) []int {
 
 // pageCmd 生成一桶一页的命令（ZRANGE 偏移分页，带 LIMIT——有界纪律 docs/04 §4.1）。
 // （RangeLookup 的分页命令在 topk.go——WITHSCORES + 双向。）
-func (s *RowStream) pageCmd(b bucketScan) kidb.Cmd {
+func (s *RowStream) pageCmd(b bucketScan) kv.Cmd {
 	batch := s.exec.batch
-	return kidb.Cmd{Name: "ZRANGE", Args: []any{b.key, b.cursor, b.cursor + batch - 1}}
+	return kv.Cmd{Name: "ZRANGE", Args: []any{b.key, b.cursor, b.cursor + batch - 1}}
 }
 
 // rangeBound 生成 ZRANGEBYSCORE 边界语法（开区间加 "(" 前缀；±∞ 为 -inf/+inf）。
@@ -868,10 +868,10 @@ func (s *RowStream) fetchCovered(items []candItem) error {
 	now := s.exec.clock().Unix()
 	shards := t.EffectiveExpShards()
 
-	cmds := make([]kidb.Cmd, 0, len(items))
+	cmds := make([]kv.Cmd, 0, len(items))
 	for _, it := range items {
 		slot := keycodec.Slot(keycodec.RowKey(t.Name, it.pk))
-		cmds = append(cmds, kidb.Cmd{Name: "ZSCORE", Args: []any{
+		cmds = append(cmds, kv.Cmd{Name: "ZSCORE", Args: []any{
 			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(it.pk, shards), shards), it.pk,
 		}})
 	}
@@ -944,7 +944,7 @@ func (s *RowStream) fetchRows(pks []string) error {
 		}
 
 		if len(miss) > 0 {
-			var cmds []kidb.Cmd
+			var cmds []kv.Cmd
 			for _, j := range miss {
 				rk := keycodec.RowKey(t.Name, batch[j])
 				// 需要剩余 TTL 时同行附 PTTL（同 pipeline 零额外 RTT）
@@ -952,22 +952,22 @@ func (s *RowStream) fetchRows(pks []string) error {
 				switch {
 				case rc != nil:
 					// 行缓存开启：取全行 + PTTL（填充寿命 = min(条目默认, 行剩余)）
-					cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{rk}},
-						kidb.Cmd{Name: "PTTL", Args: []any{rk}})
+					cmds = append(cmds, kv.Cmd{Name: "HGETALL", Args: []any{rk}},
+						kv.Cmd{Name: "PTTL", Args: []any{rk}})
 				case cols == nil:
-					cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{rk}})
+					cmds = append(cmds, kv.Cmd{Name: "HGETALL", Args: []any{rk}})
 				case len(cols) == 0:
-					cmds = append(cmds, kidb.Cmd{Name: "EXISTS", Args: []any{rk}})
+					cmds = append(cmds, kv.Cmd{Name: "EXISTS", Args: []any{rk}})
 				default:
 					args := make([]any, 0, len(cols)+1)
 					args = append(args, rk)
 					for _, c := range cols {
 						args = append(args, c)
 					}
-					cmds = append(cmds, kidb.Cmd{Name: "HMGET", Args: args})
+					cmds = append(cmds, kv.Cmd{Name: "HMGET", Args: args})
 				}
 				if withPTTL && rc == nil {
-					cmds = append(cmds, kidb.Cmd{Name: "PTTL", Args: []any{rk}})
+					cmds = append(cmds, kv.Cmd{Name: "PTTL", Args: []any{rk}})
 				}
 			}
 			results, err := s.exec.readPipeline(s.ctx, cmds)
@@ -1085,10 +1085,10 @@ func (s *RowStream) stripCovering(member string) string {
 // now 取执行器时钟（SetClock 注入；生产 = SyncClock 服务端钟对齐）。
 func (e *Executor) RowCount(ctx context.Context, t *meta.TableDef) (uint64, error) {
 	nowUnixSec := e.clock().Unix()
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	for slot := 0; slot < keycodec.NumSlots; slot++ {
 		for shard := 0; shard < t.EffectiveExpShards(); shard++ {
-			cmds = append(cmds, kidb.Cmd{
+			cmds = append(cmds, kv.Cmd{
 				Name: "ZCOUNT",
 				Args: []any{keycodec.ExpKeyN(t.Name, uint16(slot), shard, t.EffectiveExpShards()), "(" + strconv.FormatInt(nowUnixSec, 10), "+inf"},
 			})

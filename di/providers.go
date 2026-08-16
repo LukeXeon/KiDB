@@ -9,13 +9,14 @@ package di
 
 import (
 	"kidb"
-	"kidb/adapter/goredis"
 	"kidb/bucketmap"
 	"kidb/config"
 	"kidb/controller"
 	"kidb/engine"
 	"kidb/exec"
 	"kidb/gateway"
+	"kidb/kv"
+	"kidb/kv/goredis"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/nearcache"
@@ -28,18 +29,18 @@ import (
 // ProvideClient 构造参考适配器并包退避矩阵（docs/09 §9.6：MOVED/CLUSTERDOWN/
 // LOADING/READONLY/TRYAGAIN/超时按类分派退避，耗尽映射哨兵错误）——
 // 装饰在契约面上，全部消费方零感知。
-func ProvideClient(boot kidb.Bootstrap) kidb.KvClient {
-	return kidb.NewRetryingClient(goredis.New(boot.Addrs, goredis.Options{
+func ProvideClient(boot kidb.Bootstrap) kv.Client {
+	return kv.NewRetryingClient(goredis.New(boot.Addrs, goredis.Options{
 		PoolSize:     boot.PoolSize,
 		ReadTimeout:  boot.ReadTimeout,
 		WriteTimeout: boot.WriteTimeout,
 		ReplicaRead:  boot.ReplicaRead,
-	}), kidb.DefaultRetryPolicy())
+	}), kv.DefaultRetryPolicy())
 }
 
 // ProvideKernel 内核组装（Lua 资产加载 + 能力探测，docs/09 §9.4）。
 // wire 不支持变参，包一层 NewKernel 的 opts。
-func ProvideKernel(cli kidb.KvClient, boot kidb.Bootstrap) (*kidb.Kernel, error) {
+func ProvideKernel(cli kv.Client, boot kidb.Bootstrap) (*kidb.Kernel, error) {
 	return kidb.NewKernel(cli, boot)
 }
 
@@ -50,7 +51,7 @@ func ProvideScripts(k *kidb.Kernel) *script.Registry { return k.Scripts() }
 func ProvideMetrics() *metrics.Metrics { return metrics.New(nil) }
 
 // ProvideCatalogStore Catalog 存储（docs/06）。
-func ProvideCatalogStore(cli kidb.KvClient, reg *script.Registry) *meta.CatalogStore {
+func ProvideCatalogStore(cli kv.Client, reg *script.Registry) *meta.CatalogStore {
 	return meta.NewCatalogStore(cli, reg)
 }
 
@@ -62,17 +63,17 @@ func ProvideCatalogCache(store *meta.CatalogStore, m *metrics.Metrics) *meta.Cat
 }
 
 // ProvideBucketMap BucketMap 存储（docs/06）。
-func ProvideBucketMap(cli kidb.KvClient, reg *script.Registry) *bucketmap.Store {
+func ProvideBucketMap(cli kv.Client, reg *script.Registry) *bucketmap.Store {
 	return bucketmap.New(cli, reg)
 }
 
 // ProvideTelemetry 遥测采样器（自治链路入口，docs/08 §8.1）。
-func ProvideTelemetry(cli kidb.KvClient) *telemetry.Recorder {
+func ProvideTelemetry(cli kv.Client) *telemetry.Recorder {
 	return telemetry.New(cli)
 }
 
 // ProvideL4 热桶副本管理器（docs/08 §8.4）。
-func ProvideL4(cli kidb.KvClient, reg *script.Registry) *controller.L4Manager {
+func ProvideL4(cli kv.Client, reg *script.Registry) *controller.L4Manager {
 	return controller.NewL4(cli, reg)
 }
 
@@ -82,14 +83,14 @@ func ProvideNearCache() *nearcache.ShardedCache[[]string] {
 }
 
 // ProvideSyncClock 服务端钟对齐组件（docs/11 §11.1：内核时钟全面对齐 Redis TIME）。
-func ProvideSyncClock(cli kidb.KvClient) *kidb.SyncClock { return kidb.NewSyncClock(cli) }
+func ProvideSyncClock(cli kv.Client) *kv.SyncClock { return kv.NewSyncClock(cli) }
 
 // ProvideExecutor 查询执行器——读路径附件全部在此接线（单一装配点：
 // 指标/遥测/BucketMap/L4/L1 近缓存/服务端钟；运行时开关项 replica_read/行缓存
 // 由 gateway 语义开关轮询驱动，docs/02 §2.7）。
-func ProvideExecutor(cli kidb.KvClient, reg *script.Registry, m *metrics.Metrics,
+func ProvideExecutor(cli kv.Client, reg *script.Registry, m *metrics.Metrics,
 	tel *telemetry.Recorder, bm *bucketmap.Store, l4 *controller.L4Manager,
-	nc *nearcache.ShardedCache[[]string], clock *kidb.SyncClock) *exec.Executor {
+	nc *nearcache.ShardedCache[[]string], clock *kv.SyncClock) *exec.Executor {
 	ex := exec.New(cli, reg)
 	ex.SetMetrics(m)
 	ex.SetTelemetry(tel)
@@ -101,21 +102,21 @@ func ProvideExecutor(cli kidb.KvClient, reg *script.Registry, m *metrics.Metrics
 }
 
 // ProvideGuard 写入事务卫护（单 slot Lua 编排，docs/05；服务端钟对齐）。
-func ProvideGuard(cli kidb.KvClient, reg *script.Registry, bm *bucketmap.Store, clock *kidb.SyncClock) *txguard.Guard {
+func ProvideGuard(cli kv.Client, reg *script.Registry, bm *bucketmap.Store, clock *kv.SyncClock) *txguard.Guard {
 	g := txguard.New(cli, reg, bm)
 	g.SetClock(clock.Now)
 	return g
 }
 
 // ProvideConfigStore 配置存储（cfg:global，docs/10 §10.2）。
-func ProvideConfigStore(cli kidb.KvClient, reg *script.Registry, m *metrics.Metrics) *config.Store {
+func ProvideConfigStore(cli kv.Client, reg *script.Registry, m *metrics.Metrics) *config.Store {
 	s := config.New(cli, reg, gateway.ConfigActor)
 	s.SetMetrics(m)
 	return s
 }
 
 // ProvideEngineDeps 引擎依赖面 + 全扫闸门（docs/07 §7.4）。
-func ProvideEngineDeps(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore,
+func ProvideEngineDeps(cli kv.Client, reg *script.Registry, store *meta.CatalogStore,
 	cache *meta.CatalogCache, ex *exec.Executor, guard *txguard.Guard, m *metrics.Metrics) engine.Deps {
 	return engine.Deps{
 		Client:       cli,
@@ -129,7 +130,7 @@ func ProvideEngineDeps(cli kidb.KvClient, reg *script.Registry, store *meta.Cata
 }
 
 // ProvideRoles 后台角色组件（ReadWriteOnly 节点豁免 = nil，docs/08 §8.5）。
-func ProvideRoles(boot kidb.Bootstrap, cli kidb.KvClient, reg *script.Registry,
+func ProvideRoles(boot kidb.Bootstrap, cli kv.Client, reg *script.Registry,
 	store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store,
 	guard *txguard.Guard) *gateway.Roles {
 	if boot.ReadWriteOnly {

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/sweeper"
 	"kidb/tuning"
@@ -115,7 +115,7 @@ func (r *JobRunner) stepDrop(ctx context.Context, job *meta.DropJob) error {
 // finishDrop 清理残留 key 并注销作业（一次性、有界、异步）。
 func (r *JobRunner) finishDrop(ctx context.Context, job *meta.DropJob) error {
 	def := job.Def
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	flush := func() error {
 		if len(cmds) == 0 {
 			return nil
@@ -125,7 +125,7 @@ func (r *JobRunner) finishDrop(ctx context.Context, job *meta.DropJob) error {
 		return err
 	}
 	push := func(name string, args ...any) error {
-		cmds = append(cmds, kidb.Cmd{Name: name, Args: args})
+		cmds = append(cmds, kv.Cmd{Name: name, Args: args})
 		if len(cmds) >= 512 {
 			return flush()
 		}

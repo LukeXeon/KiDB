@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"kidb"
 	"kidb/bucketmap"
 	"kidb/controller"
 	"kidb/engine"
 	"kidb/exec"
 	"kidb/indexer"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/nearcache"
 	"kidb/script"
@@ -39,7 +39,7 @@ type Roles struct {
 // 自治链路 = 遥测采样 → 候选登记 → Controller 复核分裂/L4 → DDL 作业巡检。
 // 读路径附件（telemetry/bm/l4/L1 近缓存）的 executor 接线在 DI executor
 // provider 完成（di.ProvideExecutor），不在本函数。
-func AssembleRoles(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *Roles {
+func AssembleRoles(cli kv.Client, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *Roles {
 	sp := controller.NewSplitter(cli, reg, bm)
 	sp.SetMetrics(ex.Metrics())
 	l4 := controller.NewL4(cli, reg)

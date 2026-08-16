@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"strings"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/rowcodec"
 	"kidb/utils"
@@ -18,12 +18,12 @@ import (
 
 // Indexer 消费一个 (表, 索引, slot) 的日志。
 type Indexer struct {
-	cli   kidb.KvClient
+	cli   kv.Client
 	batch int
 }
 
 // New 构造。
-func New(cli kidb.KvClient) *Indexer { return &Indexer{cli: cli, batch: 500} }
+func New(cli kv.Client) *Indexer { return &Indexer{cli: cli, batch: 500} }
 
 // ConsumeLog 消费一批日志条目（LTRIM 截断已消费前缀），返回消费条数。
 // 消费语义：条目 pk\x1f旧值\x1f新值\x1fver；旧值非空 → ZREM 旧桶，新值非空 → ZADD 新桶。
@@ -39,7 +39,7 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 		return 0, nil
 	}
 
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	col := idx.Columns[0]
 	colDef, colOK := t.Column(col)
 	for _, e := range entries {
@@ -63,31 +63,31 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 			}
 			bk := keycodec.RangeBucketKey(t.Name, idx.ID, rowSlot, 0)
 			if oldV != "" {
-				cmds = append(cmds, kidb.Cmd{Name: "ZREM", Args: []any{bk, pk}})
+				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{bk, pk}})
 			}
 			if newV != "" {
 				score, err := rowcodec.ScoreOf(colDef.Type, newV)
 				if err != nil {
 					continue
 				}
-				cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{bk, fmt.Sprint(score), pk}})
+				cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{bk, fmt.Sprint(score), pk}})
 			}
 		default: // IndexEq
 			if oldV != "" {
-				cmds = append(cmds, kidb.Cmd{Name: "ZREM", Args: []any{keycodec.EqBucketKey(t.Name, idx.ID, oldV, rowSlot, 0), pk}})
+				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{keycodec.EqBucketKey(t.Name, idx.ID, oldV, rowSlot, 0), pk}})
 			}
 			if newV != "" {
-				cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(t.Name, idx.ID, newV, rowSlot, 0), 0, pk}})
+				cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(t.Name, idx.ID, newV, rowSlot, 0), 0, pk}})
 			}
 		}
 		// 字典序副本随行（docs/03 §3.1）
 		if idx.PrefixCopy {
 			lk := keycodec.LexBucketKey(t.Name, idx.ID, rowSlot, 0)
 			if oldV != "" {
-				cmds = append(cmds, kidb.Cmd{Name: "ZREM", Args: []any{lk, oldV + "\x00" + pk}})
+				cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{lk, oldV + "\x00" + pk}})
 			}
 			if newV != "" {
-				cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{lk, 0, newV + "\x00" + pk}})
+				cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{lk, 0, newV + "\x00" + pk}})
 			}
 		}
 	}

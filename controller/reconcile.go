@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"kidb"
 	"kidb/bucketmap"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/rowcodec"
@@ -35,7 +35,7 @@ import (
 
 // Reconciler 对账器。随机源可注入（测试确定性）。
 type Reconciler struct {
-	cli   kidb.KvClient
+	cli   kv.Client
 	store *meta.CatalogStore
 	bm    *bucketmap.Store
 	m     *metrics.Metrics
@@ -43,7 +43,7 @@ type Reconciler struct {
 }
 
 // NewReconciler 构造（m 可为 nil）。
-func NewReconciler(cli kidb.KvClient, store *meta.CatalogStore, bm *bucketmap.Store, m *metrics.Metrics) *Reconciler {
+func NewReconciler(cli kv.Client, store *meta.CatalogStore, bm *bucketmap.Store, m *metrics.Metrics) *Reconciler {
 	return &Reconciler{
 		cli: cli, store: store, bm: bm, m: m,
 		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -119,14 +119,14 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 
 	// 2. 批量读行（HMGET 索引列）+ 回执存在性（死行分两态：回执在 = 清扫窗口
 	// 合法暂态；回执不在 = 已清扫——其桶成员仍存即残留）
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	for _, pk := range pks {
 		args := []any{keycodec.RowKey(def.Name, pk)}
 		for _, idx := range indexes {
 			args = append(args, idx.Columns[0])
 		}
-		cmds = append(cmds, kidb.Cmd{Name: "HMGET", Args: args})
-		cmds = append(cmds, kidb.Cmd{Name: "EXISTS", Args: []any{keycodec.ReceiptKey(def.Name, pk)}})
+		cmds = append(cmds, kv.Cmd{Name: "HMGET", Args: args})
+		cmds = append(cmds, kv.Cmd{Name: "EXISTS", Args: []any{keycodec.ReceiptKey(def.Name, pk)}})
 	}
 	results, err := r.cli.Pipeline(ctx, cmds)
 	if err != nil {
@@ -158,7 +158,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		wantScore  float64 // 范围索引：score 必须相符（错值=真漂移）
 		checkScore bool
 	}
-	var fcmds []kidb.Cmd
+	var fcmds []kv.Cmd
 	var checks []fwdCheck
 	for _, row := range live {
 		for j, idx := range indexes {
@@ -173,13 +173,13 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 			switch idx.Kind {
 			case meta.IndexEq, meta.IndexUnique:
 				for _, b := range sh.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
-					fcmds = append(fcmds, kidb.Cmd{Name: "ZSCORE", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, encVal, slot, b), row.pk}})
+					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, encVal, slot, b), row.pk}})
 					checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID + "=" + encVal})
 				}
 				if idx.PrefixCopy {
 					member := rowcodec.LexMember(encVal, row.pk)
 					for _, b := range sh.ReadBucketsEq("l") { // "l" 伪条目承载副本分裂状态（写路径同一约定）
-						fcmds = append(fcmds, kidb.Cmd{Name: "ZSCORE", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, b), member}})
+						fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, b), member}})
 						checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID + "#lex=" + encVal})
 					}
 				}
@@ -190,7 +190,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 					continue
 				}
 				for _, b := range sh.ReadBucketsRange(score, score) {
-					fcmds = append(fcmds, kidb.Cmd{Name: "ZSCORE", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, b), row.pk}})
+					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, b), row.pk}})
 					checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID, wantScore: score, checkScore: true})
 				}
 			}
@@ -235,7 +235,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 
 	// 4. 反向：等值/唯一桶成员 → 行状态（死且已清扫 = 残留泄漏）。
 	// 范围桶反向由正向的 score 校验覆盖（桶级反查边际收益低，不重复扇出）。
-	var rcmds []kidb.Cmd
+	var rcmds []kv.Cmd
 	var rchecks []struct{ covering bool }
 	doneBucket := map[string]bool{}
 	for _, row := range live {
@@ -257,7 +257,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 					continue
 				}
 				doneBucket[bk] = true
-				rcmds = append(rcmds, kidb.Cmd{Name: "ZRANGE", Args: []any{bk, 0, 63}})
+				rcmds = append(rcmds, kv.Cmd{Name: "ZRANGE", Args: []any{bk, 0, 63}})
 				rchecks = append(rchecks, struct{ covering bool }{covering: len(idx.Covering) > 0})
 			}
 		}
@@ -285,12 +285,12 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 				}
 			}
 		}
-		var ocmds []kidb.Cmd
+		var ocmds []kv.Cmd
 		var opks []string
 		for pk := range cand {
 			ocmds = append(ocmds,
-				kidb.Cmd{Name: "EXISTS", Args: []any{keycodec.RowKey(def.Name, pk)}},
-				kidb.Cmd{Name: "EXISTS", Args: []any{keycodec.ReceiptKey(def.Name, pk)}})
+				kv.Cmd{Name: "EXISTS", Args: []any{keycodec.RowKey(def.Name, pk)}},
+				kv.Cmd{Name: "EXISTS", Args: []any{keycodec.ReceiptKey(def.Name, pk)}})
 			opks = append(opks, pk)
 		}
 		if len(ocmds) > 0 {
@@ -311,7 +311,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 	// 5. 唯一预约巡检（双向）：残留 = 预约在而占有行死；缺失 = 活行无预约
 	// （缺失侧 review 实证：CREATE UNIQUE INDEX 回填曾不建预约，存量值对
 	// 唯一约束不可见——正向桶成员检查照不出这个洞，必须单独断言）。
-	var ucmds []kidb.Cmd
+	var ucmds []kv.Cmd
 	var ukeys []string
 	for _, row := range live {
 		for j, idx := range indexes {
@@ -319,7 +319,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 				continue
 			}
 			uk := keycodec.UniqueKey(def.Name, idx.ID, row.vals[j])
-			ucmds = append(ucmds, kidb.Cmd{Name: "GET", Args: []any{uk}})
+			ucmds = append(ucmds, kv.Cmd{Name: "GET", Args: []any{uk}})
 			ukeys = append(ukeys, uk)
 		}
 	}
@@ -328,7 +328,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		if err != nil {
 			return err
 		}
-		var ocmds []kidb.Cmd
+		var ocmds []kv.Cmd
 		var okeys []string
 		for i, ures1 := range ures {
 			if ures1 == nil {
@@ -336,7 +336,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 				continue
 			}
 			owner := strings.SplitN(fmt.Sprint(ures1), "|", 2)[0] // 占有者行 key
-			ocmds = append(ocmds, kidb.Cmd{Name: "EXISTS", Args: []any{owner}})
+			ocmds = append(ocmds, kv.Cmd{Name: "EXISTS", Args: []any{owner}})
 			okeys = append(okeys, ukeys[i])
 		}
 		if len(ocmds) > 0 {
@@ -382,7 +382,7 @@ func hmgetStrings(res any) (vals []string, allNil bool) {
 }
 
 // pksDesc 调试描述（bucket key 原样透出）。
-func pksDesc(c kidb.Cmd) string {
+func pksDesc(c kv.Cmd) string {
 	if len(c.Args) > 0 {
 		return fmt.Sprint(c.Args[0])
 	}

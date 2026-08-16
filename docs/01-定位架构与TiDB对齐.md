@@ -21,7 +21,7 @@
 - 大 key / 热 key 自动治理：桶在线分裂合并、热桶值复制（见 [08](08-自治治理与热Key.md)）；
 - 集群透明：Redis Cluster rebalance 对方案无影响（见 [11](11-部署与运维.md) §11.1）；
 - **部署形态：MySQL 协议网关单形态**（server-only，对标 TiDB 交付形态；决策记录见 [11](11-部署与运维.md) §11.2）；
-- **后端可替换**：内核只依赖 `KvClient` 抽象接口，附 go-redis/v9 参考适配器与适配器一致性测试套件。
+- **后端可替换**：内核只依赖 `kv.Client` 抽象接口（`kidb/kv` 包），附 go-redis/v9 参考适配器（`kidb/kv/goredis`）与适配器一致性测试套件。
 
 ## 1.2 不做什么（边界声明）
 
@@ -103,10 +103,10 @@ KiDB 与 TiDB 在架构形状上同构——**无状态 SQL 计算层 + 共享 K
 │  controller/sweeper/indexer/telemetry  后台角色                    │
 │  nearcache 进程内近缓存（otter 底座）                              │
 │  tuning    开发者调优参数（tuning.toml embed，唯一调优面）         │
-└─────────────── kidb（根包：KvClient 契约/Bootstrap/错误码）────────┘
+└─────────────── kidb/kv（Client 契约/退避/SyncClock）+ kidb 根包（Bootstrap/错误码）─┘
         │
         ▼
-KvClient（接口，契约 R1~R7）──► [adapter/goredis 参考实现]
+kv.Client（接口，契约 R1~R7）──► [kv/goredis 参考实现]
                               [各公司私有适配器]
         │
         ▼
@@ -120,7 +120,7 @@ cmd/kidb-server：进程入口（DI 装配，wire）
 **分层纪律**：
 
 - 内核只 import 标准库与开源依赖，**不出现任何公司私有包**；
-- `KvClient` 接口与能力探测（Capabilities）是内核与具体 Redis 客户端之间的唯一契约（[09](09-后端契约与适配器.md) §9.3）；
+- `kv.Client` 接口与能力探测（Capabilities）是内核与具体 Redis 客户端之间的唯一契约（[09](09-后端契约与适配器.md) §9.3）；
 - key 布局的唯一所有者是 `keycodec` 包（对齐 TiDB `tablecodec` 纪律），任何包不得手工拼接 key 字符串；
 - 适配器一致性测试套件（contract tests）保证任何新适配器满足契约（[12](12-测试方案.md) §12.4）；
 - **v6.0 新纪律**：网关/装配层不做 SQL 文本解析；分析面与执行面同一语法树（gms）。

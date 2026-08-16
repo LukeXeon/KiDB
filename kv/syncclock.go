@@ -1,4 +1,4 @@
-package kidb
+package kv
 
 import (
 	"context"
@@ -17,14 +17,14 @@ import (
 // （TIME 不可用时退化为本地钟，与既有行为一致）。miniredis 的 TIME 不随
 // FastForward 走——TTL 测试仍走 SetClock 注入（不经本组件）。
 type SyncClock struct {
-	cli KvClient
+	cli Client
 
 	offsetNs atomic.Int64 // serverNow - localNow（纳秒）
 	lastSync atomic.Int64 // 上次同步的本地 UnixNano
 }
 
 // NewSyncClock 构造（立即尝试一次同步；失败则本地钟起步）。
-func NewSyncClock(cli KvClient) *SyncClock {
+func NewSyncClock(cli Client) *SyncClock {
 	c := &SyncClock{cli: cli}
 	_ = c.resync(context.Background())
 	return c

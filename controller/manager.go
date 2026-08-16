@@ -3,16 +3,16 @@ package controller
 import (
 	"context"
 
-	"kidb"
 	"kidb/bucketmap"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/telemetry"
 	"kidb/tuning"
 )
 
-// autosplit.go：Controller 自治决策循环（docs/08 §8.1/§8.2）：
+// manager.go：Controller 自治决策循环（docs/08 §8.1/§8.2）：
 // 候选桶（遥测采样登记）→ ZCARD 精确复核 → 超阈分裂 / 高热建 L4 副本；
 // L4 生命周期（刷新续期/冷却回收）随 Tick 驱动。
 //
@@ -21,7 +21,7 @@ import (
 
 // Manager 是自治决策器（由选举产生的 Controller 驱动 Tick）。
 type Manager struct {
-	cli      kidb.KvClient
+	cli      kv.Client
 	bm       *bucketmap.Store
 	splitter *Splitter
 	l4       *L4Manager
@@ -33,7 +33,7 @@ type Manager struct {
 }
 
 // NewManager 构造。
-func NewManager(cli kidb.KvClient, bm *bucketmap.Store, splitter *Splitter, l4 *L4Manager, store *meta.CatalogStore, m *metrics.Metrics) *Manager {
+func NewManager(cli kv.Client, bm *bucketmap.Store, splitter *Splitter, l4 *L4Manager, store *meta.CatalogStore, m *metrics.Metrics) *Manager {
 	sm := tuning.Get().Controller.SplitMembers
 	return &Manager{cli: cli, bm: bm, splitter: splitter, l4: l4, store: store, m: m, SplitMembers: sm, L4Members: max(sm/50, 1)}
 }

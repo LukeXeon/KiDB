@@ -10,7 +10,7 @@ import (
 	"math/rand"
 	"strconv"
 
-	"kidb"
+	"kidb/kv"
 	"kidb/tuning"
 )
 
@@ -19,13 +19,13 @@ const CandKey = "hotcand"
 
 // Recorder 是采样记录器。
 type Recorder struct {
-	cli   kidb.KvClient
+	cli   kv.Client
 	ratio int // 采样率 1/ratio（默认 64，telemetry_sample_ratio）
 	rnd   *rand.Rand
 }
 
 // New 构造。
-func New(cli kidb.KvClient) *Recorder {
+func New(cli kv.Client) *Recorder {
 	return &Recorder{cli: cli, ratio: tuning.Get().Telemetry.SampleRatio, rnd: rand.New(rand.NewSource(rand.Int63()))}
 }
 
@@ -52,7 +52,7 @@ func (r *Recorder) Sample(ctx context.Context, bucketKey string) {
 }
 
 // Candidates 取候选桶列表（Controller 复核入口）。
-func Candidates(ctx context.Context, cli kidb.KvClient) ([]string, error) {
+func Candidates(ctx context.Context, cli kv.Client) ([]string, error) {
 	res, err := cli.Do(ctx, "HKEYS", CandKey)
 	if err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func Candidates(ctx context.Context, cli kidb.KvClient) ([]string, error) {
 }
 
 // Confirm 精确复核：返回桶成员数（ZCARD）并摘除候选。
-func Confirm(ctx context.Context, cli kidb.KvClient, bucketKey string) (int64, error) {
+func Confirm(ctx context.Context, cli kv.Client, bucketKey string) (int64, error) {
 	res, err := cli.Do(ctx, "ZCARD", bucketKey)
 	if err != nil {
 		return 0, err

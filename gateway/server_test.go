@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	miniredis "github.com/alicebob/miniredis/v2"
+
 	"kidb"
 	"kidb/engine"
 	"kidb/exec"

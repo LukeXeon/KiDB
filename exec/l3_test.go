@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"kidb"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/testutil"
 	"kidb/txguard"
@@ -17,31 +17,31 @@ import (
 // replicaFake 主/副本读通道分离计数的测试客户端（miniredis 无真实副本，
 // 副本通道委托主通道执行，只验证路由分流决策）。
 type replicaFake struct {
-	kidb.KvClient
+	kv.Client
 	replicaOK bool
 	mu        sync.Mutex
 	main      int // Pipeline 主通道计数
 	rep       int // PipelineReplica 副本通道计数
 }
 
-func (f *replicaFake) Capabilities() kidb.Capabilities {
-	c := f.KvClient.Capabilities()
+func (f *replicaFake) Capabilities() kv.Capabilities {
+	c := f.Client.Capabilities()
 	c.ReplicaRead = f.replicaOK
 	return c
 }
 
-func (f *replicaFake) Pipeline(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
+func (f *replicaFake) Pipeline(ctx context.Context, cmds []kv.Cmd) ([]any, error) {
 	f.mu.Lock()
 	f.main += len(cmds)
 	f.mu.Unlock()
-	return f.KvClient.Pipeline(ctx, cmds)
+	return f.Client.Pipeline(ctx, cmds)
 }
 
-func (f *replicaFake) PipelineReplica(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
+func (f *replicaFake) PipelineReplica(ctx context.Context, cmds []kv.Cmd) ([]any, error) {
 	f.mu.Lock()
 	f.rep += len(cmds)
 	f.mu.Unlock()
-	return f.KvClient.Pipeline(ctx, cmds) // miniredis 无副本：委托主通道
+	return f.Client.Pipeline(ctx, cmds) // miniredis 无副本：委托主通道
 }
 
 func (f *replicaFake) counts() (int, int) {
@@ -54,7 +54,7 @@ func (f *replicaFake) counts() (int, int) {
 // 开关开 + 能力在 → 读走 PipelineReplica；能力缺失 → 自动回落主通道（降级不失效）。
 func TestL3ReplicaRouting(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
-	fake := &replicaFake{KvClient: cli, replicaOK: true}
+	fake := &replicaFake{Client: cli, replicaOK: true}
 	g := txguard.New(cli, reg, nil)
 	tbl := &meta.TableDef{
 		Name: "t",

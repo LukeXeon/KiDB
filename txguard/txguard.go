@@ -17,6 +17,7 @@ import (
 	"kidb/bucketmap"
 	"kidb/i18n"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/rowcodec"
@@ -27,9 +28,9 @@ import (
 
 // maxStaleRetries 由调用点读取 tuning.Get().Txguard.StaleRetries（docs/05 §5.5）。
 
-// Guard 编排单行写入。通过 kidb.KvClient 下发命令，满足契约 R1~R7。
+// Guard 编排单行写入。通过 kv.Client 下发命令，满足契约 R1~R7。
 type Guard struct {
-	cli   kidb.KvClient
+	cli   kv.Client
 	reg   *script.Registry
 	bm    *bucketmap.Store // 桶路由（分裂状态），nil = 永远 ACTIVE 单桶
 	m     *metrics.Metrics // 指标（nil = no-op）
@@ -37,7 +38,7 @@ type Guard struct {
 }
 
 // New 构造 Guard（bm 供分裂状态路由；传 nil 退化为 ACTIVE 单桶模式）。
-func New(cli kidb.KvClient, reg *script.Registry, bm *bucketmap.Store) *Guard {
+func New(cli kv.Client, reg *script.Registry, bm *bucketmap.Store) *Guard {
 	return &Guard{cli: cli, reg: reg, bm: bm, clock: time.Now}
 }
 

@@ -16,9 +16,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"kidb"
-	"kidb/adapter/goredis"
 	"kidb/keycodec"
+	"kidb/kv"
+	"kidb/kv/goredis"
 	"kidb/script"
 )
 
@@ -50,7 +50,7 @@ func startClusterNode(t *testing.T) (string, func()) {
 	return fmt.Sprintf("%s:%s", host, mapped.Port()), func() { _ = c.Terminate(ctx) }
 }
 
-func setup(t *testing.T) (kidb.KvClient, context.Context, func()) {
+func setup(t *testing.T) (kv.Client, context.Context, func()) {
 	t.Helper()
 	if !dockerAvailable() {
 		t.Skip("docker 不可用——契约套件在 CI（带 docker）运行，docs/12 §12.9")
@@ -85,7 +85,7 @@ func TestR2KeylessRejected(t *testing.T) {
 	if _, err := cli.Do(ctx, "PING"); err == nil {
 		t.Fatal("R2 违例：无 key 命令必须被拒绝")
 	}
-	if _, err := cli.Pipeline(ctx, []kidb.Cmd{{Name: "PING"}}); err == nil {
+	if _, err := cli.Pipeline(ctx, []kv.Cmd{{Name: "PING"}}); err == nil {
 		t.Fatal("R2 违例：pipeline 内无 key 命令必须被拒绝")
 	}
 }
@@ -128,9 +128,9 @@ func TestR3EvalSlotRules(t *testing.T) {
 func TestR4PipelineOrder(t *testing.T) {
 	cli, ctx, done := setup(t)
 	defer done()
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	for i := 0; i < 200; i++ {
-		cmds = append(cmds, kidb.Cmd{Name: "SET", Args: []any{fmt.Sprintf("ct:{%d}", i), fmt.Sprint(i)}})
+		cmds = append(cmds, kv.Cmd{Name: "SET", Args: []any{fmt.Sprintf("ct:{%d}", i), fmt.Sprint(i)}})
 	}
 	results, err := cli.Pipeline(ctx, cmds)
 	if err != nil {
@@ -142,7 +142,7 @@ func TestR4PipelineOrder(t *testing.T) {
 		}
 	}
 	// 读回抽查
-	gets := []kidb.Cmd{{Name: "GET", Args: []any{"ct:{0}"}}, {Name: "GET", Args: []any{"ct:{199}"}}}
+	gets := []kv.Cmd{{Name: "GET", Args: []any{"ct:{0}"}}, {Name: "GET", Args: []any{"ct:{199}"}}}
 	results, _ = cli.Pipeline(ctx, gets)
 	if fmt.Sprint(results[0]) != "0" || fmt.Sprint(results[1]) != "199" {
 		t.Fatalf("读回串扰: %v", results)

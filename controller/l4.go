@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/script"
@@ -28,7 +28,7 @@ import (
 
 // L4Manager 管理热桶副本。
 type L4Manager struct {
-	cli    kidb.KvClient
+	cli    kv.Client
 	reg    *script.Registry
 	maxRep int              // hotkey_replica_max（默认 8）
 	ttlMs  int64            // 副本 TTL（60s 滚动兜底）
@@ -49,7 +49,7 @@ type repEnt struct {
 func (m *L4Manager) SetMetrics(mt *metrics.Metrics) { m.m = mt }
 
 // NewL4 构造。
-func NewL4(cli kidb.KvClient, reg *script.Registry) *L4Manager {
+func NewL4(cli kv.Client, reg *script.Registry) *L4Manager {
 	return &L4Manager{cli: cli, reg: reg, maxRep: 8, ttlMs: 60000, cold: map[string]int{}, repCache: map[string]repEnt{}}
 }
 

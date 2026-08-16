@@ -5,8 +5,8 @@ import (
 	"math"
 	"strconv"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/tuning"
 	"kidb/utils"
@@ -181,7 +181,7 @@ func (om *orderedMerger) seed() error {
 		}
 	}
 
-	cmds := make([]kidb.Cmd, 0, len(om.ways))
+	cmds := make([]kv.Cmd, 0, len(om.ways))
 	for _, w := range om.ways {
 		cmds = append(cmds, om.pageCmd(w.key, 0, 1))
 	}
@@ -209,7 +209,7 @@ func (om *orderedMerger) seed() error {
 // refillWays 批量补页：每条 way 取 pageK 成员，全部入堆。
 func (om *orderedMerger) refillWays(idxs []int) error {
 	s := om.s
-	cmds := make([]kidb.Cmd, 0, len(idxs))
+	cmds := make([]kv.Cmd, 0, len(idxs))
 	for _, wi := range idxs {
 		w := &om.ways[wi]
 		cmds = append(cmds, om.pageCmd(w.key, w.cursor, tuning.Get().Exec.TopkRefillPage))
@@ -243,14 +243,14 @@ func (om *orderedMerger) refillWays(idxs []int) error {
 }
 
 // pageCmd 单桶分页命令（ASC：ZRANGEBYSCORE lo hi；DESC：ZREVRANGEBYSCORE hi lo）。
-func (om *orderedMerger) pageCmd(key string, off, count int) kidb.Cmd {
+func (om *orderedMerger) pageCmd(key string, off, count int) kv.Cmd {
 	if om.desc {
-		return kidb.Cmd{Name: "ZREVRANGEBYSCORE", Args: []any{
+		return kv.Cmd{Name: "ZREVRANGEBYSCORE", Args: []any{
 			key, rangeBound(om.r.Hi, om.r.HiOpen), rangeBound(om.r.Lo, om.r.LoOpen),
 			"WITHSCORES", "LIMIT", off, count,
 		}}
 	}
-	return kidb.Cmd{Name: "ZRANGEBYSCORE", Args: []any{
+	return kv.Cmd{Name: "ZRANGEBYSCORE", Args: []any{
 		key, rangeBound(om.r.Lo, om.r.LoOpen), rangeBound(om.r.Hi, om.r.HiOpen),
 		"WITHSCORES", "LIMIT", off, count,
 	}}

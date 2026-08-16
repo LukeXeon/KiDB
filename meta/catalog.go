@@ -7,6 +7,7 @@ import (
 
 	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/script"
 	"kidb/utils"
 )
@@ -16,12 +17,12 @@ import (
 //
 // def/_job 编码为 msgp 代码生成版（docs/03 §3.4；_fmtv 版本号内嵌，演进走 docs/06 §6.4）。
 type CatalogStore struct {
-	cli kidb.KvClient
+	cli kv.Client
 	reg *script.Registry
 }
 
 // NewCatalogStore 构造存储（reg 供 catalog_set.lua 原子 CAS）。
-func NewCatalogStore(cli kidb.KvClient, reg *script.Registry) *CatalogStore {
+func NewCatalogStore(cli kv.Client, reg *script.Registry) *CatalogStore {
 	return &CatalogStore{cli: cli, reg: reg}
 }
 

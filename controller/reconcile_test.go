@@ -10,9 +10,9 @@ import (
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
-	"kidb"
 	"kidb/bucketmap"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/testutil"
@@ -22,7 +22,7 @@ import (
 // reconcile_test.go：对账角色测试（docs/12 §12.8）——基线零漂移 + 三类注入漂移
 // 分别命中指标；TTL 清扫暂态不误报。
 
-func reconcileFixture(t *testing.T) (*Reconciler, *metrics.Metrics, *meta.TableDef, kidb.KvClient, context.Context) {
+func reconcileFixture(t *testing.T) (*Reconciler, *metrics.Metrics, *meta.TableDef, kv.Client, context.Context) {
 	cli, reg, _ := testutil.New(t)
 	m := metrics.New(prometheus.NewRegistry())
 	store := meta.NewCatalogStore(cli, reg)

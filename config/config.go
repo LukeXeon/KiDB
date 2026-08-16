@@ -13,6 +13,7 @@ import (
 	"kidb"
 	"kidb/i18n"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/metrics"
 	"kidb/script"
 )
@@ -37,7 +38,7 @@ var Vars = map[string]VarDef{
 
 // Store 是配置读写契约（docs/10 §10.2 ConfigStore）。
 type Store struct {
-	cli   kidb.KvClient
+	cli   kv.Client
 	reg   *script.Registry
 	actor string // 修改者标识（_audit）
 	clock func() time.Time
@@ -48,7 +49,7 @@ type Store struct {
 func (s *Store) SetMetrics(m *metrics.Metrics) { s.m = m }
 
 // New 构造。
-func New(cli kidb.KvClient, reg *script.Registry, actor string) *Store {
+func New(cli kv.Client, reg *script.Registry, actor string) *Store {
 	return &Store{cli: cli, reg: reg, actor: actor, clock: time.Now}
 }
 

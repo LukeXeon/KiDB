@@ -15,6 +15,7 @@ import (
 	"kidb/bucketmap"
 	"kidb/exec"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/rowcodec"
 	"kidb/script"
@@ -28,7 +29,7 @@ import (
 
 // JobRunner 执行 DDL 作业。
 type JobRunner struct {
-	cli        kidb.KvClient
+	cli        kv.Client
 	reg        *script.Registry
 	store      *meta.CatalogStore
 	cache      *meta.CatalogCache
@@ -42,7 +43,7 @@ type JobRunner struct {
 
 // NewJobRunner 构造（tickBudget 每 tick 回填时间预算，默认 500ms）。
 // guard/reg 供 DROP 清理车道（SweepSlot + DeleteRow 走写路径语义）。
-func NewJobRunner(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *JobRunner {
+func NewJobRunner(cli kv.Client, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *JobRunner {
 	tn := tuning.Get()
 	return &JobRunner{cli: cli, reg: reg, store: store, cache: cache, exec: e, bm: bm, guard: guard, slotsPerT: tn.Controller.JobSlotsPerTick, tickBudget: tn.JobTickBudget(),
 		bfLimit: rate.NewLimiter(rate.Limit(tn.Controller.BackfillRowsPerSec), 1024)}
@@ -182,7 +183,7 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 	}
 	s := r.exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, SlotLo: lo, SlotHi: hi})
 	defer s.Close()
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	// 唯一索引回填建预约（review 实证缺失：不建预约 = 存量值对唯一约束不可见）。
 	// 先与 ZADD 同 pipeline SET NX；NX 失败的行经预约自愈复查，仍冲突 = 真实重复 → 中止作业。
 	var resv []uniqueResv
@@ -262,18 +263,18 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 			if err != nil {
 				return err
 			}
-			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, 0), score, member}})
+			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, 0), score, member}})
 		default:
-			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, slot, 0), 0, member}})
+			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, slot, 0), 0, member}})
 		}
 		// 字典序副本随等值索引回填（docs/04 §4.5 前缀搜索的数据面；
 		// 与 txguard 写路径同一编码——rowcodec.LexMember 单点）
 		if idx.PrefixCopy && idx.Kind != meta.IndexRange {
-			cmds = append(cmds, kidb.Cmd{Name: "ZADD", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, 0), 0, rowcodec.LexMember(enc, pk)}})
+			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, 0), 0, rowcodec.LexMember(enc, pk)}})
 		}
 		// 基数统计采样（docs/04 §4.6：与增量写入同一按值采样规则）
 		if txguard.HLLSampledValue(idx.ID, enc) {
-			cmds = append(cmds, kidb.Cmd{Name: "PFADD", Args: []any{keycodec.HLLKey(def.Name, idx.ID), enc}})
+			cmds = append(cmds, kv.Cmd{Name: "PFADD", Args: []any{keycodec.HLLKey(def.Name, idx.ID), enc}})
 		}
 		if len(cmds) >= 512 {
 			if err := flush(); err != nil {
@@ -289,10 +290,10 @@ func sprintOf(v any) string { return fmt.Sprint(v) }
 // reserveBatch 唯一索引回填的预约批：SET NX 管线，失败行经自愈复查，
 // 仍冲突 = 存量/并发交错真实重复 → errUniqueBackfillConflict（调用方中止作业）。
 func (r *JobRunner) reserveBatch(ctx context.Context, def *meta.TableDef, idx *meta.IndexDef, resv []uniqueResv) error {
-	cmds := make([]kidb.Cmd, 0, len(resv))
+	cmds := make([]kv.Cmd, 0, len(resv))
 	for _, rv := range resv {
 		rk := keycodec.RowKey(def.Name, rv.pk)
-		cmds = append(cmds, kidb.Cmd{Name: "SET", Args: []any{
+		cmds = append(cmds, kv.Cmd{Name: "SET", Args: []any{
 			keycodec.UniqueKey(def.Name, idx.ID, rv.encVal),
 			rk + "|" + strconv.FormatInt(time.Now().Unix(), 10), "NX",
 		}})

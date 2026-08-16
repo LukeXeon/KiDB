@@ -21,6 +21,7 @@ import (
 
 	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/script"
 	"kidb/utils"
 )
@@ -84,7 +85,7 @@ func DefaultShard() *Shard {
 
 // Store 是 BucketMap 的读写存储（版本 CAS 经 bucket_state_cas.lua）。
 type Store struct {
-	cli kidb.KvClient
+	cli kv.Client
 	reg *script.Registry
 
 	mu    sync.RWMutex
@@ -96,7 +97,7 @@ type Store struct {
 }
 
 // New 构造（缓存 TTL 1s——分裂中间态读侧容忍见 docs/08 §8.3）。
-func New(cli kidb.KvClient, reg *script.Registry) *Store {
+func New(cli kv.Client, reg *script.Registry) *Store {
 	return &Store{cli: cli, reg: reg, cache: map[string]*Shard{}, since: time.Now(), ttl: time.Second, regCache: map[string]map[string]bool{}}
 }
 

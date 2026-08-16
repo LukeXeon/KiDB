@@ -1,19 +1,26 @@
-package kidb
+package kv
 
 import (
 	"context"
 	"errors"
 	"io"
-	"kidb/tuning"
-	"kidb/utils"
 	"math/rand"
 	"net"
 	"strings"
 	"time"
+
+	"kidb/tuning"
+	"kidb/utils"
 )
 
 // retry.go：错误分类与退避矩阵（docs/09 §9.6，移植 client-go Backoffer 思想）：
 // 按错误类型分派退避策略与上限——不再"一律重试"。
+
+// 耗尽哨兵（WithRetry 产出方即 owner；MySQL 错误码映射在根包 errors.go）。
+var (
+	ErrRedirectExhausted  = errors.New("ERR_REDIRECT_EXHAUSTED")  // MOVED/ASK 耗尽 → 1105
+	ErrClusterUnavailable = errors.New("ERR_CLUSTER_UNAVAILABLE") // CLUSTERDOWN/LOADING 耗尽 → 1105
+)
 
 // ErrClass 是故障类别。
 type ErrClass int

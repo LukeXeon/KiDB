@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"kidb"
+	"kidb/kv"
 	"kidb/testutil"
 )
 
@@ -31,7 +31,7 @@ func TestDoAndPipeline(t *testing.T) {
 	}
 
 	// Pipeline：跨 slot 混合、按序返回（契约 R4）
-	results, err := cli.Pipeline(ctx, []kidb.Cmd{
+	results, err := cli.Pipeline(ctx, []kv.Cmd{
 		{Name: "HSET", Args: []any{"d:t:{2}", "a", "1"}},
 		{Name: "HGET", Args: []any{"d:t:{1}", "name"}},
 		{Name: "GET", Args: []any{"no:such:{key}"}}, // redis.Nil → nil

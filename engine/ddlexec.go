@@ -12,6 +12,7 @@ import (
 	"kidb/exec"
 	"kidb/i18n"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/rowcodec"
 	"kidb/tuning"
@@ -309,7 +310,7 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 	}
 	deps.Cache.Invalidate()
 
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	flush := func() error {
 		if len(cmds) == 0 {
 			return nil
@@ -320,9 +321,9 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 	}
 	if idxCopy.Kind == meta.IndexRange {
 		for slot := 0; slot < keycodec.NumSlots; slot++ {
-			cmds = append(cmds, kidb.Cmd{Name: "UNLINK", Args: []any{keycodec.RangeBucketKey(def.Name, idxCopy.ID, uint16(slot), 0)}})
+			cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.RangeBucketKey(def.Name, idxCopy.ID, uint16(slot), 0)}})
 			if idxCopy.PrefixCopy {
-				cmds = append(cmds, kidb.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, uint16(slot), 0)}})
+				cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, uint16(slot), 0)}})
 			}
 			if len(cmds) >= 512 {
 				if err := flush(); err != nil {
@@ -354,9 +355,9 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 			return err
 		}
 		slot := keycodec.Slot(keycodec.RowKey(def.Name, pk))
-		cmds = append(cmds, kidb.Cmd{Name: "UNLINK", Args: []any{keycodec.EqBucketKey(def.Name, idxCopy.ID, enc, slot, 0)}})
+		cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.EqBucketKey(def.Name, idxCopy.ID, enc, slot, 0)}})
 		if idxCopy.PrefixCopy {
-			cmds = append(cmds, kidb.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, slot, 0)}})
+			cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, slot, 0)}})
 		}
 		if len(cmds) >= 512 {
 			if err := flush(); err != nil {

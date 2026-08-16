@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"kidb/kv"
 
-	"kidb"
+	"github.com/stretchr/testify/require"
 )
 
 // probe.go：测试用 Redis 状态探针（sweeper/txguard 等 PBT 与不变式断言的
@@ -17,11 +17,11 @@ import (
 // Probe 是绑定测试与客户端的断言探针。
 type Probe struct {
 	t   *testing.T
-	cli kidb.KvClient
+	cli kv.Client
 }
 
 // NewProbe 构造。
-func NewProbe(t *testing.T, cli kidb.KvClient) Probe {
+func NewProbe(t *testing.T, cli kv.Client) Probe {
 	t.Helper()
 	return Probe{t: t, cli: cli}
 }

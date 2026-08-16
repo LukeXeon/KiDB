@@ -1,5 +1,5 @@
 // Package goredis 是 KiDB 的参考适配器：基于 go-redis/v9 ClusterClient
-// 实现 kidb.KvClient 契约（docs/09 §9.3 R1~R7）。
+// 实现 kv.Client 契约（docs/09 §9.3 R1~R7）。
 //
 // 路由说明：go-redis ClusterClient 对内建命令表中的命令按首 key 路由
 // （其 CRC16 与 keycodec 同为 XMODEM 规范，一致性由契约测试在真实集群校验，
@@ -22,10 +22,11 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"kidb"
+	"kidb/kv"
 	"kidb/script"
 )
 
-// Adapter 在 *redis.ClusterClient 上实现 kidb.KvClient。
+// Adapter 在 *redis.ClusterClient 上实现 kv.Client。
 //
 // 副本读（docs/09 §9.4 可选能力）：ReplicaRead 开启时构造第二个
 // ClusterClient（ReadOnly=true，go-redis 把只读命令路由到从节点）——
@@ -52,7 +53,7 @@ type Options struct {
 	ClusterSlots func(context.Context) ([]redis.ClusterSlot, error)
 }
 
-// New 构造适配器。返回的对象可直接作为 kidb.KvClient 使用。
+// New 构造适配器。返回的对象可直接作为 kv.Client 使用。
 //
 // 协议钉住 RESP2（docs/09 §9.2）：go-redis v9.22 起未显式设置的 Protocol
 // 被静默改为 RESP3（options.go init: <2→3）——RESP3 激活 push 通知处理器，
@@ -139,7 +140,7 @@ func normalizeReply(v any) any {
 // Pipeline 执行一批可跨 slot 的命令（契约 R4：go-redis 按节点聚合、
 // 按序返回；无事务语义）。元素级 redis.Nil 翻译为 nil；
 // 首个非 Nil 错误作为整体错误返回，结果切片仍填满。
-func (a *Adapter) Pipeline(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
+func (a *Adapter) Pipeline(ctx context.Context, cmds []kv.Cmd) ([]any, error) {
 	if len(cmds) == 0 {
 		return nil, nil
 	}
@@ -203,8 +204,8 @@ func (a *Adapter) cachedScript(s *script.Script) *redis.Script {
 }
 
 // Capabilities 声明可选能力（docs/09 §9.4）。
-func (a *Adapter) Capabilities() kidb.Capabilities {
-	return kidb.Capabilities{
+func (a *Adapter) Capabilities() kv.Capabilities {
+	return kv.Capabilities{
 		ReplicaRead:  a.replica != nil,
 		HotkeyEvents: nil, // 开源参考适配器不提供热 key 事件流
 		ServerTime:   true,
@@ -228,7 +229,7 @@ func (a *Adapter) DoReplica(ctx context.Context, cmd string, args ...any) (any, 
 }
 
 // PipelineReplica 批级副本读（契约 R4 同形，路由到从节点）。
-func (a *Adapter) PipelineReplica(ctx context.Context, cmds []kidb.Cmd) ([]any, error) {
+func (a *Adapter) PipelineReplica(ctx context.Context, cmds []kv.Cmd) ([]any, error) {
 	if a.replica == nil {
 		return nil, fmt.Errorf("%w: PipelineReplica without ReplicaRead capability", kidb.ErrUnsupported)
 	}
@@ -270,4 +271,4 @@ func (a *Adapter) PipelineReplica(ctx context.Context, cmds []kidb.Cmd) ([]any, 
 }
 
 // 编译期接口断言。
-var _ kidb.KvClient = (*Adapter)(nil)
+var _ kv.Client = (*Adapter)(nil)

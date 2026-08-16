@@ -10,6 +10,7 @@ import (
 	"kidb"
 	"kidb/bucketmap"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/metrics"
 	"kidb/rowcodec"
 	"kidb/script"
@@ -23,7 +24,7 @@ import (
 
 // Splitter 是分裂协议执行器。
 type Splitter struct {
-	cli   kidb.KvClient
+	cli   kv.Client
 	reg   *script.Registry
 	bm    *bucketmap.Store
 	m     *metrics.Metrics // 指标（nil = no-op）
@@ -31,7 +32,7 @@ type Splitter struct {
 }
 
 // NewSplitter 构造（batch 默认 500，docs/08 §8.3）。
-func NewSplitter(cli kidb.KvClient, reg *script.Registry, bm *bucketmap.Store) *Splitter {
+func NewSplitter(cli kv.Client, reg *script.Registry, bm *bucketmap.Store) *Splitter {
 	return &Splitter{cli: cli, reg: reg, bm: bm, batch: 500}
 }
 
@@ -288,10 +289,10 @@ func (s *Splitter) sampleMedian(ctx context.Context, table, idxID string, slot u
 	if n == 0 {
 		return 0, fmt.Errorf("controller: range bucket empty, nothing to split")
 	}
-	var cmds []kidb.Cmd
+	var cmds []kv.Cmd
 	for _, q := range []int64{1, 2, 3} { // 25%/50%/75% 分位点
 		off := n * q / 4
-		cmds = append(cmds, kidb.Cmd{Name: "ZRANGE", Args: []any{bk, off, off, "WITHSCORES"}})
+		cmds = append(cmds, kv.Cmd{Name: "ZRANGE", Args: []any{bk, off, off, "WITHSCORES"}})
 	}
 	results, err := s.cli.Pipeline(ctx, cmds)
 	if err != nil {

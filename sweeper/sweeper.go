@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"kidb"
 	"kidb/keycodec"
+	"kidb/kv"
 	"kidb/meta"
 	"kidb/metrics"
 	"kidb/script"
@@ -24,7 +24,7 @@ import (
 // Sweeper 执行清扫。
 type Sweeper struct {
 	m          *metrics.Metrics // 指标（nil = no-op）
-	cli        kidb.KvClient
+	cli        kv.Client
 	reg        *script.Registry
 	batch      int              // 每 tick 每 slot 到期批大小（docs/10 sweeper_batch）
 	maxBatches int              // 每 tick 每 slot 批数上限（sweeper_max_batches_per_tick）
@@ -32,7 +32,7 @@ type Sweeper struct {
 }
 
 // New 构造（参数即 docs/10 §10.2 变量默认值）。
-func New(cli kidb.KvClient, reg *script.Registry) *Sweeper {
+func New(cli kv.Client, reg *script.Registry) *Sweeper {
 	return &Sweeper{cli: cli, reg: reg, batch: tuning.Get().Sweeper.Batch, maxBatches: tuning.Get().Sweeper.MaxBatchesPerTick}
 }
 
@@ -97,9 +97,9 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, s
 	expKey := keycodec.ExpKeyN(t.Name, slot, shard, t.EffectiveExpShards())
 
 	// 2. 取回执（同 slot pipeline）
-	cmds := make([]kidb.Cmd, 0, len(pks))
+	cmds := make([]kv.Cmd, 0, len(pks))
 	for _, pk := range pks {
-		cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{keycodec.ReceiptKey(t.Name, pk)}})
+		cmds = append(cmds, kv.Cmd{Name: "HGETALL", Args: []any{keycodec.ReceiptKey(t.Name, pk)}})
 	}
 	rcpts, err := s.cli.Pipeline(ctx, cmds)
 	if err != nil {
