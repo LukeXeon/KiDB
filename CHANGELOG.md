@@ -31,6 +31,7 @@
 
 ## v6.x（持续交付）
 
+- **对账角色落地**（docs/12 §12.8）：`controller.Reconciler`——每 tick 每表抽样 slot 做"数据侧推导 vs 索引实际"比对（正向成员/score 校验 + 反向孤儿成员 + 唯一预约占有者活性），漂移进 `reconcile_drift_total{kind}` + 告警，**只观测不自动修复**（漂移=内核 bug 信号）；TTL 清扫暂态（回执在）不误报，异步/回填中索引跳过合法窗口；采样参数入 tuning.toml（reconcile_slots_per_tick/reconcile_rows_per_slot）。反向孤儿判定实现期修正：桶成员 pk 不在登记册取样面时直查行/回执活性（从未存在的 pk 无从判定——测试钉死）。
 - **cnt 行计数器移除**：`cnt:{table}:{stag}` 只写不读（write_row/sweep_batch 维护、零消费方——COUNT(*) 任意时刻精确由 exp 登记册 Σ ZCOUNT 承接）。write_row.lua v4 / sweep_batch.lua v2 KEYS 布局收缩（exp=n-1、rcpt=n）；docs/12 §12.8 的"cnt 校准"项以移除方式闭环（校准一个没人读的计数器是纯放大）。
 
 ## v5.1（实现期，进行中）
