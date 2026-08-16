@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"kidb"
-	"kidb/bucketmap"
 	"kidb/keycodec"
 	"kidb/script"
 	"kidb/utils"
@@ -50,14 +49,14 @@ func (m *L4Manager) Activate(ctx context.Context, table, idxID, encVal, srcBucke
 		return err
 	}
 	// 注册：读路径据此切换到副本（bmh 注册表字段 r4:{encVal} = K）
-	res, err := m.cli.Do(ctx, "HGET", bucketmap.RegistryKey(table, idxID), l4Field(encVal))
+	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal))
 	if err != nil {
 		return err
 	}
 	if res != nil {
 		return nil // 已激活
 	}
-	_, err = m.cli.Do(ctx, "HSET", bucketmap.RegistryKey(table, idxID), l4Field(encVal), strconv.Itoa(k))
+	_, err = m.cli.Do(ctx, "HSET", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal), strconv.Itoa(k))
 	return err
 }
 
@@ -87,7 +86,7 @@ func (m *L4Manager) Refresh(ctx context.Context, srcBucketKey string, k int) err
 
 // Deactivate 回收副本（热度回落）：注销注册表 + UNLINK 全部副本。
 func (m *L4Manager) Deactivate(ctx context.Context, table, idxID, encVal, srcBucketKey string) error {
-	res, err := m.cli.Do(ctx, "HGET", bucketmap.RegistryKey(table, idxID), l4Field(encVal))
+	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal))
 	if err != nil {
 		return err
 	}
@@ -100,7 +99,7 @@ func (m *L4Manager) Deactivate(ctx context.Context, table, idxID, encVal, srcBuc
 			return err
 		}
 	}
-	_, err = m.cli.Do(ctx, "HDEL", bucketmap.RegistryKey(table, idxID), l4Field(encVal))
+	_, err = m.cli.Do(ctx, "HDEL", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal))
 	return err
 }
 
@@ -108,7 +107,7 @@ func (m *L4Manager) Deactivate(ctx context.Context, table, idxID, encVal, srcBuc
 // 副本过期（60s 未续期）自动失效——读不到成员时回退源桶由调用方兜底
 // （docs/08 §8.4：副本过期自动失效，读回退源桶）。
 func (m *L4Manager) ReplicaFor(ctx context.Context, table, idxID, encVal, srcBucketKey string, randFn func(int) int) (string, bool) {
-	res, err := m.cli.Do(ctx, "HGET", bucketmap.RegistryKey(table, idxID), l4Field(encVal))
+	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal))
 	if err != nil || res == nil {
 		return "", false
 	}

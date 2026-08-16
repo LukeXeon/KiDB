@@ -31,6 +31,7 @@
 
 ## v6.x（持续交付）
 
+- **DROP TABLE 大表清理作业化**：超阈值（`drop_sync_max_rows` 默认 4096）→ Catalog 立即删除 + `c:dropjobs` 登记（def 快照自包含），JobRunner 按 slot 游标清理（SweepSlot 清过期残留 → 登记册分页"处理即移出"——活行 DeleteRow 全清、偏斜死行 SweepPksForced 强扫）；崩溃安全 = 作业先登记后删 Catalog + 在途防护跳过 + 换实例接管（测试钉死）。**实现期发现并修复死锁形态**：DeleteRow 对物理过期行是 no-op（write_row D 分支不撤 exp），若按"删到空为止"分页会在死行上无限空转；同页恒读首页 + 死行即批强扫，终止由构造保证。附带纪律修复：bucketmap 的 Key/RegistryKey 手拼 key 回收进 keycodec（BucketMapSlotKey/BucketMapHotKey），删除形态错误的死函数 BucketMapKey。
 - **对账角色落地**（docs/12 §12.8）：`controller.Reconciler`——每 tick 每表抽样 slot 做"数据侧推导 vs 索引实际"比对（正向成员/score 校验 + 反向孤儿成员 + 唯一预约占有者活性），漂移进 `reconcile_drift_total{kind}` + 告警，**只观测不自动修复**（漂移=内核 bug 信号）；TTL 清扫暂态（回执在）不误报，异步/回填中索引跳过合法窗口；采样参数入 tuning.toml（reconcile_slots_per_tick/reconcile_rows_per_slot）。反向孤儿判定实现期修正：桶成员 pk 不在登记册取样面时直查行/回执活性（从未存在的 pk 无从判定——测试钉死）。
 - **cnt 行计数器移除**：`cnt:{table}:{stag}` 只写不读（write_row/sweep_batch 维护、零消费方——COUNT(*) 任意时刻精确由 exp 登记册 Σ ZCOUNT 承接）。write_row.lua v4 / sweep_batch.lua v2 KEYS 布局收缩（exp=n-1、rcpt=n）；docs/12 §12.8 的"cnt 校准"项以移除方式闭环（校准一个没人读的计数器是纯放大）。
 

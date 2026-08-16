@@ -52,7 +52,7 @@ func TestDDLJobResumable(t *testing.T) {
 	cache.Invalidate()
 
 	// 推进：小批次 + 中途"换执行器"（新 JobRunner 实例模拟宕机接管）
-	jr1 := NewJobRunner(cli, store, cache, e, bm)
+	jr1 := NewJobRunner(cli, reg, store, cache, e, bm, txguard.New(cli, reg, nil))
 	jr1.slotsPerT = 4000              // 测试用小批
 	jr1.tickBudget = time.Millisecond // 预算极小：一轮 tick 只跑一批（验证断点续作）
 	require.NoError(t, jr1.Tick(ctx))
@@ -62,7 +62,7 @@ func TestDDLJobResumable(t *testing.T) {
 	require.Greater(t, job.Cursor, 0)
 
 	// 接管：新实例从游标续作
-	jr2 := NewJobRunner(cli, store, cache, e, bm)
+	jr2 := NewJobRunner(cli, reg, store, cache, e, bm, txguard.New(cli, reg, nil))
 	jr2.slotsPerT = 4000
 	jr2.tickBudget = 500 * time.Millisecond
 	for i := 0; i < 10; i++ {

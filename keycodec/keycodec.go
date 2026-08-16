@@ -93,8 +93,15 @@ func AsyncLogKey(table, idx string, slot uint16) string {
 	return "log:idx:" + table + ":" + idx + ":" + SlotTag(slot)
 }
 
-// BucketMapKey 桶路由表：`bm:{table}:{idx}`。
-func BucketMapKey(table, idx string) string { return "bm:" + table + ":" + idx }
+// BucketMapSlotKey 桶路由表分片：`bm:{table}:{idx}:{stag}`（每 slot 分片——
+// 全局单 key 与写 Lua 内版本 CAS 物理冲突，docs/03 §3.1）。
+func BucketMapSlotKey(table, idx string, slot uint16) string {
+	return "bm:" + table + ":" + idx + ":" + SlotTag(slot)
+}
+
+// BucketMapHotKey 热值注册表：`bmh:{table}:{idx}`（等值索引哪些值有分裂状态 +
+// L4 副本登记，docs/03 §3.1）。
+func BucketMapHotKey(table, idx string) string { return "bmh:" + table + ":" + idx }
 
 // CatalogKey 表元数据：`c:table:{table}`。
 func CatalogKey(table string) string { return "c:table:" + table }
@@ -118,6 +125,9 @@ func VerKey(table string) string { return "ver:" + table }
 
 // SeqKey 自增序列：`seq:{table}`。
 func SeqKey(table string) string { return "seq:" + table }
+
+// DropJobsKey DROP TABLE 清理作业注册表：`c:dropjobs`（Hash，field=表名）。
+func DropJobsKey() string { return "c:dropjobs" }
 
 // CtrlLockKey Controller 选举锁：`lk:ctrl`。
 func CtrlLockKey() string { return "lk:ctrl" }

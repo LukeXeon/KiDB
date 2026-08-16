@@ -6,6 +6,7 @@ package sweeper
 
 import (
 	"context"
+	"math"
 	"fmt"
 	"strconv"
 	"strings"
@@ -77,6 +78,23 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 	if len(pks) == 0 {
 		return 0, nil
 	}
+	return s.sweepPks(ctx, t, slot, shard, pks, now)
+}
+
+// SweepPksForced 强制清扫指定 pk 集（now=+∞，score 复查必过）——
+// DROP 清理车道专用：偏斜窗口死行（行已物理过期但登记册 score 在未来——
+// Redis TTL 钟与内核钟偏斜，docs/11 §11.1）的桶成员/回执/预约释放。
+// 生产清扫路径不走这里（score 复查是复活拦截的关键不变式）。
+func (s *Sweeper) SweepPksForced(ctx context.Context, t *meta.TableDef, slot uint16, shard int, pks []string) (int, error) {
+	if len(pks) == 0 {
+		return 0, nil
+	}
+	return s.sweepPks(ctx, t, slot, shard, pks, math.MaxInt64)
+}
+
+// sweepPks 清扫一批 pk（回执驱动的成员/回执/登记册清理 + 预约释放）。
+func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, shard int, pks []string, now int64) (int, error) {
+	expKey := keycodec.ExpKeyN(t.Name, slot, shard, t.EffectiveExpShards())
 
 	// 2. 取回执（同 slot pipeline）
 	cmds := make([]kidb.Cmd, 0, len(pks))

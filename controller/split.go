@@ -44,7 +44,7 @@ const maxStepRetries = 8
 // SplitEq 等值桶分裂：该 (值, slot) 桶的成员数翻倍（2n 子桶，xxhash 取模放置）。
 // 可断点续作：Split 中间态持久化，重复调用从中间态继续。
 func (s *Splitter) SplitEq(ctx context.Context, table, idxID, encVal string, slot uint16) error {
-	key := bucketmap.Key(table, idxID, slot)
+	key := keycodec.BucketMapSlotKey(table, idxID, slot)
 
 	for attempt := 0; attempt < maxStepRetries; attempt++ {
 		sh, err := s.bm.LoadFresh(ctx, table, idxID, slot)
@@ -190,7 +190,7 @@ func (s *Splitter) migrateBatch(ctx context.Context, sm *script.Script, table st
 
 // SplitRange 范围桶分裂：指定桶按采样中位数裂为 [lo,mid) [mid,hi)。
 func (s *Splitter) SplitRange(ctx context.Context, table, idxID string, slot uint16, bucketIdx int) error {
-	key := bucketmap.Key(table, idxID, slot)
+	key := keycodec.BucketMapSlotKey(table, idxID, slot)
 
 	for attempt := 0; attempt < maxStepRetries; attempt++ {
 		sh, err := s.bm.LoadFresh(ctx, table, idxID, slot)
@@ -388,7 +388,7 @@ func boundOf(s string) float64 {
 // MergeEq 等值桶合并：当前 2n 子桶并为 n 个（持续低基数的回收路径）。
 // 镜像状态机：MERGING（双写目标+旧桶）→ MERGE_DRAIN（仅目标桶）→ ACTIVE。
 func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, slot uint16) error {
-	key := bucketmap.Key(table, idxID, slot)
+	key := keycodec.BucketMapSlotKey(table, idxID, slot)
 	for attempt := 0; attempt < maxStepRetries; attempt++ {
 		sh, err := s.bm.LoadFresh(ctx, table, idxID, slot)
 		if err != nil {
@@ -486,7 +486,7 @@ func (s *Splitter) MergeEq(ctx context.Context, table, idxID, encVal string, slo
 
 // MergeRange 范围桶合并：相邻两桶 [lo,mid)+[mid,hi) 并为 [lo,hi)。
 func (s *Splitter) MergeRange(ctx context.Context, table, idxID string, slot uint16, leftIdx int) error {
-	key := bucketmap.Key(table, idxID, slot)
+	key := keycodec.BucketMapSlotKey(table, idxID, slot)
 	for attempt := 0; attempt < maxStepRetries; attempt++ {
 		sh, err := s.bm.LoadFresh(ctx, table, idxID, slot)
 		if err != nil {

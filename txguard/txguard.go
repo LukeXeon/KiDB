@@ -426,7 +426,7 @@ func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields m
 		undoKeys []string, undoMember string, redoKeys []string, redoMember string, redoScore float64) {
 		bmKey, bmVer := "", uint64(0)
 		if bm != nil {
-			bmKey = bucketmap.Key(t.Name, idxID, slot)
+			bmKey = keycodec.BucketMapSlotKey(t.Name, idxID, slot)
 			bmVer = bm.Version
 		}
 		for _, uk := range undoKeys {

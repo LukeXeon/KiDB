@@ -80,6 +80,46 @@ func (s *CatalogStore) Save(ctx context.Context, def *TableDef, expectVer uint64
 	return fmt.Errorf("catalog %s: unknown cas status %v", def.Name, arr[0])
 }
 
+// ==== DROP TABLE 清理作业（c:dropjobs Hash，docs/06 §6.3）====
+// Catalog 在 DROP 时已删除，作业携带 def 快照自包含。
+
+// SetDropJob 登记/推进 DROP 清理作业（游标断点续作）。
+func (s *CatalogStore) SetDropJob(ctx context.Context, job *DropJob) error {
+	raw, err := job.MarshalMsg(nil)
+	if err != nil {
+		return err
+	}
+	_, err = s.cli.Do(ctx, "HSET", keycodec.DropJobsKey(), job.Table, string(raw))
+	return err
+}
+
+// ListDropJobs 返回全部进行中 DROP 清理作业。
+func (s *CatalogStore) ListDropJobs(ctx context.Context) ([]*DropJob, error) {
+	res, err := s.cli.Do(ctx, "HGETALL", keycodec.DropJobsKey())
+	if err != nil {
+		return nil, err
+	}
+	fields, err := utils.StringMap(res)
+	if err != nil {
+		return nil, err
+	}
+	var out []*DropJob
+	for _, v := range fields {
+		var job DropJob
+		if _, err := job.UnmarshalMsg([]byte(v)); err != nil {
+			return nil, fmt.Errorf("dropjobs decode: %w", err)
+		}
+		out = append(out, &job)
+	}
+	return out, nil
+}
+
+// ClearDropJob 移除完成的作业。
+func (s *CatalogStore) ClearDropJob(ctx context.Context, table string) error {
+	_, err := s.cli.Do(ctx, "HDEL", keycodec.DropJobsKey(), table)
+	return err
+}
+
 // SetJob 写入 DDL 作业（Catalog `_job` 字段，docs/06 §6.3）。
 func (s *CatalogStore) SetJob(ctx context.Context, table string, job *DDLJob) error {
 	raw, err := job.MarshalMsg(nil)

@@ -52,7 +52,7 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 	}
 	if roles == nil && !boot.ReadWriteOnly {
 		roles = AssembleRoles(deps.Client, deps.Reg, deps.Store, deps.Cache, deps.Exec,
-			bucketmap.New(deps.Client, deps.Reg))
+			bucketmap.New(deps.Client, deps.Reg), deps.Guard)
 	}
 	eng, _, err := engine.Build(deps)
 	if err != nil {

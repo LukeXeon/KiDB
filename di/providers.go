@@ -120,9 +120,10 @@ func ProvideEngineDeps(cli kidb.KvClient, reg *script.Registry, store *meta.Cata
 
 // ProvideRoles 后台角色组件（ReadWriteOnly 节点豁免 = nil，docs/08 §8.5）。
 func ProvideRoles(boot kidb.Bootstrap, cli kidb.KvClient, reg *script.Registry,
-	store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store) *gateway.Roles {
+	store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store,
+	guard *txguard.Guard) *gateway.Roles {
 	if boot.ReadWriteOnly {
 		return nil
 	}
-	return gateway.AssembleRoles(cli, reg, store, cache, ex, bm)
+	return gateway.AssembleRoles(cli, reg, store, cache, ex, bm, guard)
 }

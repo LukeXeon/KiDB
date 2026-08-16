@@ -32,7 +32,7 @@ func InitializeServer(boot kidb.Bootstrap) (*gateway.Server, error) {
 	executor := ProvideExecutor(kvClient, registry, metrics, recorder, store, l4Manager, shardedCache)
 	guard := ProvideGuard(kvClient, registry, store)
 	deps := ProvideEngineDeps(kvClient, registry, catalogStore, catalogCache, executor, guard, metrics)
-	roles := ProvideRoles(boot, kvClient, registry, catalogStore, catalogCache, executor, store)
+	roles := ProvideRoles(boot, kvClient, registry, catalogStore, catalogCache, executor, store, guard)
 	configStore := ProvideConfigStore(kvClient, registry)
 	server, err := gateway.NewServer(deps, boot, roles, configStore)
 	if err != nil {

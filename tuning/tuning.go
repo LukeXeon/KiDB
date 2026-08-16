@@ -53,6 +53,7 @@ type Tuning struct {
 		HotQPS                int64   `toml:"hot_qps"`
 		ReconcileSlotsPerTick int     `toml:"reconcile_slots_per_tick"`
 		ReconcileRowsPerSlot  int     `toml:"reconcile_rows_per_slot"`
+		DropSyncMaxRows       int     `toml:"drop_sync_max_rows"`
 	} `toml:"controller"`
 	Sweeper struct {
 		Batch             int `toml:"batch"`

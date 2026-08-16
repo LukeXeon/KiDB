@@ -99,6 +99,15 @@ type DDLJob struct {
 	Started int64     `json:"started"`
 }
 
+// DropJob 是进行中的 DROP TABLE 清理作业（docs/06 §6.3；登记于 `c:dropjobs`
+// Hash——Catalog 已在 DROP 时删除，作业须自带 def 快照）。
+type DropJob struct {
+	Table   string    `json:"table"`
+	Cursor  int       `json:"cursor"` // slot 游标（0..16384）
+	Started int64     `json:"started"`
+	Def     *TableDef `json:"def"` // 删除时的表定义快照（清理索引用）
+}
+
 // TableDef 是表定义（Catalog 的核心载荷）。
 type TableDef struct {
 	Name           string      `json:"name"`

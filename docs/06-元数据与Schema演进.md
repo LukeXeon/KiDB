@@ -34,7 +34,7 @@
 > **实现状态**：作业化已落地——`_job` 持久化游标（slot 区间分批）+ Controller 巡检
 > 接管续作（JobRunner，任意实例可接管，表级 `_ver` CAS 防重）+ Building 标记
 > （回填完成前查询不可见该索引，写入路径照常双写覆盖窗口）；
-> DROP 清理当前为同步执行（小表成立，大表走同样的作业化后续扩展）。
+> DROP 清理已作业化（v6.x）：行数 ≤ `tuning.toml [controller] drop_sync_max_rows`（默认 4096）走同步；超出 → Catalog 立即删除（表即刻不可查询/写入）+ `c:dropjobs` 登记清理作业（def 快照自包含、slot 游标断点续作、JobRunner 巡检接管——作业先登记后删 Catalog，Catalog 未删的作业视为 DROP 在途跳过）。每 slot 先清扫过期残留再分页删活行（与回填共享限速车道）；偏斜窗口死行（行物理过期但登记册 score 在未来）由强制清扫兜底——实现期实证：DeleteRow 对死行是 no-op，分页循环必须"处理即移出登记册"否则死行上空转。
 
 DDL 语句经 [02](02-SQL服务器.md) §2.4 解析校验后，不是同步完成，而是落为作业：
 

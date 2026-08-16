@@ -23,7 +23,7 @@ func TestProvideRolesRWOnly(t *testing.T) {
 	cache := ProvideCatalogCache(store)
 	bm := ProvideBucketMap(cli, reg)
 
-	roles := ProvideRoles(kidb.Bootstrap{}, cli, reg, store, cache, ex, bm)
+	roles := ProvideRoles(kidb.Bootstrap{}, cli, reg, store, cache, ex, bm, ProvideGuard(cli, reg, bm))
 	require.NotNil(t, roles)
 	require.NotNil(t, roles.Elector)
 	require.NotNil(t, roles.Manager)
@@ -31,7 +31,7 @@ func TestProvideRolesRWOnly(t *testing.T) {
 	require.NotNil(t, roles.Sweeper)
 	require.NotNil(t, roles.Indexer)
 
-	rwOnly := ProvideRoles(kidb.Bootstrap{ReadWriteOnly: true}, cli, reg, store, cache, ex, bm)
+	rwOnly := ProvideRoles(kidb.Bootstrap{ReadWriteOnly: true}, cli, reg, store, cache, ex, bm, ProvideGuard(cli, reg, bm))
 	require.Nil(t, rwOnly)
 }
 

@@ -16,6 +16,7 @@ import (
 	"kidb/nearcache"
 	"kidb/script"
 	"kidb/sweeper"
+	"kidb/txguard"
 	"kidb/tuning"
 	"kidb/utils"
 )
@@ -38,11 +39,11 @@ type Roles struct {
 // 自治链路 = 遥测采样 → 候选登记 → Controller 复核分裂/L4 → DDL 作业巡检。
 // 读路径附件（telemetry/bm/l4/L1 近缓存）的 executor 接线在 DI executor
 // provider 完成（di.ProvideExecutor），不在本函数。
-func AssembleRoles(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store) *Roles {
+func AssembleRoles(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, ex *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *Roles {
 	return &Roles{
 		Elector:    controller.CtrlLock(cli, reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano())),
 		Manager:    controller.NewManager(cli, bm, controller.NewSplitter(cli, reg, bm), controller.NewL4(cli, reg)),
-		JobRunner:  controller.NewJobRunner(cli, store, cache, ex, bm),
+		JobRunner:  controller.NewJobRunner(cli, reg, store, cache, ex, bm, guard),
 		Reconciler: controller.NewReconciler(cli, store, bm, ex.Metrics()),
 		Sweeper:    sweeper.New(cli, reg),
 		Indexer:    indexer.New(cli),

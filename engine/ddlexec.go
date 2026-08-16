@@ -13,6 +13,7 @@ import (
 	"kidb/i18n"
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/tuning"
 	"kidb/rowcodec"
 )
 
@@ -73,6 +74,45 @@ func (d *Database) dropTable(ctx *sql.Context, name string) error {
 	if def == nil {
 		return sql.ErrTableNotFound.New(name)
 	}
+
+	// 大表作业化（docs/06 §6.3）：行数超阈值 → Catalog 立即删除（表即刻不可
+	// 查询/写入）+ 登记 c:dropjobs 清理作业（def 快照自包含），JobRunner 后台
+	// 按 slot 游标清理。顺序纪律：先登记作业后删 Catalog——崩溃窗口内作业存在
+	// 但 Catalog 未删时 JobRunner 跳过（在途防护），DROP 重试幂等续作。
+	n, _, err := NewTable(def, deps).RowCount(ctx)
+	if err != nil {
+		return err
+	}
+	big := n > uint64(tuning.Get().Controller.DropSyncMaxRows)
+	hasJob := false
+	if jobs, jerr := deps.Store.ListDropJobs(ctx); jerr == nil {
+		for _, j := range jobs {
+			if j.Table == name {
+				hasJob = true
+			}
+		}
+	}
+	if big || hasJob {
+		if !hasJob {
+			if err := deps.Store.SetDropJob(ctx, &meta.DropJob{
+				Table: name, Cursor: 0, Started: time.Now().Unix(), Def: def,
+			}); err != nil {
+				return err
+			}
+		}
+		if _, err := deps.Client.Do(ctx, "DEL", keycodec.CatalogKey(name)); err != nil {
+			return err
+		}
+		if err := deps.Store.UnregisterTable(ctx, name); err != nil {
+			return err
+		}
+		if _, err := deps.Client.Do(ctx, "INCR", keycodec.SchemaVerKey()); err != nil {
+			return err
+		}
+		deps.Cache.Invalidate()
+		return nil // 清理由 JobRunner 后台完成（ddl_job_duration_seconds{type=drop_table}）
+	}
+
 	s := deps.Exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan})
 	defer s.Close()
 	for {

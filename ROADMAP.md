@@ -77,7 +77,7 @@
 | ~~对账任务~~ ✅ | v6.x 落地：controller.Reconciler 抽样对账 + 预约 key 残留巡检（`reconcile_drift_total{kind}`，只观测不修复，docs/12 §12.8）；cnt 校准以"cnt 移除"闭环；影子流量比对仍未落地 |
 | 性能基准门禁（k6/自研压测，1 亿行数据集） | docs/12 §12.7 指标在案；内核侧基线基准已落地（exec/bench_test.go + shape_test.go 命令形状不变式），缺真实集群门禁 |
 | exp 登记册自动细分（体积超阈自动重散列，docs/07 §7.2 容量账） | 分片键机制保留在 keycodec；当前恒 1 分片，10 亿行+ 表触碰 8MB 红线（文档已声明） |
-| DROP TABLE 大表后台清理作业 | 当前同步清理，小表成立 |
+| ~~DROP TABLE 大表后台清理作业~~ ✅ | v6.x 落地：阈值内同步、超阈值作业化（c:dropjobs + slot 游标 + 巡检接管 + 残留 key 清理），docs/06 §6.3 |
 | `_ttl` 伪列 SQL 面（行级 TTL 显式读写） | docs/07 §7.1；当前表级 default_ttl 已生效 |
 | JSON 列 msgp 压缩 | 文本形态正确无虞；压缩为体积优化（`_fmtv` 演进路径在案） |
 

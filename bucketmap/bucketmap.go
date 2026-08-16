@@ -98,17 +98,10 @@ func New(cli kidb.KvClient, reg *script.Registry) *Store {
 	return &Store{cli: cli, reg: reg, cache: map[string]*Shard{}, since: time.Now(), ttl: time.Second}
 }
 
-// Key 分片 key（keycodec 布局）。
-func Key(table, idx string, slot uint16) string {
-	return "bm:" + table + ":" + idx + ":" + keycodec.SlotTag(slot)
-}
-
-// RegistryKey 热值注册表（等值索引哪些值有分裂状态）。
-func RegistryKey(table, idx string) string { return "bmh:" + table + ":" + idx }
 
 // Load 读分片（短 TTL 缓存；强制刷新走 Invalidate）。
 func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shard, error) {
-	k := Key(table, idx, slot)
+	k := keycodec.BucketMapSlotKey(table, idx, slot)
 	s.mu.RLock()
 	if time.Since(s.since) < s.ttl {
 		if sh, ok := s.cache[k]; ok {
@@ -163,7 +156,7 @@ func (s *Store) LoadFresh(ctx context.Context, table, idx string, slot uint16) (
 // Registry 读热值注册表（等值值名 → 是否有分裂状态；范围索引用哨兵 "@range"）。
 // 读路径据此免加载全 slot 分片（docs/03 §3.1 稀疏原则）。
 func (s *Store) Registry(ctx context.Context, table, idx string) (map[string]bool, error) {
-	res, err := s.cli.Do(ctx, "HGETALL", RegistryKey(table, idx))
+	res, err := s.cli.Do(ctx, "HGETALL", keycodec.BucketMapHotKey(table, idx))
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +170,7 @@ func (s *Store) Registry(ctx context.Context, table, idx string) (map[string]boo
 
 // RegisterHot 把值/哨兵写入注册表（分裂完成时调用）。
 func (s *Store) RegisterHot(ctx context.Context, table, idx, field string) error {
-	_, err := s.cli.Do(ctx, "HSET", RegistryKey(table, idx), field, 1)
+	_, err := s.cli.Do(ctx, "HSET", keycodec.BucketMapHotKey(table, idx), field, 1)
 	return err
 }
 

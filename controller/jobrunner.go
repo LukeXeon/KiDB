@@ -13,6 +13,7 @@ import (
 	"kidb/keycodec"
 	"kidb/meta"
 	"kidb/rowcodec"
+	"kidb/script"
 	"kidb/tuning"
 	"kidb/txguard"
 )
@@ -24,19 +25,22 @@ import (
 // JobRunner 执行 DDL 作业。
 type JobRunner struct {
 	cli        kidb.KvClient
+	reg        *script.Registry
 	store      *meta.CatalogStore
 	cache      *meta.CatalogCache
 	exec       *exec.Executor
+	guard      *txguard.Guard
 	bm         *bucketmap.Store
 	slotsPerT  int           // 每批处理的 slot 数
 	tickBudget time.Duration // 每 tick 回填时间预算
-	bfLimit    *rate.Limiter // 回填行速率（ddl_backfill_rate_limit 行/s/实例，docs/06 §6.3）
+	bfLimit    *rate.Limiter // 回填/清理行速率（ddl_backfill_rate_limit 行/s/实例，docs/06 §6.3）
 }
 
 // NewJobRunner 构造（tickBudget 每 tick 回填时间预算，默认 500ms）。
-func NewJobRunner(cli kidb.KvClient, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store) *JobRunner {
+// guard/reg 供 DROP 清理车道（SweepSlot + DeleteRow 走写路径语义）。
+func NewJobRunner(cli kidb.KvClient, reg *script.Registry, store *meta.CatalogStore, cache *meta.CatalogCache, e *exec.Executor, bm *bucketmap.Store, guard *txguard.Guard) *JobRunner {
 	tn := tuning.Get()
-	return &JobRunner{cli: cli, store: store, cache: cache, exec: e, bm: bm, slotsPerT: tn.Controller.JobSlotsPerTick, tickBudget: tn.JobTickBudget(),
+	return &JobRunner{cli: cli, reg: reg, store: store, cache: cache, exec: e, bm: bm, guard: guard, slotsPerT: tn.Controller.JobSlotsPerTick, tickBudget: tn.JobTickBudget(),
 		bfLimit: rate.NewLimiter(rate.Limit(tn.Controller.BackfillRowsPerSec), 1024)}
 }
 
@@ -66,7 +70,7 @@ func (r *JobRunner) Tick(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return r.tickDropJobs(ctx)
 }
 
 // step 推进作业：每个 tick 在时间预算内连跑多批（空/小表一轮即完成；

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"kidb/keycodec"
 	"kidb/testutil"
 )
 
@@ -15,7 +16,7 @@ func TestShardRoundTrip(t *testing.T) {
 	s := New(cli, reg)
 	ctx := context.Background()
 
-	key := Key("t", "idx", 42)
+	key := keycodec.BucketMapSlotKey("t", "idx", 42)
 	// 写入一个等值条目 + next
 	if _, err := s.CAS(ctx, key, 0, "next", 5); err != nil {
 		t.Fatal(err)
