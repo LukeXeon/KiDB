@@ -9,8 +9,9 @@ import (
 	"github.com/cespare/xxhash/v2"
 )
 
-// key 布局规范见 docs/03 §3.1。记号：{table} 为裸插值占位；
-// {pk}/{stag} 为字面大括号包裹的 hash tag。
+// key 布局规范见 docs/03 §3.1（v7.0：桶按值/索引独立寻址，与行 slot 解绑）。
+// 记号：{table} 为裸插值占位；{pk}/{encVal}/{r|l 子桶号}/{stag} 为字面
+// 大括号包裹的 hash tag。行 slot 内聚收窄为"行 + 回执 + 异步日志"。
 
 // RowKey 行数据 key：`d:{table}:{pk}`（tag 即 pk）。
 func RowKey(table, pk string) string {
@@ -22,23 +23,24 @@ func ReceiptKey(table, pk string) string {
 	return "rcpt:" + table + ":{" + pk + "}"
 }
 
-// ExpKey 过期登记册 key（未细分形态）：`exp:{table}:{stag}`。
-func ExpKey(table string, slot uint16) string {
-	return "exp:" + table + ":" + SlotTag(slot)
+// ExpKey 过期登记册 key（集中单册形态）：`exp:{table}`。
+func ExpKey(table string) string {
+	return "exp:" + table
 }
 
-// ExpShardKey 细分登记册 key：`exp:{table}:{stag}#{n}`（docs/07 §7.2）。
-func ExpShardKey(table string, slot uint16, shard int) string {
-	return fmt.Sprintf("%s#%d", ExpKey(table, slot), shard)
+// ExpShardKey 细分登记册 key：`exp:{table}#{n}`（docs/07 §7.2——
+// 无显式 tag，整 key 参与散列，不同 n 天然落不同 slot）。
+func ExpShardKey(table string, shard int) string {
+	return fmt.Sprintf("%s#%d", ExpKey(table), shard)
 }
 
 // ExpKeyN 登记册规范形态的唯一入口：shards≤1 时无后缀（与 ExpKey 一致），
 // 否则带 `#shard` 后缀。写/扫/清扫三方必须都经此函数（docs/03 §3.1）。
-func ExpKeyN(table string, slot uint16, shard, shards int) string {
+func ExpKeyN(table string, shard, shards int) string {
 	if shards <= 1 {
-		return ExpKey(table, slot)
+		return ExpKey(table)
 	}
-	return ExpShardKey(table, slot, shard)
+	return ExpShardKey(table, shard)
 }
 
 // ExpShardFor 按 pk 散列选登记册分片（docs/07 §7.2：按 pk 散列细分）。
@@ -49,39 +51,54 @@ func ExpShardFor(pk string, shards int) int {
 	return int(CRC16(pk)) % shards
 }
 
-// EqBucketKey 等值索引桶：`i:{table}:{idx}={value}:{stag}#b{n}`。
-// value 经 EscapeValue 转义/摘要。
-func EqBucketKey(table, idx, value string, slot uint16, n int) string {
-	return EqBucketKeyEsc(table, idx, EscapeValue(value), slot, n)
+// EqBucketKey 等值索引桶：`i:{table}:{idx}={encVal}`（默认单桶）。
+// value 经 EscapeValue 转义/摘要（摘要规则恰好保证 tag 无结构字符，docs/03 §3.2）。
+func EqBucketKey(table, idx, value string, n int) string {
+	return EqBucketKeyEsc(table, idx, EscapeValue(value), n)
 }
 
 // EqBucketKeyEsc 以**已转义** value 段直接建桶 key（bm 注册表/回执/分裂协议
 // 内部流通的都是转义形态——经 EqBucketKey 二次转义会错位（review 实证））。
-func EqBucketKeyEsc(table, idx, encVal string, slot uint16, n int) string {
-	return fmt.Sprintf("i:%s:%s=%s:%s#b%d", table, idx, encVal, SlotTag(slot), n)
+// 子桶（n>0，分裂态）：tag = `encVal#b{n}`——`#b{n}` 编入 tag 使子桶摊异 slot
+// （EscapeValue 已保证 encVal 不含 '#'，分隔符安全）。
+func EqBucketKeyEsc(table, idx, encVal string, n int) string {
+	if n <= 0 {
+		return "i:" + table + ":" + idx + "={" + encVal + "}"
+	}
+	return fmt.Sprintf("i:%s:%s={%s#b%d}", table, idx, encVal, n)
 }
 
-// RangeBucketKey 范围索引桶：`i:{table}:{idx}:{stag}#r{n}`。
-func RangeBucketKey(table, idx string, slot uint16, n int) string {
-	return fmt.Sprintf("i:%s:%s:%s#r%d", table, idx, SlotTag(slot), n)
+// EqSubFor 等值子桶选择：写/删按 xxhash64(pk) % K 确定性选子桶
+// （撤建同函数可寻，docs/03 §3.3）。
+func EqSubFor(pk string, k int) int {
+	if k <= 1 {
+		return 0
+	}
+	return int(xxhash.Sum64String(pk) % uint64(k))
 }
 
-// LexBucketKey 字典序副本桶：`i:{table}:{idx}:{stag}#l{n}`。
-func LexBucketKey(table, idx string, slot uint16, n int) string {
-	return fmt.Sprintf("i:%s:%s:%s#l%d", table, idx, SlotTag(slot), n)
+// RangeBucketKey 范围索引桶：`i:{table}:{idx}:{r子桶号}`（默认子桶号 0 单桶；
+// 分裂后子桶各占异 slot，docs/03 §3.3）。
+func RangeBucketKey(table, idx string, n int) string {
+	return fmt.Sprintf("i:%s:%s:{r%d}", table, idx, n)
 }
 
-// ReplicaKey 热桶读副本：把源桶 key 的 stag 替换为异 slot 的 stag
+// LexBucketKey 字典序副本桶：`i:{table}:{idx}:{l子桶号}`。
+func LexBucketKey(table, idx string, n int) string {
+	return fmt.Sprintf("i:%s:%s:{l%d}", table, idx, n)
+}
+
+// ReplicaKey 热桶读副本：把源桶 key 的 hash tag 替换为异 slot 的 stag
 // （docs/08 §8.4 L4：副本必须落在与源桶不同的 slot）。
 // 步进 stride=1820（⌊16384/9⌋，最大 8 副本+1）：k∈[1,8] 的偏移
 // k×1820 (mod 16384) 均不撞源 slot 且彼此分散。
-// 桶 key 中唯一的大括号即 stag（value 段经 EscapeValue 转义，不含字面大括号）。
+// 桶 key 中第一个 {} 对即 hash tag（value 段经 EscapeValue 转义，不含字面大括号）。
 func ReplicaKey(bucketKey string, k int) string {
 	const stride = 16384 / 9
 	i := strings.IndexByte(bucketKey, '{')
 	j := strings.IndexByte(bucketKey[i:], '}')
 	if i < 0 || j <= 0 {
-		panic("keycodec: ReplicaKey on key without stag: " + bucketKey)
+		panic("keycodec: ReplicaKey on key without hash tag: " + bucketKey)
 	}
 	newSlot := (Slot(bucketKey) + uint16(k*stride)) % NumSlots
 	return bucketKey[:i] + SlotTag(newSlot) + bucketKey[i+j+1:]
@@ -94,15 +111,16 @@ func UniqueKey(table, idx, encVal string) string {
 	return "u:" + table + ":" + idx + "=" + EscapeValue(encVal)
 }
 
-// AsyncLogKey 异步索引日志：`log:idx:{table}:{idx}:{stag}`。
+// AsyncLogKey 异步索引日志：`log:idx:{table}:{idx}:{stag}`
+// （保持行 slot 形态：redo 与行写在同一个行 Lua 内原子落盘，docs/05 §5.2）。
 func AsyncLogKey(table, idx string, slot uint16) string {
 	return "log:idx:" + table + ":" + idx + ":" + SlotTag(slot)
 }
 
-// BucketMapSlotKey 桶路由表分片：`bm:{table}:{idx}:{stag}`（每 slot 分片——
-// 全局单 key 与写 Lua 内版本 CAS 物理冲突，docs/03 §3.1）。
-func BucketMapSlotKey(table, idx string, slot uint16) string {
-	return "bm:" + table + ":" + idx + ":" + SlotTag(slot)
+// BucketMapKey 桶路由表文档：`bm:{table}:{idx}`（v7.0 集中每索引一文档——
+// 16384 分片消除：桶不再按行 slot 散布，跨 slot CAS 物理冲突随之消失）。
+func BucketMapKey(table, idx string) string {
+	return "bm:" + table + ":" + idx
 }
 
 // BucketMapHotKey 热值注册表：`bmh:{table}:{idx}`（等值索引哪些值有分裂状态 +
@@ -138,14 +156,19 @@ func DropJobsKey() string { return "c:dropjobs" }
 // CtrlLockKey Controller 选举锁：`lk:ctrl`。
 func CtrlLockKey() string { return "lk:ctrl" }
 
-// SweepLockKey Sweeper 区间锁：`lk:sweep:{slot区间}`。
-func SweepLockKey(slotStart, slotEnd uint16) string {
-	return fmt.Sprintf("lk:sweep:{%d-%d}", slotStart, slotEnd)
+// SweepLockKey Sweeper 册锁：`lk:sweep:{table}[#{n}]`
+// （v7.0：登记册集中后分工粒度从 slot 区间改为 表×分片，docs/07 §7.3）。
+func SweepLockKey(table string, shard, shards int) string {
+	if shards <= 1 {
+		return "lk:sweep:{" + table + "}"
+	}
+	return fmt.Sprintf("lk:sweep:{%s#%d}", table, shard)
 }
 
 // EscapeValue 桶/预约 key 中 value 的转义规则（docs/03 §3.2）：
 // URL escape；超长（>128B）或含 ':'、'{'、'}'、'#' 的值改取 xxhash64 摘要
 // （桶 key 带 "~x" 前缀标记为摘要桶，查询侧同规则寻址——两径同源本函数）。
+// 摘要规则恰好保证转义形态不含 tag 结构字符——等值桶 tag = `{encVal}` 零新机制。
 func EscapeValue(v string) string {
 	if len(v) > 128 || strings.ContainsAny(v, ":{}#") {
 		return "~x" + strconv.FormatUint(xxhash.Sum64String(v), 16)
@@ -158,81 +181,83 @@ func HasDigestPrefix(escaped string) bool {
 	return strings.HasPrefix(escaped, "~x")
 }
 
-// ParseRangeBucketKey 反解范围桶 key（`i:{table}:{idx}:{stag}#r{n}`）。
-func ParseRangeBucketKey(key string) (table, idx string, slot uint16, sub int, ok bool) {
+// ParseRangeBucketKey 反解范围桶 key（`i:{table}:{idx}:{r{n}}`）：
+// 遥测/Controller 从桶 key 还原定位信息用。
+func ParseRangeBucketKey(key string) (table, idx string, sub int, ok bool) {
 	if !strings.HasPrefix(key, "i:") {
-		return "", "", 0, 0, false
+		return "", "", 0, false
 	}
 	rest := key[2:]
 	colon := strings.IndexByte(rest, ':')
 	if colon < 0 {
-		return "", "", 0, 0, false
+		return "", "", 0, false
 	}
 	table = rest[:colon]
 	rest = rest[colon+1:]
 	tagPos := strings.IndexByte(rest, '{')
 	if tagPos < 0 {
-		return "", "", 0, 0, false
+		return "", "", 0, false
 	}
 	idx = rest[:tagPos-1] // 去尾 ':'
 	end := strings.IndexByte(rest, '}')
 	if end < 0 {
-		return "", "", 0, 0, false
+		return "", "", 0, false
 	}
-	slot = Slot(rest[tagPos : end+1])
-	n, sok := parseSub(rest[end+1:], "#r")
+	n, sok := parseSub("r", rest[tagPos+1:end])
 	if !sok {
-		return "", "", 0, 0, false
+		return "", "", 0, false
 	}
-	return table, idx, slot, n, true
+	return table, idx, n, true
 }
 
-// parseSub 反解桶 key 尾缀 "#r{n}"/"#b{n}"（无尾缀 = 0 号子桶）。
-// 尾缀只由 keycodec 自身生成；形态不符 = key 非法（与其余 malformed 分支同纪律）。
-func parseSub(suffix, prefix string) (int, bool) {
-	if suffix == "" {
-		return 0, true
-	}
-	if !strings.HasPrefix(suffix, prefix) {
+// parseSub 反解 tag 内子桶号（`r{n}`/`l{n}`/`{encVal#b{n}}` 的数字段）。
+// 形态只由 keycodec 自身生成；不符 = key 非法（与既有 malformed 分支同纪律）。
+func parseSub(prefix, tagContent string) (int, bool) {
+	if !strings.HasPrefix(tagContent, prefix) {
 		return 0, false
 	}
-	n, err := strconv.Atoi(suffix[len(prefix):])
+	n, err := strconv.Atoi(tagContent[len(prefix):])
 	if err != nil || n < 0 {
 		return 0, false
 	}
 	return n, true
 }
 
-// ParseEqBucketKey 反解等值桶 key（`i:{table}:{idx}={value}:{stag}#b{n}`）：
+// ParseEqBucketKey 反解等值桶 key（`i:{table}:{idx}={encVal[#b{n}]}`）：
 // 遥测/Controller 从桶 key 还原定位信息用（桶 key 只由 keycodec 生成，
-// value 段经 EscapeValue 转义，不含结构分隔符）。
-func ParseEqBucketKey(key string) (table, idx, encVal string, slot uint16, sub int, ok bool) {
+// encVal 经 EscapeValue 转义，不含 `#b` 分隔符）。
+func ParseEqBucketKey(key string) (table, idx, encVal string, sub int, ok bool) {
 	if !strings.HasPrefix(key, "i:") {
-		return "", "", "", 0, 0, false
+		return "", "", "", 0, false
 	}
 	rest := key[2:]
 	colon := strings.IndexByte(rest, ':')
 	if colon < 0 {
-		return "", "", "", 0, 0, false
+		return "", "", "", 0, false
 	}
 	table = rest[:colon]
 	rest = rest[colon+1:]
 	eqPos := strings.IndexByte(rest, '=')
 	tagPos := strings.IndexByte(rest, '{')
-	if eqPos < 0 || tagPos < 0 || eqPos > tagPos {
-		return "", "", "", 0, 0, false
+	if eqPos < 0 || tagPos < 0 || eqPos != tagPos-1 {
+		return "", "", "", 0, false
 	}
 	idx = rest[:eqPos]
-	encVal = rest[eqPos+1 : tagPos-1] // tag 前一字是 ':' 分隔符（value 内 ':' 已被转义）
 	end := strings.IndexByte(rest, '}')
 	if end < 0 {
-		return "", "", "", 0, 0, false
+		return "", "", "", 0, false
 	}
-	tag := rest[tagPos : end+1]
-	slot = Slot(tag)
-	n, sok := parseSub(rest[end+1:], "#b")
-	if !sok {
-		return "", "", "", 0, 0, false
+	tag := rest[tagPos+1 : end]
+	if h := strings.Index(tag, "#b"); h >= 0 { // 子桶形态：tag = encVal#b{n}
+		n, sok := parseSub("", tag[h+2:])
+		if !sok {
+			return "", "", "", 0, false
+		}
+		return table, idx, tag[:h], n, true
 	}
-	return table, idx, encVal, slot, n, true
+	// encVal 经 EscapeValue 绝不产出 '#'——tag 中的 '#' 只能是 #b{n} 分隔符
+	if strings.Contains(tag, "#") {
+		return "", "", "", 0, false
+	}
+	return table, idx, tag, 0, true
 }

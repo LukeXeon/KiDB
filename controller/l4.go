@@ -53,31 +53,25 @@ func NewL4(cli kv.Client, reg *script.Registry) *L4Manager {
 	return &L4Manager{cli: cli, reg: reg, maxRep: 8, ttlMs: 60000, cold: map[string]int{}, repCache: map[string]repEnt{}}
 }
 
-// l4Field 注册表字段名（bmh:{table}:{idx} 内）：`r4:{encVal}:{slot}`——按桶粒度。
-func l4Field(encVal string, slot uint16) string {
-	return "r4:" + encVal + ":" + strconv.Itoa(int(slot))
+// l4Field 注册表字段名（bmh:{table}:{idx} 内）：`r4:{源桶key}`——按桶粒度
+// （v7.0：桶按值/索引寻址，源桶 key 即唯一身份；按值注册会把其他桶的读
+// 重定向到单桶副本上——行凭空消失，v6.x review 实证形态）。
+func l4Field(srcBucketKey string) string {
+	return "r4:" + srcBucketKey
 }
 
-// parseL4Field 反解注册表字段。
-func parseL4Field(f string) (encVal string, slot uint16, ok bool) {
+// parseL4Field 反解注册表字段 → 源桶 key。
+func parseL4Field(f string) (srcBucketKey string, ok bool) {
 	v, found := strings.CutPrefix(f, "r4:")
-	if !found {
-		return "", 0, false
+	if !found || v == "" {
+		return "", false
 	}
-	i := strings.LastIndexByte(v, ':')
-	if i <= 0 {
-		return "", 0, false
-	}
-	n, err := strconv.Atoi(v[i+1:])
-	if err != nil || n < 0 || n >= keycodec.NumSlots {
-		return "", 0, false
-	}
-	return v[:i], uint16(n), true
+	return v, true
 }
 
 // Activate 为热桶建 K 个副本（K=⌈热QPS/单节点安全QPS⌉ ≤ maxRep）。
-// srcBucketKey 必须含 stag；副本 key 由 keycodec.ReplicaKey 步进替换生成。
-func (m *L4Manager) Activate(ctx context.Context, table, idxID, encVal string, slot uint16, srcBucketKey string, k int) error {
+// srcBucketKey 为源桶 key；副本 key 由 keycodec.ReplicaKey 步进替换生成。
+func (m *L4Manager) Activate(ctx context.Context, table, idxID, srcBucketKey string, k int) error {
 	if k <= 0 {
 		return nil
 	}
@@ -87,8 +81,8 @@ func (m *L4Manager) Activate(ctx context.Context, table, idxID, encVal string, s
 	if err := m.Refresh(ctx, srcBucketKey, k); err != nil {
 		return err
 	}
-	// 注册：读路径据此切换到副本（bmh 注册表字段 r4:{encVal}:{slot} = K）
-	f := l4Field(encVal, slot)
+	// 注册：读路径据此切换到副本（bmh 注册表字段 r4:{源桶key} = K）
+	f := l4Field(srcBucketKey)
 	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), f)
 	if err != nil {
 		return err
@@ -148,7 +142,7 @@ func (m *L4Manager) Tick(ctx context.Context, store *meta.CatalogStore) error {
 				continue
 			}
 			for f, ks := range reg {
-				encVal, slot, ok := parseL4Field(f)
+				src, ok := parseL4Field(f)
 				if !ok {
 					continue
 				}
@@ -157,13 +151,12 @@ func (m *L4Manager) Tick(ctx context.Context, store *meta.CatalogStore) error {
 					continue
 				}
 				alive.Add(def.Name + "/" + idx.ID + "/" + f)
-				src := keycodec.EqBucketKeyEsc(def.Name, idx.ID, encVal, slot, 0)
 				// 冷度判定：st:{桶} 采样计数器缺失/无增量 = 冷
 				ops := m.sampledOps(ctx, src)
 				if ops == 0 {
 					m.cold[f]++
 					if m.cold[f] >= 3 {
-						if err := m.Deactivate(ctx, def.Name, idx.ID, encVal, slot, src); err == nil {
+						if err := m.Deactivate(ctx, def.Name, idx.ID, src); err == nil {
 							delete(m.cold, f)
 						}
 						continue
@@ -214,8 +207,8 @@ func (m *L4Manager) sampledOps(ctx context.Context, srcBucketKey string) int64 {
 }
 
 // Deactivate 回收副本（热度回落）：注销注册表 + UNLINK 全部副本。
-func (m *L4Manager) Deactivate(ctx context.Context, table, idxID, encVal string, slot uint16, srcBucketKey string) error {
-	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal, slot))
+func (m *L4Manager) Deactivate(ctx context.Context, table, idxID, srcBucketKey string) error {
+	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), l4Field(srcBucketKey))
 	if err != nil {
 		return err
 	}
@@ -228,11 +221,11 @@ func (m *L4Manager) Deactivate(ctx context.Context, table, idxID, encVal string,
 			return err
 		}
 	}
-	if _, err := m.cli.Do(ctx, "HDEL", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal, slot)); err != nil {
+	if _, err := m.cli.Do(ctx, "HDEL", keycodec.BucketMapHotKey(table, idxID), l4Field(srcBucketKey)); err != nil {
 		return err
 	}
 	m.repMu.Lock()
-	delete(m.repCache, table+"/"+idxID+"/"+l4Field(encVal, slot)) // 摘缓存同步摘除（Deactivate 语义即时生效）
+	delete(m.repCache, table+"/"+idxID+"/"+l4Field(srcBucketKey)) // 摘缓存同步摘除（Deactivate 语义即时生效）
 	m.repMu.Unlock()
 	if m.m != nil {
 		m.m.HotReplicas.Add(-float64(k))
@@ -241,12 +234,10 @@ func (m *L4Manager) Deactivate(ctx context.Context, table, idxID, encVal string,
 }
 
 // ReplicaFor 读路径入口：若**这个桶**有 L4 副本，返回一个随机副本 key 与 true。
-// 粒度 = 桶（值 × slot，注册字段 r4:{encVal}:{slot}）——按值注册会把其他 slot
-// 的读重定向到单 slot 副本上（行凭空消失，review 实证形态）。
+// 粒度 = 桶（注册字段 r4:{源桶key}，v7.0）。
 // 副本死（过期未续）由读侧同 pipeline EXISTS 判定回退源桶（exec 承担）。
-func (m *L4Manager) ReplicaFor(ctx context.Context, table, idxID, encVal, srcBucketKey string, randFn func(int) int) (string, bool) {
-	slot := keycodec.Slot(srcBucketKey)
-	fk := table + "/" + idxID + "/" + l4Field(encVal, slot)
+func (m *L4Manager) ReplicaFor(ctx context.Context, table, idxID, srcBucketKey string, randFn func(int) int) (string, bool) {
+	fk := table + "/" + idxID + "/" + l4Field(srcBucketKey)
 	// 1s 读缓存：陈旧窗口的误重定向由读侧 EXISTS 回退源桶兜住（正确性不依赖缓存新鲜度）
 	m.repMu.RLock()
 	if e, ok := m.repCache[fk]; ok && time.Since(e.at) < time.Second {
@@ -259,7 +250,7 @@ func (m *L4Manager) ReplicaFor(ctx context.Context, table, idxID, encVal, srcBuc
 	}
 	m.repMu.RUnlock()
 
-	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), l4Field(encVal, slot))
+	res, err := m.cli.Do(ctx, "HGET", keycodec.BucketMapHotKey(table, idxID), l4Field(srcBucketKey))
 	k := 0
 	if err == nil && res != nil {
 		k, _ = strconv.Atoi(fmt.Sprint(res))

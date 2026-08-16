@@ -107,17 +107,8 @@ func (lm *lexMerger) seed() error {
 	t := s.req.Table
 
 	lm.ways = lm.ways[:0]
-	slotLo, slotHi := 0, keycodec.NumSlots
-	if s.req.SlotHi > 0 {
-		slotHi = s.req.SlotHi
-	}
-	if s.req.SlotLo > 0 {
-		slotLo = s.req.SlotLo
-	}
-	for slot := slotLo; slot < slotHi; slot++ {
-		for _, b := range s.lexBucketsAt(uint16(slot)) {
-			lm.ways = append(lm.ways, mergeWay{key: keycodec.LexBucketKey(t.Name, s.req.Index.ID, uint16(slot), b)})
-		}
+	for _, b := range s.lexBuckets() {
+		lm.ways = append(lm.ways, mergeWay{key: keycodec.LexBucketKey(t.Name, s.req.Index.ID, b)})
 	}
 
 	cmds := make([]kv.Cmd, 0, len(lm.ways))
@@ -187,13 +178,13 @@ func (lm *lexMerger) pageCmd(key string, off, count int) kv.Cmd {
 // 承载副本分裂状态——与写路径 txguard 的 eqWriteSet(sh,"l",pk) 同一约定；
 // 当前控制器不触发副本分裂，读集合恒为 [0]，本函数是将来启用的挂点）。
 // 稀疏门控与等值一致：注册表无 "l" 热点标记时零额外读（docs/03 §3.1）。
-func (s *RowStream) lexBucketsAt(slot uint16) []int {
+func (s *RowStream) lexBuckets() []int {
 	if !s.bmHotLex || s.exec.bm == nil {
 		return []int{0}
 	}
-	sh, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID, slot)
+	d, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID)
 	if err != nil {
 		return []int{0}
 	}
-	return sh.ReadBucketsEq("l")
+	return d.ReadBucketsEq("l")
 }

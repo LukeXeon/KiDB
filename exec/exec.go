@@ -182,10 +182,6 @@ type Request struct {
 	// Covering：索引覆盖 投影∪谓词 全部列（translate 判定，docs/03 §3.5）——
 	// 跳过回表：member 解码覆盖列 + exp 登记册 ZSCORE 活性校验。
 	Covering bool
-
-	// SlotLo/SlotHi：FullScan 的 slot 区间限定（DDL 回填分批游标用；
-	// 0 值 = 全量 [0, 16384)）。
-	SlotLo, SlotHi int
 }
 
 // Executor 执行 Request，产出流式行。
@@ -204,7 +200,6 @@ type Executor struct {
 	fsMu          sync.Mutex
 	fsSem         chan struct{} // 全扫并发信号量（query_fullscan_rate_limit，docs/07 §7.4 限流通道）
 	batch         int
-	slotsPerRound int
 }
 
 // SetMetrics 接入指标。
@@ -268,9 +263,9 @@ type RowCache interface {
 func (e *Executor) SetRowCache(c RowCache) { e.rowCache = c }
 
 // L4Resolver 是热桶副本解析接口（controller.L4Manager 满足，docs/08 §8.4）：
-// 若值有 L4 副本，返回一个随机副本 key（异 slot）。
+// 若**这个桶**有 L4 副本，返回一个随机副本 key（异 slot；v7.0 注册粒度 = 源桶 key）。
 type L4Resolver interface {
-	ReplicaFor(ctx context.Context, table, idxID, encVal, srcBucketKey string, randFn func(int) int) (string, bool)
+	ReplicaFor(ctx context.Context, table, idxID, srcBucketKey string, randFn func(int) int) (string, bool)
 }
 
 // TelemetrySink 是遥测采样出口（telemetry.Recorder 满足，docs/08 §8.1）：
@@ -282,7 +277,7 @@ type TelemetrySink interface {
 // New 构造执行器（reg 供 pushdown_filter 服务端下推，docs/04 §4.2）。
 func New(cli kv.Client, reg *script.Registry) *Executor {
 	tn := tuning.Get()
-	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: tn.Exec.Batch, slotsPerRound: tn.Exec.SlotsPerRound,
+	return &Executor{cli: cli, reg: reg, clock: time.Now, batch: tn.Exec.Batch,
 		fsSem: make(chan struct{}, tn.Exec.FullscanConcurrency)}
 }
 
@@ -360,8 +355,9 @@ type RowStream struct {
 
 	fsSem chan struct{} // 全扫限流槽位（持有至 EOF/Close，docs/07 §7.4）
 
-	startedAt time.Time // 首个 Next 时间（query_duration_seconds 挂点）
-	fanout    int       // 本查询散取桶命令总数（query_scatter_fanout 挂点）
+	startedAt  time.Time // 首个 Next 时间（query_duration_seconds 挂点）
+	fanout     int       // 本查询散取桶命令总数（query_scatter_fanout 挂点）
+	scatterDone bool     // v7 散取桶集合已构建（一次性，docs/04 §4.3）
 }
 
 type bucketScan struct {
@@ -612,7 +608,8 @@ func (s *RowStream) fillPointGet() error {
 	return s.fetchRows(s.req.Pks)
 }
 
-// fillScatter 桶/登记册散取：slot 组 → 桶游标分页 → 回表 → 校验。
+// fillScatter 桶/登记册散取：桶集合（v7 按值/索引寻址，规模 = 值数×子桶数 /
+// 登记册分册数——16384 slot 组扇出消亡）→ 桶游标分页 → 回表 → 校验。
 // （RangeLookup 不走这里——全局有序归但见 topk.go；本路径服务 EqLookup/FullScan。）
 func (s *RowStream) fillScatter() error {
 	e := s.exec
@@ -628,23 +625,15 @@ func (s *RowStream) fillScatter() error {
 		if err := s.ctx.Err(); err != nil {
 			return err
 		}
-		// 本组桶游标耗尽 → 推进到下一 slot 组
+		// 桶集合一次构建（v7），游标耗尽即 EOF
 		if len(s.pending) == 0 {
-			slotHi := keycodec.NumSlots
-			if s.req.SlotHi > 0 {
-				slotHi = s.req.SlotHi
-			}
-			if s.nextSlot >= slotHi {
+			if s.scatterDone {
 				return io.EOF
 			}
-			if s.nextSlot == 0 && s.req.SlotLo > 0 {
-				s.nextSlot = s.req.SlotLo
-			}
-			from := s.nextSlot
-			s.pending = s.buildGroup(from, min(from+e.slotsPerRound, slotHi))
-			s.nextSlot = from + e.slotsPerRound
+			s.scatterDone = true
+			s.pending = s.buildBuckets()
 			if len(s.pending) == 0 {
-				continue
+				return io.EOF
 			}
 		}
 		// 一轮分页：每个未完成桶拉一页（L4 副本桶同 pipeline 附 EXISTS 活性判定）
@@ -713,50 +702,48 @@ func (s *RowStream) fillScatter() error {
 	}
 }
 
-// buildGroup 为 slot 组 [from,to) 生成桶游标集合。
-func (s *RowStream) buildGroup(from, to int) []bucketScan {
+// buildBuckets 生成桶游标集合（v7：按值/索引寻址——等值 = 每值 1+K 桶，
+// 全扫 = 1~n 册；分裂窗口读集合由 bm 文档给出）。
+func (s *RowStream) buildBuckets() []bucketScan {
 	var out []bucketScan
 	t := s.req.Table
-	for slot := from; slot < to; slot++ {
-		s16 := uint16(slot)
-		switch s.req.Kind {
-		case EqLookup:
-			for _, v := range s.req.Values {
-				for _, b := range s.eqBucketsAt(s16, v) {
-					bk := keycodec.EqBucketKey(t.Name, s.req.Index.ID, v, s16, b)
-					bs := bucketScan{key: bk, val: v}
-					// L4：热值副本替换源桶读（异 slot 摊开读 QPS，docs/08 §8.4）——
-					// 副本死由分页轮的 EXISTS 判定回退源桶（fallback 字段）。
-					if s.exec.l4 != nil && b == 0 {
-						if rep, ok := s.exec.l4.ReplicaFor(s.ctx, t.Name, s.req.Index.ID, keycodec.EscapeValue(v), bk, func(n int) int { return rand.Intn(n) }); ok {
-							bs.key, bs.fallback = rep, bk
-						}
+	switch s.req.Kind {
+	case EqLookup:
+		for _, v := range s.req.Values {
+			for _, b := range s.eqBuckets(v) {
+				bk := keycodec.EqBucketKey(t.Name, s.req.Index.ID, v, b)
+				bs := bucketScan{key: bk, val: v}
+				// L4：热桶副本替换源桶读（异 slot 摊开读 QPS，docs/08 §8.4）——
+				// 副本死由分页轮的 EXISTS 判定回退源桶（fallback 字段）。
+				if s.exec.l4 != nil {
+					if rep, ok := s.exec.l4.ReplicaFor(s.ctx, t.Name, s.req.Index.ID, bk, func(n int) int { return rand.Intn(n) }); ok {
+						bs.key, bs.fallback = rep, bk
 					}
-					if s.exec.telemetry != nil {
-						s.exec.telemetry.Sample(s.ctx, bk)
-					}
-					out = append(out, bs)
 				}
+				if s.exec.telemetry != nil {
+					s.exec.telemetry.Sample(s.ctx, bk)
+				}
+				out = append(out, bs)
 			}
-		case FullScan:
-			for shard := 0; shard < t.EffectiveExpShards(); shard++ {
-				out = append(out, bucketScan{key: keycodec.ExpKeyN(t.Name, s16, shard, t.EffectiveExpShards())})
-			}
+		}
+	case FullScan:
+		for shard := 0; shard < t.EffectiveExpShards(); shard++ {
+			out = append(out, bucketScan{key: keycodec.ExpKeyN(t.Name, shard, t.EffectiveExpShards())})
 		}
 	}
 	return out
 }
 
-// eqBucketsAt 该 slot 该值的读桶集合（分裂状态感知）。
-func (s *RowStream) eqBucketsAt(slot uint16, encVal string) []int {
+// eqBuckets 该值的读桶集合（分裂状态感知；v7 集中 bm 文档）。
+func (s *RowStream) eqBuckets(encVal string) []int {
 	if !s.bmHotEq || s.exec.bm == nil {
 		return []int{0}
 	}
-	sh, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID, slot)
+	d, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID)
 	if err != nil {
-		return []int{0} // 读不出按默认桶（写路径 CAS 保证不丢数据，读侧退化不多错）
+		return []int{0} // 读不出按默认桶（分裂排干收容保证不丢，读侧退化不多错——docs/08 §8.3）
 	}
-	return sh.ReadBucketsEq(keycodec.EscapeValue(encVal))
+	return d.ReadBucketsEq(keycodec.EscapeValue(encVal))
 }
 
 // pageCmd 生成一桶一页的命令（ZRANGE 偏移分页，带 LIMIT——有界纪律 docs/04 §4.1）。
@@ -870,9 +857,8 @@ func (s *RowStream) fetchCovered(items []candItem) error {
 
 	cmds := make([]kv.Cmd, 0, len(items))
 	for _, it := range items {
-		slot := keycodec.Slot(keycodec.RowKey(t.Name, it.pk))
 		cmds = append(cmds, kv.Cmd{Name: "ZSCORE", Args: []any{
-			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(it.pk, shards), shards), it.pk,
+			keycodec.ExpKeyN(t.Name, keycodec.ExpShardFor(it.pk, shards), shards), it.pk,
 		}})
 	}
 	results, err := s.exec.readPipeline(s.ctx, cmds)
@@ -1081,18 +1067,17 @@ func (s *RowStream) stripCovering(member string) string {
 	return member
 }
 
-// RowCount 精确行数（docs/04 §4.1：Σ ZCOUNT(exp, (now, +inf))，任意时刻精确）。
+// RowCount 精确行数（docs/04 §4.1：Σ ZCOUNT(exp, (now, +inf))，任意时刻精确——
+// v7.0 集中册：默认 1 个 ZCOUNT，细分后 = 分册数）。
 // now 取执行器时钟（SetClock 注入；生产 = SyncClock 服务端钟对齐）。
 func (e *Executor) RowCount(ctx context.Context, t *meta.TableDef) (uint64, error) {
 	nowUnixSec := e.clock().Unix()
 	var cmds []kv.Cmd
-	for slot := 0; slot < keycodec.NumSlots; slot++ {
-		for shard := 0; shard < t.EffectiveExpShards(); shard++ {
-			cmds = append(cmds, kv.Cmd{
-				Name: "ZCOUNT",
-				Args: []any{keycodec.ExpKeyN(t.Name, uint16(slot), shard, t.EffectiveExpShards()), "(" + strconv.FormatInt(nowUnixSec, 10), "+inf"},
-			})
-		}
+	for shard := 0; shard < t.EffectiveExpShards(); shard++ {
+		cmds = append(cmds, kv.Cmd{
+			Name: "ZCOUNT",
+			Args: []any{keycodec.ExpKeyN(t.Name, shard, t.EffectiveExpShards()), "(" + strconv.FormatInt(nowUnixSec, 10), "+inf"},
+		})
 	}
 	results, err := e.readPipeline(ctx, cmds)
 	if err != nil {

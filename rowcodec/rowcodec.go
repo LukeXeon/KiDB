@@ -222,25 +222,32 @@ func DecodeRowCols(t *meta.TableDef, pk string, raw map[string]string, cols []st
 	return row
 }
 
-// ==== 桶 member 编码（docs/03 §3.4/§3.5）====
-// 无覆盖列：member = 原始 pk（零序列化红利）。
-// 有覆盖列：member = msgp 数组 [pk, cover1, ...]（代码生成级格式，二进制安全——
-// 替代 v1 的 "|" 拼接，根除 pk/值含分隔符的歧义风险）。
+// ==== 桶 member 编码（docs/03 §3.4/§3.5，v7.0 版本戳）====
+// v7.0：member 携带行版本戳（两段写的并发交错安全与幂等重试依据，docs/05 §5.1）。
+// 无覆盖列：member = pk \x1f ver（pk 仍近零序列化；解析取末段 \x1f 后数字）。
+// 有覆盖列：member = msgp 数组 [pk, ver, cover1, ...]（代码生成级格式，二进制安全）。
 // 读取侧经索引定义得知是否有覆盖列（schema 感知，无格式猜测）。
 
-// LexMember 字典序副本 member：value + \x00 + pk（按值字典序再按 pk 唯一）。
-// txguard 写路径与 JobRunner 回填共用（编码单点）。
-func LexMember(value, pk string) string {
-	return value + "\x00" + pk
+// PlainMember 无覆盖列桶 member：`pk \x1f ver`。
+func PlainMember(pk string, ver uint64) string {
+	return pk + "\x1f" + strconv.FormatUint(ver, 10)
 }
 
-// EncodeMember 生成桶 member。
-func EncodeMember(pk string, covers []string) string {
+// LexMember 字典序副本 member：value + \x00 + pk + \x1f + ver
+// （字典序按值再按 pk 唯一；ver 在 pk 段后，同 (值,pk) 的版本残留自然相邻，
+// 读取侧按 pk 去重）。txguard 写路径与 JobRunner 回填共用（编码单点）。
+func LexMember(value, pk string, ver uint64) string {
+	return value + "\x00" + pk + "\x1f" + strconv.FormatUint(ver, 10)
+}
+
+// EncodeMember 生成桶 member（覆盖形态：msgp 数组 [pk, ver, cover1, ...]）。
+func EncodeMember(pk string, ver uint64, covers []string) string {
 	if len(covers) == 0 {
-		return pk
+		return PlainMember(pk, ver)
 	}
-	b := msgp.AppendArrayHeader(nil, uint32(1+len(covers)))
+	b := msgp.AppendArrayHeader(nil, uint32(2+len(covers)))
 	b = msgp.AppendString(b, pk)
+	b = msgp.AppendString(b, strconv.FormatUint(ver, 10))
 	for _, c := range covers {
 		b = msgp.AppendString(b, c)
 	}
@@ -248,10 +255,15 @@ func EncodeMember(pk string, covers []string) string {
 }
 
 // MemberPK 提取 member 中的 pk。hasCovering 来自索引定义（schema 感知）。
-// 严格全量解析（所有元素消费完毕才算 msgp 形态），任一失败回退原样——
-// 原始 pk 字节流恰好构成合法完整 msgp 数组的概率在工程上可忽略。
+// v7.0：无覆盖形态取末段 \x1f 前部（ver 为尾随十进制数字；解析失败按原样——
+// 原始 pk 字节流恰好构成合法完整 msgp 数组的概率在工程上可忽略）。
 func MemberPK(member string, hasCovering bool) string {
 	if !hasCovering {
+		if i := strings.LastIndex(member, "\x1f"); i > 0 {
+			if _, err := strconv.ParseUint(member[i+1:], 10, 64); err == nil {
+				return member[:i]
+			}
+		}
 		return member
 	}
 	sz, rest, err := msgp.ReadArrayHeaderBytes([]byte(member))
@@ -287,6 +299,15 @@ func MemberCovers(member string, hasCovering bool) []string {
 	}
 	var covers []string
 	for i := uint32(0); i < sz; i++ {
+		if i == 1 {
+			var skip string
+			skip, rest, err = msgp.ReadStringBytes(rest)
+			_ = skip
+			if err != nil {
+				return nil
+			}
+			continue
+		}
 		var v string
 		v, rest, err = msgp.ReadStringBytes(rest)
 		if err != nil {
@@ -300,4 +321,39 @@ func MemberCovers(member string, hasCovering bool) []string {
 		return nil
 	}
 	return covers
+}
+
+// MemberVer 提取 member 中的行版本戳（对账版本漂移方向，docs/12 §12.8）。
+// 解析失败返回 (0, false)（畸形 member 由调用方按漂移处理）。
+func MemberVer(member string, hasCovering bool) (uint64, bool) {
+	if !hasCovering {
+		i := strings.LastIndex(member, "\x1f")
+		if i <= 0 {
+			return 0, false
+		}
+		n, err := strconv.ParseUint(member[i+1:], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	sz, rest, err := msgp.ReadArrayHeaderBytes([]byte(member))
+	if err != nil || sz < 2 {
+		return 0, false
+	}
+	for i := uint32(0); i < 2; i++ {
+		var v string
+		v, rest, err = msgp.ReadStringBytes(rest)
+		if err != nil {
+			return 0, false
+		}
+		if i == 1 {
+			n, err := strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				return 0, false
+			}
+			return n, true
+		}
+	}
+	return 0, false
 }

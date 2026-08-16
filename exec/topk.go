@@ -160,24 +160,16 @@ func scoreEnc(ct meta.ColumnType, score float64) string {
 	return ""
 }
 
-// seed 种子轮：全部 slot 的覆盖桶端点各取 1 成员（WITHSCORES）。
+// seed 种子轮：覆盖子桶端点各取 1 成员（WITHSCORES）。
+// v7.0：路数 = bm 裁剪后的子桶数（默认 1 = 单桶直读，16384 路种子消亡）。
 func (om *orderedMerger) seed() error {
 	s := om.s
 	e := s.exec
 	t := s.req.Table
 
 	om.ways = om.ways[:0]
-	slotLo, slotHi := 0, keycodec.NumSlots
-	if s.req.SlotHi > 0 {
-		slotHi = s.req.SlotHi
-	}
-	if s.req.SlotLo > 0 {
-		slotLo = s.req.SlotLo
-	}
-	for slot := slotLo; slot < slotHi; slot++ {
-		for _, b := range s.rangeBucketsAtFor(uint16(slot), om.r) {
-			om.ways = append(om.ways, mergeWay{key: keycodec.RangeBucketKey(t.Name, s.req.Index.ID, uint16(slot), b)})
-		}
+	for _, b := range s.rangeBucketsFor(om.r) {
+		om.ways = append(om.ways, mergeWay{key: keycodec.RangeBucketKey(t.Name, s.req.Index.ID, b)})
 	}
 
 	cmds := make([]kv.Cmd, 0, len(om.ways))
@@ -268,13 +260,13 @@ func (om *orderedMerger) parseWithScores(res any) (float64, string, bool) {
 	return score, arr[0], true
 }
 
-// rangeBucketsAtFor 指定 slot 覆盖 [r.Lo,r.Hi] 的桶集合（rangeBucketsAt 的
-// 显式区间版——归并器按自身区间推进，与 RowStream.rangeIdx 解耦）。
-func (s *RowStream) rangeBucketsAtFor(slot uint16, r RangeBound) []int {
+// rangeBucketsFor 覆盖 [r.Lo,r.Hi] 的子桶集合（v7 集中 bm 文档；
+// 归并器按自身区间推进，与 RowStream.rangeIdx 解耦）。
+func (s *RowStream) rangeBucketsFor(r RangeBound) []int {
 	if !s.bmHotRange || s.exec.bm == nil {
 		return []int{0}
 	}
-	sh, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID, slot)
+	d, err := s.exec.bm.Load(s.ctx, s.req.Table.Name, s.req.Index.ID)
 	if err != nil {
 		return []int{0}
 	}
@@ -285,5 +277,5 @@ func (s *RowStream) rangeBucketsAtFor(slot uint16, r RangeBound) []int {
 	if r.HiOpen {
 		hi = math.Nextafter(hi, math.Inf(-1))
 	}
-	return sh.ReadBucketsRange(lo, hi)
+	return d.ReadBucketsRange(lo, hi)
 }

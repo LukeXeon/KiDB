@@ -1,6 +1,7 @@
-// Package txguard 是写入路径的编排层（docs/05）：
-// 预读旧行/旧回执 → 展开索引撤销/重建描述符 → 唯一预约（SET NX 两阶段）
-// → write_row.lua 单 slot 原子提交 → 释放被替换的旧预约。
+// Package txguard 是写入路径的编排层（docs/05，v7.0 两段写协议）：
+// 预读旧行/旧回执 → 展开撤/建清单（成员带版本戳）→ 唯一预约（SET NX PX 两阶段）
+// → 行本地 Lua（行/回执/异步日志单 slot 原子）→ 索引命令组 pipeline（异 slot，
+// 版本戳幂等——stale 重试安全，并发交错不漏（docs/05 §5.1 不变式））。
 // stale（版本冲突）整体重试 ≤3 次。
 package txguard
 
@@ -27,6 +28,10 @@ import (
 )
 
 // maxStaleRetries 由调用点读取 tuning.Get().Txguard.StaleRetries（docs/05 §5.5）。
+
+// uniqueResvTTL 唯一预约 PX（v7.0 触发四②：24h 内置——Sweeper 空窗期预约
+// 无人释放时由时间自愈兜底，docs/05 §5.3）。
+const uniqueResvTTL = 24 * time.Hour
 
 // Guard 编排单行写入。通过 kv.Client 下发命令，满足契约 R1~R7。
 type Guard struct {
@@ -63,17 +68,15 @@ type Result struct {
 	StaleRetries int
 }
 
-// indexOp 是单个索引的撤销/重建描述符（对应 Lua ARGV 协议）。
-type indexOp struct {
-	kind       byte // 'E' 等值 / 'R' 范围 / 'L' 字典序副本 / 'A' 异步日志
-	undoKey    string
-	undoMember string
-	redoKey    string
-	redoMember string
-	redoScore  float64
-	hasRedo    bool
-	bmKey      string // BucketMap 分片 key（CAS 校验；"")
-	bmVer      uint64 // 期望分片版本
+// 撤/建清单条目（v7.0 两段写）：
+//   - undoEntry.member 为精确旧 member（含旧版本戳，ZREM 幂等）；
+//   - redoEntry.member 为含**预期新版本戳**（oldVer+1）的完整 member——
+//     行 Lua 经 expectOld 校验后 HINCRBY 必得该版本（stale 则 Lua 整体未写，
+//     索引段同 pipeline 产物必为"多"，读取去重/回表过滤/对账清理兜底）。
+type undoEntry struct{ bucket, member string }
+type redoEntry struct {
+	bucket, member string
+	score          float64
 }
 
 // WriteRow 执行单行写入（INSERT/UPDATE/UPSERT 共用）。
@@ -90,13 +93,12 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 		}
 	}
 	rowkey := keycodec.RowKey(req.Table.Name, req.PK)
-	slot := keycodec.Slot(rowkey)
 
 	var acquired []string // 本事务占有的唯一预约 key（回滚/重试用）
 	var res Result
 	for attempt := 0; attempt < tuning.Get().Txguard.StaleRetries; attempt++ {
 		res.StaleRetries = attempt
-		stale, err := g.writeAttempt(ctx, req, rowkey, slot, &acquired, &res)
+		stale, err := g.writeAttempt(ctx, req, rowkey, &acquired, &res)
 		if err != nil {
 			g.rollbackReservations(ctx, acquired, rowkey)
 			return Result{}, err
@@ -105,7 +107,7 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 			g.hllSample(ctx, req) // 索引基数统计采样（docs/04 §4.6：统计可以近似）
 			return res, nil
 		}
-		// stale：行被并发改写或桶布局在动，整体重读重试。
+		// stale：行被并发改写，整体重读重试。
 		// bm 缓存可能持旧版本——先失效再重试（预约 key 我方已持有，重试幂等）。
 		if g.bm != nil {
 			g.bm.Invalidate()
@@ -118,14 +120,15 @@ func (g *Guard) WriteRow(ctx context.Context, req WriteReq) (Result, error) {
 	return Result{}, fmt.Errorf("%w: write %s after %d attempts", kidb.ErrStaleMetadata, rowkey, tuning.Get().Txguard.StaleRetries)
 }
 
-// writeAttempt 完成一轮"预读 → 展开 → 预约 → Lua 提交"；stale=true 表示版本冲突。
-func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, slot uint16,
+// writeAttempt 完成一轮"预读 → 展开 → 预约 → 行 Lua → 索引段"；stale=true 表示版本冲突。
+func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string,
 	acquired *[]string, res *Result) (stale bool, err error) {
 
 	t := req.Table
+	slot := keycodec.Slot(rowkey)
 	rcptkey := keycodec.ReceiptKey(t.Name, req.PK)
 
-	// 预读旧行；旧行空则预读回执（主键复活：撤销条目按回执展开，docs/05 §5.1 第 2 步）
+	// 预读旧行；旧行空则预读回执（主键复活：撤销条目按回执展开，docs/05 §5.1）
 	oldRow, err := g.hgetall(ctx, rowkey)
 	if err != nil {
 		return false, err
@@ -138,17 +141,20 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 		}
 	}
 
-	shards, err := g.loadShards(ctx, t, slot)
+	docs, err := g.loadDocs(ctx, t)
 	if err != nil {
 		return false, err
 	}
-	ops := buildIndexOps(t, slot, req.PK, oldRow, req.Fields, shards)
-	// 复活路径：把旧回执的索引条目并入撤销集
+
+	oldVer := oldVerOf(oldRow)
+	newVer := oldVer + 1
+	undos, redos, asyncs := buildIndexOps(t, slot, req.PK, oldRow, req.Fields, docs, oldVer, newVer)
+	// 复活路径：把旧回执的索引条目并入撤销集（回执内为精确 member，原样使用）
 	if len(oldRow) == 0 && len(oldRcpt) > 0 {
-		ops = mergeReceiptUndo(ops, oldRcpt)
+		undos = mergeReceiptUndo(undos, oldRcpt)
 	}
 
-	// 唯一预约（docs/05 §5.3：按值散列 SET NX，占有者活检查 + 自愈）
+	// 唯一预约（docs/05 §5.3：按值散列 SET NX PX + 占有者活检查 + 自愈）
 	var uniqEntries [][2]string // (indexID, reservationKey) 记入回执
 	now := g.clock()
 	for _, idx := range t.Indexes {
@@ -173,18 +179,7 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 		uniqEntries = append(uniqEntries, [2]string{idx.ID, rkey})
 	}
 
-	// 组装 KEYS / ARGV
-	bucketKeys, argvTail := assembleIndexArgs(ops)
-	keys := make([]string, 0, 4+len(bucketKeys))
-	keys = append(keys, rowkey)
-	keys = append(keys, bucketKeys...)
-	expShards := t.EffectiveExpShards()
-	keys = append(keys,
-		keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(req.PK, expShards), expShards),
-		rcptkey,
-	)
-
-	// 撤字段面（write_row v6）：旧有新无 = UPDATE 置 NULL——HSET 不覆盖即
+	// 撤字段面（write_row v6 起）：旧有新无 = UPDATE 置 NULL——HSET 不覆盖即
 	// 幽灵残留，展开为显式 HDEL 清单（_ver 是内部字段，永不撤销）。
 	var dropped []string
 	for f := range oldRow {
@@ -197,11 +192,11 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	}
 
 	// _ver 语义（docs/05 §5.6）：
-	//  - ARGV[5] 恒为本次预读观察到的 old_ver——Lua 内再读不符说明预读→提交间
-	//    有并发写入，stale 让网关以新旧行重展开整体重试（"按当前 old 重放合并"）；
+	//  - ARGV[4] 恒为本次预读观察到的 old_ver——Lua 内再读不符说明预读→提交间
+	//    有并发写入，stale 让网关以新旧行重展开整体重试；
 	//  - 调用方 ExpectedOldVer 非 nil 是 CAS 写语义：预读版本不符即 fail-fast，
 	//    不重试（重试不会改变调用方的过期预期）。
-	observed := int64(oldVerOf(oldRow))
+	observed := int64(oldVer)
 	if req.ExpectedOldVer != nil && *req.ExpectedOldVer != observed {
 		return false, fmt.Errorf("%w: %s",
 			kidb.ErrStaleMetadata, i18n.T("tx.ver_mismatch", rowkey, *req.ExpectedOldVer, observed))
@@ -212,13 +207,27 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	} else if req.TTL < 0 {
 		ttlms = 1 // 软删除：立即过期走清扫
 	}
+
+	// 行 Lua（单 slot 原子面：行/回执/异步日志）
 	tn := tuning.Get()
-	argv := []any{
-		"W", req.PK, strconv.FormatInt(ttlms, 10), strconv.FormatInt(now.Unix(), 10),
-		strconv.FormatInt(observed, 10), strconv.Itoa(len(ops)),
-		strconv.Itoa(tn.Txguard.AsyncLogCapacity), strconv.Itoa(tn.Sweeper.ReceiptGraceMs),
+	logKeys := make([]string, 0, len(asyncs))
+	for _, a := range asyncs {
+		logKeys = append(logKeys, a.logKey)
 	}
-	argv = append(argv, argvTail...)
+	keys := append([]string{rowkey, rcptkey}, logKeys...)
+	argv := []any{
+		"W", req.PK, strconv.FormatInt(ttlms, 10),
+		strconv.FormatInt(observed, 10),
+		strconv.Itoa(tn.Txguard.AsyncLogCapacity), strconv.Itoa(tn.Sweeper.ReceiptGraceMs),
+		strconv.Itoa(len(asyncs)),
+	}
+	for _, a := range asyncs {
+		argv = append(argv, logKeyIdx(a.logKey, logKeys), a.redoMember)
+	}
+	argv = append(argv, strconv.Itoa(len(redos)))
+	for _, r := range redos {
+		argv = append(argv, r.bucket, r.member)
+	}
 	argv = append(argv, strconv.Itoa(len(req.Fields)))
 	for f, v := range req.Fields {
 		argv = append(argv, f, v)
@@ -258,6 +267,30 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 		return false, fmt.Errorf("txguard: write_row unknown status %v", arr[0])
 	}
 
+	// 索引命令组（异 slot，版本戳精确 member；docs/05 §5.1）+ 登记册段
+	cmds := make([]kv.Cmd, 0, len(undos)+len(redos)+1)
+	for _, u := range undos {
+		cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{u.bucket, u.member}})
+	}
+	for _, r := range redos {
+		cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{r.bucket, r.score, r.member}})
+	}
+	expShards := t.EffectiveExpShards()
+	expKey := keycodec.ExpKeyN(t.Name, keycodec.ExpShardFor(req.PK, expShards), expShards)
+	switch {
+	case ttlms > 0:
+		cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{expKey, now.Unix() + ttlms/1000, req.PK}})
+	case ttlms == 0:
+		cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{expKey, "+inf", req.PK}})
+	case ttlms == -2 && len(oldRow) == 0:
+		cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{expKey, "+inf", req.PK}}) // 新行无可保 TTL，登记不过期
+	}
+	if _, err := g.cli.Pipeline(ctx, cmds); err != nil {
+		// 第二段失败 = 报错（Redis 命令失败语义，docs/05 §5.1）——行已提交，
+		// 客户端重试幂等收敛（ZADD/ZREM 对精确 member 幂等）；崩溃类窗口由对账兜底。
+		return false, err
+	}
+
 	// 提交成功：释放被替换值的旧唯一预约（异 slot DEL；失败残留由预约侧自愈兜底）
 	for _, idx := range t.Indexes {
 		if idx.Kind != meta.IndexUnique {
@@ -291,25 +324,32 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		if err != nil {
 			return false, err
 		}
-		shards, err := g.loadShards(ctx, t, slot)
+		if len(oldRow) == 0 {
+			return false, nil // 0 rows affected（预读空即不存在；复活竞态由 Lua 内复查覆盖不到——
+			// 预读→Lua 间新插入的行属新一轮写入，其索引成员由写入方负责，删除不带撤销是诚实声明的边界）
+		}
+		docs, err := g.loadDocs(ctx, t)
 		if err != nil {
 			return false, err
 		}
-		ops := buildIndexOps(t, slot, pk, oldRow, nil, shards)
-		bucketKeys, argvTail := assembleIndexArgs(ops)
-		keys := append([]string{rowkey}, bucketKeys...)
-		expShards := t.EffectiveExpShards()
-		keys = append(keys,
-			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(pk, expShards), expShards),
-			keycodec.ReceiptKey(t.Name, pk),
-		)
+		oldVer := oldVerOf(oldRow)
+		undos, _, asyncs := buildIndexOps(t, slot, pk, oldRow, nil, docs, oldVer, oldVer+1)
+
+		logKeys := make([]string, 0, len(asyncs))
+		for _, a := range asyncs {
+			logKeys = append(logKeys, a.logKey)
+		}
+		keys := append([]string{rowkey, keycodec.ReceiptKey(t.Name, pk)}, logKeys...)
 		tn := tuning.Get()
 		argv := []any{
-			"D", pk, "0", strconv.FormatInt(g.clock().Unix(), 10),
-			strconv.FormatUint(oldVerOf(oldRow), 10), strconv.Itoa(len(ops)),
+			"D", pk, "0",
+			strconv.FormatUint(oldVer, 10),
 			strconv.Itoa(tn.Txguard.AsyncLogCapacity), strconv.Itoa(tn.Sweeper.ReceiptGraceMs),
+			strconv.Itoa(len(asyncs)),
 		}
-		argv = append(argv, argvTail...)
+		for _, a := range asyncs {
+			argv = append(argv, logKeyIdx(a.logKey, logKeys), a.redoMember)
+		}
 
 		wr, _ := g.reg.Get("write_row")
 		out, err := g.cli.Eval(ctx, wr, keys, argv...)
@@ -323,25 +363,39 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 			}
 			continue
 		}
-		// 提交成功：释放该行的唯一预约（异 slot DEL）
-		if len(oldRow) > 0 {
-			for _, idx := range t.Indexes {
-				if idx.Kind != meta.IndexUnique {
-					continue
-				}
-				if v, ok := oldRow[idx.Columns[0]]; ok {
-					_ = g.releaseUnique(ctx, keycodec.UniqueKey(t.Name, idx.ID, v), rowkey)
-				}
-			}
-			return true, nil
+		existed := len(arr) > 1 && fmt.Sprint(arr[1]) == "1"
+		if !existed {
+			return false, nil
 		}
-		return false, nil
+
+		// 索引撤销段（精确旧 member）+ 登记册移除
+		cmds := make([]kv.Cmd, 0, len(undos)+1)
+		for _, u := range undos {
+			cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{u.bucket, u.member}})
+		}
+		expShards := t.EffectiveExpShards()
+		cmds = append(cmds, kv.Cmd{Name: "ZREM", Args: []any{
+			keycodec.ExpKeyN(t.Name, keycodec.ExpShardFor(pk, expShards), expShards), pk}})
+		if _, err := g.cli.Pipeline(ctx, cmds); err != nil {
+			return false, err
+		}
+
+		// 提交成功：释放该行的唯一预约（异 slot DEL）
+		for _, idx := range t.Indexes {
+			if idx.Kind != meta.IndexUnique {
+				continue
+			}
+			if v, ok := oldRow[idx.Columns[0]]; ok {
+				_ = g.releaseUnique(ctx, keycodec.UniqueKey(t.Name, idx.ID, v), rowkey)
+			}
+		}
+		return true, nil
 	}
 	return false, fmt.Errorf("%w: delete %s after %d attempts", kidb.ErrStaleMetadata, rowkey, tuning.Get().Txguard.StaleRetries)
 }
 
 // ReserveUniqueForBackfill 供 DDL 回填为存量行补建唯一预约（docs/06 §6.3）。
-// 与写路径同一预约纪律（SET NX + 占有者活检查 + 死占有者自愈）；
+// 与写路径同一预约纪律（SET NX PX + 占有者活检查 + 死占有者自愈）；
 // ok=false = 真实冲突（占有者活行存在）——调用方据此中止建索引作业。
 func (g *Guard) ReserveUniqueForBackfill(ctx context.Context, t *meta.TableDef, idxID, encVal, pk string) (bool, error) {
 	rkey := keycodec.UniqueKey(t.Name, idxID, encVal)
@@ -363,12 +417,12 @@ func (g *Guard) NextAutoID(ctx context.Context, table string) (uint64, error) {
 	return n, nil
 }
 
-// reserveUnique 执行唯一预约两阶段（docs/05 §5.3）：
-// SET NX → 失败则读占有者 → EXISTS 判活：活=false 返回；死=自愈重占。
+// reserveUnique 执行唯一预约两阶段（docs/05 §5.3，v7.0 触发四②带 PX 自愈）：
+// SET NX PX → 失败则读占有者 → EXISTS 判活：活=false 返回；死=自愈重占。
 // 占有者就是本行（重试场景）视为成功。
 func (g *Guard) reserveUnique(ctx context.Context, rkey, rowkey string, now time.Time) (bool, error) {
 	owner := rowkey + "|" + strconv.FormatInt(now.Unix(), 10)
-	res, err := g.cli.Do(ctx, "SET", rkey, owner, "NX")
+	res, err := g.cli.Do(ctx, "SET", rkey, owner, "NX", "PX", uniqueResvTTL.Milliseconds())
 	if err != nil {
 		return false, err
 	}
@@ -381,7 +435,7 @@ func (g *Guard) reserveUnique(ctx context.Context, rkey, rowkey string, now time
 		return false, err
 	}
 	if cur == nil {
-		return true, g.retryReserve(ctx, rkey, owner) // 刚好被释放
+		return true, g.retryReserve(ctx, rkey, owner) // 刚好被释放/到期
 	}
 	ownerRow := strings.SplitN(fmt.Sprint(cur), "|", 2)[0]
 	if ownerRow == rowkey {
@@ -402,7 +456,7 @@ func (g *Guard) reserveUnique(ctx context.Context, rkey, rowkey string, now time
 }
 
 func (g *Guard) retryReserve(ctx context.Context, rkey, owner string) error {
-	res, err := g.cli.Do(ctx, "SET", rkey, owner, "NX")
+	res, err := g.cli.Do(ctx, "SET", rkey, owner, "NX", "PX", uniqueResvTTL.Milliseconds())
 	if err != nil {
 		return err
 	}
@@ -436,162 +490,162 @@ func (g *Guard) rollbackReservations(ctx context.Context, keys []string, rowkey 
 	}
 }
 
-// loadShards 加载本次写入涉及的全部同步索引的 BucketMap 分片（行 slot 内聚）。
-func (g *Guard) loadShards(ctx context.Context, t *meta.TableDef, slot uint16) (map[string]*bucketmap.Shard, error) {
-	shards := map[string]*bucketmap.Shard{}
+// loadDocs 加载本次写入涉及的全部同步索引的 BucketMap 文档（v7.0 集中形态）。
+func (g *Guard) loadDocs(ctx context.Context, t *meta.TableDef) (map[string]*bucketmap.Doc, error) {
+	docs := map[string]*bucketmap.Doc{}
 	if g.bm == nil {
-		return shards, nil
+		return docs, nil
 	}
 	for _, idx := range t.Indexes {
 		if idx.Async {
 			continue
 		}
-		sh, err := g.bm.Load(ctx, t.Name, idx.ID, slot)
+		d, err := g.bm.Load(ctx, t.Name, idx.ID)
 		if err != nil {
 			return nil, err
 		}
-		shards[idx.ID] = sh
+		docs[idx.ID] = d
 	}
-	return shards, nil
+	return docs, nil
 }
 
-// buildIndexOps 按旧行/新字段展开索引撤销与重建（v3：BucketMap 分裂状态感知）。
-// 双写规则（docs/08 §8.3）：SPLITTING → 撤/建双方都写父桶+子桶；DRAINING → 仅子桶；
-// 撤销集合 = 当前可读桶集合（覆盖分裂窗口的一切可能位置，ZREM 幂等无副作用）。
-// 每个描述符携带 bm 分片 key + 期望版本——Lua 内 CAS 预检，版本漂移即 stale 重试。
-func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields map[string]string, shards map[string]*bucketmap.Shard) []indexOp {
-	var ops []indexOp
-	emit := func(kind byte, bm *bucketmap.Shard, idxID string,
-		undoKeys []string, undoMember string, redoKeys []string, redoMember string, redoScore float64) {
-		bmKey, bmVer := "", uint64(0)
-		if bm != nil {
-			bmKey = keycodec.BucketMapSlotKey(t.Name, idxID, slot)
-			bmVer = bm.Version
-		}
-		for _, uk := range undoKeys {
-			ops = append(ops, indexOp{kind: kind, undoKey: uk, undoMember: undoMember, bmKey: bmKey, bmVer: bmVer})
-		}
-		for _, rk := range redoKeys {
-			ops = append(ops, indexOp{kind: kind, redoKey: rk, redoMember: redoMember, redoScore: redoScore, hasRedo: true, bmKey: bmKey, bmVer: bmVer})
-		}
-	}
+// asyncDesc 异步日志描述符（行 Lua 面）。
+type asyncDesc struct {
+	logKey     string
+	redoMember string
+}
+
+// buildIndexOps 按旧行/新字段展开撤/建清单（v7.0：成员带版本戳；
+// 双写规则由 bucketmap.Doc 路由规则给出，docs/08 §8.3）。
+// oldVer/newVer 由调用方给定（newVer = oldVer+1——行 Lua expectOld 校验后的
+// HINCRBY 必得；redo member 即按预期新版本戳构造）。
+func buildIndexOps(t *meta.TableDef, slot uint16, pk string, oldRow, newFields map[string]string,
+	docs map[string]*bucketmap.Doc, oldVer, newVer uint64) (undos []undoEntry, redos []redoEntry, asyncs []asyncDesc) {
 
 	for _, idx := range t.Indexes {
 		col := idx.Columns[0]
 		oldVal, hadOld := oldRow[col]
 		newVal, hasNew := newFields[col]
-		sh := shards[idx.ID] // nil（无 bm 模式）或默认分片 → 单桶
+		d := docs[idx.ID] // nil（无 bm 模式）或默认文档 → 单桶
 
 		// 异步分支：值有变化才记日志（墓碑 = 新值空串）
 		if idx.Async {
 			if hadOld == hasNew && (!hadOld || oldVal == newVal) {
 				continue
 			}
-			ops = append(ops, indexOp{
-				kind:       'A',
-				redoKey:    keycodec.AsyncLogKey(t.Name, idx.ID, slot),
-				redoMember: pk + "\x1f" + escLogField(oldVal) + "\x1f" + escLogField(newVal), // \x1f 分隔 + 字段转义（值含分隔符安全）
-				hasRedo:    true,
+			asyncs = append(asyncs, asyncDesc{
+				logKey:     keycodec.AsyncLogKey(t.Name, idx.ID, slot),
+				redoMember: pk + "\x1f" + escLogField(oldVal) + "\x1f" + escLogField(newVal),
 			})
 			continue
 		}
 
 		switch idx.Kind {
 		case meta.IndexRange:
-			var undoKeys, redoKeys []string
 			if hadOld {
 				if oldScore, err := strconv.ParseFloat(oldVal, 64); err == nil {
-					for _, b := range rangeReadSet(sh, oldScore) {
-						undoKeys = append(undoKeys, keycodec.RangeBucketKey(t.Name, idx.ID, slot, b))
+					for _, b := range rangeReadSet(d, oldScore) {
+						undos = append(undos, undoEntry{
+							keycodec.RangeBucketKey(t.Name, idx.ID, b),
+							coveringMember(pk, oldVer, idx, oldRow),
+						})
 					}
 				}
 			}
-			var score float64
 			if hasNew {
-				if sc, err := strconv.ParseFloat(newVal, 64); err == nil {
-					score = sc
-					for _, b := range rangeWriteSet(sh, sc) {
-						redoKeys = append(redoKeys, keycodec.RangeBucketKey(t.Name, idx.ID, slot, b))
+				if score, err := strconv.ParseFloat(newVal, 64); err == nil {
+					for _, b := range rangeWriteSet(d, score) {
+						redos = append(redos, redoEntry{
+							keycodec.RangeBucketKey(t.Name, idx.ID, b),
+							coveringMember(pk, newVer, idx, newFields), score,
+						})
 					}
 				}
 			}
-			emit('R', sh, idx.ID, undoKeys, pk, redoKeys, coveringMember(pk, idx, newFields), score)
 
 		default: // IndexEq / IndexUnique
-			var undoKeys, redoKeys []string
 			if hadOld && (!hasNew || oldVal != newVal) {
-				for _, b := range eqReadSet(sh, keycodec.EscapeValue(oldVal)) {
-					undoKeys = append(undoKeys, keycodec.EqBucketKey(t.Name, idx.ID, oldVal, slot, b))
+				for _, b := range eqReadSet(d, keycodec.EscapeValue(oldVal)) {
+					undos = append(undos, undoEntry{
+						keycodec.EqBucketKey(t.Name, idx.ID, oldVal, b),
+						coveringMember(pk, oldVer, idx, oldRow),
+					})
 				}
 			}
 			if hasNew {
-				for _, b := range eqWriteSet(sh, keycodec.EscapeValue(newVal), pk) {
-					redoKeys = append(redoKeys, keycodec.EqBucketKey(t.Name, idx.ID, newVal, slot, b))
+				for _, b := range eqWriteSet(d, keycodec.EscapeValue(newVal), pk) {
+					redos = append(redos, redoEntry{
+						keycodec.EqBucketKey(t.Name, idx.ID, newVal, b),
+						coveringMember(pk, newVer, idx, newFields), 0,
+					})
 				}
 			}
-			emit('E', sh, idx.ID, undoKeys, pk, redoKeys, coveringMember(pk, idx, newFields), 0)
 
 			// 字典序副本随同等值索引分裂（"l" 条目，按 member 内 pk 同规则散列）
 			if idx.PrefixCopy {
-				var lUndo, lRedo []string
 				if hadOld && (!hasNew || oldVal != newVal) {
-					for _, b := range eqReadSet(sh, "l") {
-						lUndo = append(lUndo, keycodec.LexBucketKey(t.Name, idx.ID, slot, b))
+					for _, b := range eqReadSet(d, "l") {
+						undos = append(undos, undoEntry{
+							keycodec.LexBucketKey(t.Name, idx.ID, b),
+							rowcodec.LexMember(oldVal, pk, oldVer),
+						})
 					}
 				}
 				if hasNew {
-					for _, b := range eqWriteSet(sh, "l", pk) {
-						lRedo = append(lRedo, keycodec.LexBucketKey(t.Name, idx.ID, slot, b))
+					for _, b := range eqWriteSet(d, "l", pk) {
+						redos = append(redos, redoEntry{
+							keycodec.LexBucketKey(t.Name, idx.ID, b),
+							rowcodec.LexMember(newVal, pk, newVer), 0,
+						})
 					}
 				}
-				emit('L', sh, idx.ID, lUndo, lexMember(oldVal, pk), lRedo, lexMember(newVal, pk), 0)
 			}
 		}
 	}
-	return ops
+	return undos, redos, asyncs
 }
 
 // eqReadSet / eqWriteSet / rangeReadSet / rangeWriteSet 是 bucketmap 路由规则的
 // nil 安全包装（无 bm 时恒为默认单桶 [0]）。
-func eqReadSet(sh *bucketmap.Shard, encVal string) []int {
-	if sh == nil {
+func eqReadSet(d *bucketmap.Doc, encVal string) []int {
+	if d == nil {
 		return []int{0}
 	}
-	return sh.ReadBucketsEq(encVal)
+	return d.ReadBucketsEq(encVal)
 }
 
-func eqWriteSet(sh *bucketmap.Shard, encVal, pk string) []int {
-	if sh == nil {
+func eqWriteSet(d *bucketmap.Doc, encVal, pk string) []int {
+	if d == nil {
 		return []int{0}
 	}
-	return sh.WriteTargetsEq(encVal, pk)
+	return d.WriteTargetsEq(encVal, pk)
 }
 
-func rangeReadSet(sh *bucketmap.Shard, score float64) []int {
-	if sh == nil {
+func rangeReadSet(d *bucketmap.Doc, score float64) []int {
+	if d == nil {
 		return []int{0}
 	}
-	return sh.ReadBucketsRange(score, score)
+	return d.ReadBucketsRange(score, score)
 }
 
-func rangeWriteSet(sh *bucketmap.Shard, score float64) []int {
-	if sh == nil {
+func rangeWriteSet(d *bucketmap.Doc, score float64) []int {
+	if d == nil {
 		return []int{0}
 	}
-	return sh.WriteTargetsRange(score)
+	return d.WriteTargetsRange(score)
 }
 
-// coveringMember 桶 member 编码（docs/03 §3.5）：无覆盖列 = pk 原始字节；
-// 有覆盖列 = msgp 数组（rowcodec.EncodeMember，二进制安全）。
-func coveringMember(pk string, idx meta.IndexDef, fields map[string]string) string {
+// coveringMember 桶 member 编码（docs/03 §3.5，v7.0 版本戳）：
+// 无覆盖列 = pk\x1fver；有覆盖列 = msgp 数组 [pk, ver, ...]（rowcodec 单点）。
+func coveringMember(pk string, ver uint64, idx meta.IndexDef, fields map[string]string) string {
 	if len(idx.Covering) == 0 {
-		return pk
+		return rowcodec.PlainMember(pk, ver)
 	}
 	covers := make([]string, 0, len(idx.Covering))
 	for _, c := range idx.Covering {
 		covers = append(covers, fields[c])
 	}
-	return rowcodec.EncodeMember(pk, covers)
+	return rowcodec.EncodeMember(pk, ver, covers)
 }
 
 // escLogField 异步日志字段转义：url.QueryEscape（**可逆**——Indexer 解回原始值
@@ -600,19 +654,22 @@ func coveringMember(pk string, idx meta.IndexDef, fields map[string]string) stri
 // 建出与查询侧错位的桶 key，含空格/中文的值对异步索引永久不可见。
 func escLogField(v string) string { return url.QueryEscape(v) }
 
-// lexMember 字典序副本 member（编码单点在 rowcodec.LexMember——回填/写入同路）。
-func lexMember(value, pk string) string {
-	return rowcodec.LexMember(value, pk)
+// logKeyIdx 异步日志 key 在 KEYS[3..] 段的相对序号（1 起）。
+func logKeyIdx(key string, keys []string) string {
+	for i, k := range keys {
+		if k == key {
+			return strconv.Itoa(i + 1)
+		}
+	}
+	return "1"
 }
 
 // mergeReceiptUndo 主键复活：把旧回执中的索引条目并入撤销集
-// （回执字段 idx:<i> = bucketKey \x1f member，docs/07 §7.3）。
-func mergeReceiptUndo(ops []indexOp, rcpt map[string]string) []indexOp {
-	known := make(utils.Set[string], len(ops))
-	for _, d := range ops {
-		if d.undoKey != "" {
-			known.Add(d.undoKey + "\x1f" + d.undoMember)
-		}
+// （回执字段 idx:<i> = bucketKey \x1f member（含版本戳，原样精确），docs/07 §7.3）。
+func mergeReceiptUndo(undos []undoEntry, rcpt map[string]string) []undoEntry {
+	known := make(utils.Set[string], len(undos))
+	for _, u := range undos {
+		known.Add(u.bucket + "\x1f" + u.member)
 	}
 	for f, v := range rcpt {
 		if !strings.HasPrefix(f, "idx:") {
@@ -622,55 +679,22 @@ func mergeReceiptUndo(ops []indexOp, rcpt map[string]string) []indexOp {
 		if len(parts) != 2 || known.Has(v) {
 			continue
 		}
-		ops = append(ops, indexOp{undoKey: parts[0], undoMember: parts[1]})
+		undos = append(undos, undoEntry{parts[0], parts[1]})
 	}
-	return ops
+	return undos
 }
 
-// assembleIndexArgs 把描述符编译为去重桶段 + ARGV 尾段（6 字段/索引）。
-func assembleIndexArgs(ops []indexOp) (bucketKeys []string, argvTail []any) {
-	idxOf := map[string]int{}
-	ref := func(key string) int {
-		if key == "" {
-			return 0
-		}
-		if i, ok := idxOf[key]; ok {
-			return i
-		}
-		bucketKeys = append(bucketKeys, key)
-		idxOf[key] = len(bucketKeys)
-		return len(bucketKeys)
-	}
-	for _, d := range ops {
-		score := "0"
-		if d.hasRedo {
-			score = strconv.FormatFloat(d.redoScore, 'g', -1, 64)
-		}
-		kind := d.kind
-		if kind == 0 {
-			kind = 'E'
-		}
-		argvTail = append(argvTail,
-			string(kind),
-			strconv.Itoa(ref(d.undoKey)), d.undoMember,
-			strconv.Itoa(ref(d.redoKey)), d.redoMember, score,
-			strconv.Itoa(ref(d.bmKey)), strconv.FormatUint(d.bmVer, 10),
-		)
-	}
-	return bucketKeys, argvTail
+// oldVerOf 读行内 _ver（无 = 0）。
+func oldVerOf(row map[string]string) uint64 {
+	v, _ := strconv.ParseUint(row["_ver"], 10, 64)
+	return v
 }
 
+// hgetall 读行/回执全字段（契约 R4 前最小命令面）。
 func (g *Guard) hgetall(ctx context.Context, key string) (map[string]string, error) {
 	res, err := g.cli.Do(ctx, "HGETALL", key)
-	if err != nil || res == nil {
+	if err != nil {
 		return nil, err
 	}
 	return utils.StringMap(res)
-}
-
-func oldVerOf(oldRow map[string]string) uint64 {
-	if len(oldRow) == 0 {
-		return 0
-	}
-	return utils.ParseUint64(oldRow["_ver"])
 }

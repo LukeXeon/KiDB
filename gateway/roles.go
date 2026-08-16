@@ -131,7 +131,7 @@ func (s *Server) controllerRole(ctx context.Context) error {
 	}
 }
 
-// sweeperLoop 过期清扫：slot 区间分摊（锁隔离），逐区间驱动。
+// sweeperLoop 过期清扫：登记册（表×分片）锁分摊（v7.0 集中册，docs/07 §7.3），逐册驱动。
 func (s *Server) sweeperLoop(ctx context.Context) {
 	for {
 		select {
@@ -149,22 +149,18 @@ func (s *Server) sweeperLoop(ctx context.Context) {
 			if err != nil || def == nil {
 				continue
 			}
-			for start := 0; start < keycodec.NumSlots; start += sweepRange {
+			for shard := 0; shard < def.EffectiveExpShards(); shard++ {
 				if ctx.Err() != nil {
 					return
 				}
-				// 区间锁（docs/07 §7.3：宕机自动重分配由锁到期保证；
-				// 多副本竞争同区间时只有一个持有者干活，重复清扫幂等安全）
-				lockKey := keycodec.SweepLockKey(uint16(start), uint16(start+sweepRange-1))
+				// 册锁（docs/07 §7.3：宕机自动重分配由锁到期保证；
+				// 多副本竞争同册时只有一个持有者干活，重复清扫幂等安全）
+				lockKey := keycodec.SweepLockKey(def.Name, shard, def.EffectiveExpShards())
 				got, err := s.deps.Client.Do(ctx, "SET", lockKey, "sweeper", "PX", int64(2*sweepTick/time.Millisecond), "NX")
 				if err != nil || got == nil {
 					continue
 				}
-				for slot := start; slot < start+sweepRange; slot++ {
-					if _, err := s.roles.Sweeper.SweepSlot(ctx, def, uint16(slot)); err != nil {
-						break // 本区间出错（如节点宕机）→ 下区间继续，不堵全局
-					}
-				}
+				_, _ = s.roles.Sweeper.SweepShard(ctx, def, shard) // 本册出错 → 下册继续，不堵全局
 			}
 		}
 		_ = utils.SleepCtx(ctx, sweepTick) // 空闲降频由"一轮有产出则立即再来"后续精化

@@ -9,6 +9,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql"
 
 	"kidb"
+	"kidb/bucketmap"
 	"kidb/exec"
 	"kidb/i18n"
 	"kidb/keycodec"
@@ -321,10 +322,17 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 		return err
 	}
 	if idxCopy.Kind == meta.IndexRange {
-		for slot := 0; slot < keycodec.NumSlots; slot++ {
-			cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.RangeBucketKey(def.Name, idxCopy.ID, uint16(slot), 0)}})
+		// v7.0：范围/lex 桶为每索引子桶号序列（bm 文档 Next 为分配器上界）——
+		// 盲删 [0, Next) 覆盖全部分裂产物，一次性有界
+		bms := bucketmap.New(deps.Client, deps.Reg)
+		d, err := bms.Load(ctx, def.Name, idxCopy.ID)
+		if err != nil {
+			return err
+		}
+		for n := 0; n < d.Next; n++ {
+			cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.RangeBucketKey(def.Name, idxCopy.ID, n)}})
 			if idxCopy.PrefixCopy {
-				cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, uint16(slot), 0)}})
+				cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, n)}})
 			}
 			if len(cmds) >= 512 {
 				if err := flush(); err != nil {
@@ -346,7 +354,6 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 			}
 			return err
 		}
-		pk := pkOf(def, row)
 		ci := colIndexOf(def, idxCopy.Columns[0])
 		if ci < 0 || row[ci] == nil {
 			continue
@@ -355,10 +362,9 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 		if err != nil {
 			return err
 		}
-		slot := keycodec.Slot(keycodec.RowKey(def.Name, pk))
-		cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.EqBucketKey(def.Name, idxCopy.ID, enc, slot, 0)}})
+		cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.EqBucketKey(def.Name, idxCopy.ID, enc, 0)}})
 		if idxCopy.PrefixCopy {
-			cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, slot, 0)}})
+			cmds = append(cmds, kv.Cmd{Name: "UNLINK", Args: []any{keycodec.LexBucketKey(def.Name, idxCopy.ID, 0)}})
 		}
 		if len(cmds) >= 512 {
 			if err := flush(); err != nil {

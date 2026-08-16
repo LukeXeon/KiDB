@@ -60,10 +60,24 @@ func (m *Manager) Tick(ctx context.Context) error {
 func (m *Manager) review(ctx context.Context, bucketKey string) {
 	defer func() { _, _ = m.cli.Do(ctx, "HDEL", telemetry.CandKey, bucketKey) }()
 
-	table, idxID, encVal, slot, _, ok := keycodec.ParseEqBucketKey(bucketKey)
+	// covering 判定（member 解析/搬迁放置需要，schema 感知）；表/索引已删 = 桶僵死候选，摘除即返
+	coveringOf := func(table, idxID string) (bool, bool) {
+		def, err := m.store.Load(ctx, table)
+		if err != nil || def == nil {
+			return false, false
+		}
+		for i := range def.Indexes {
+			if def.Indexes[i].ID == idxID {
+				return len(def.Indexes[i].Covering) > 0, true
+			}
+		}
+		return false, false
+	}
+
+	table, idxID, encVal, _, ok := keycodec.ParseEqBucketKey(bucketKey)
 	if !ok {
-		// 范围桶候选（i:{t}:{idx}:{stag}#r{n}）
-		t2, i2, sl2, rangeSub, ok2 := keycodec.ParseRangeBucketKey(bucketKey)
+		// 范围桶候选（i:{t}:{idx}:{r{n}}）
+		t2, i2, rangeSub, ok2 := keycodec.ParseRangeBucketKey(bucketKey)
 		if !ok2 {
 			return
 		}
@@ -74,7 +88,11 @@ func (m *Manager) review(ctx context.Context, bucketKey string) {
 		if err != nil || n < m.SplitMembers {
 			return
 		}
-		_ = m.splitter.SplitRange(ctx, t2, i2, sl2, rangeSub) // 失败下轮再登记（遥测重采样）
+		covering, exists := coveringOf(t2, i2)
+		if !exists {
+			return
+		}
+		_ = m.splitter.SplitRange(ctx, t2, i2, rangeSub, covering) // 失败下轮再登记（遥测重采样）
 		return
 	}
 	n, err := telemetry.Confirm(ctx, m.cli, bucketKey)
@@ -84,12 +102,16 @@ func (m *Manager) review(ctx context.Context, bucketKey string) {
 	if err != nil {
 		return
 	}
+	covering, exists := coveringOf(table, idxID)
+	if !exists {
+		return
+	}
 	if n >= m.SplitMembers {
-		_ = m.splitter.SplitEq(ctx, table, idxID, encVal, slot)
+		_ = m.splitter.SplitEq(ctx, table, idxID, encVal, covering)
 		return
 	}
 	// L4：高热但未达分裂阈（读 QPS 型热点）建副本摊开读
 	if n >= m.L4Members {
-		_ = m.l4.Activate(ctx, table, idxID, encVal, slot, bucketKey, 2)
+		_ = m.l4.Activate(ctx, table, idxID, bucketKey, 2)
 	}
 }

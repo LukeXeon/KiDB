@@ -19,19 +19,23 @@ import (
 	"kidb/utils"
 )
 
-// reconcile.go：对账角色（docs/12 §12.8）——周期抽样比对"数据侧推导"与
+// reconcile.go：对账角色（docs/12 §12.8，v7.0）——周期抽样比对"数据侧推导"与
 // "索引实际内容"，漂移指标化。设计纪律：
 //
 //   - **正常 = 0**：任何漂移都是内核 bug 信号；本角色只观测（指标 + 告警日志），
-//     不自动修复（写路径自愈 + 读路径回表校验已是正确性机制，自动修复会掩盖 bug）；
+//     不自动修复——**v7.0 起两个显式例外**（均为"已提交内容的幂等重放"，不产生新事实）：
+//     ① member 版本漂移（member.ver ≠ 行._ver——两段写并发交错的脏残留）
+//     → 观测 + 自动清理（ZREM 精确旧 member，幂等）；
+//     ② 登记册缺失（桶成员无 exp 登记——主 pipeline 第三段崩溃窗口）
+//     → 观测 + 自动补登（ZADD exp，score 由行 PTTL 推导，幂等）；
 //   - 正向检查（活行 → 索引成员必须存在且 score 相符）：同步索引无合法窗口，
 //     缺失/错值即真漂移；
 //   - 反向检查（桶成员 → 行）：只在"行已死且回执已清（清扫完成）仍残留"时计数——
 //     TTL 清扫滞后窗口是合法暂态，不算漂移；
 //   - 异步索引与 Building 索引跳过（合法滞后/回填窗口，docs/12 §12.8 声明）。
 //
-// 采样面：每 tick 每表抽 slots_per_tick 个 slot，每 slot 取登记册首页
-// rows_per_slot 行（tuning.toml [controller] reconcile_*）。
+// 采样面（v7.0 集中册）：每 tick 每表抽 slots_per_tick 页，每页随机分册 +
+// 随机 offset 取 rows_per_slot 行（tuning.toml [controller] reconcile_*）。
 
 // Reconciler 对账器。随机源可注入（测试确定性）。
 type Reconciler struct {
@@ -56,29 +60,37 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	slotsPerTick := tuning.Get().Controller.ReconcileSlotsPerTick
+	pagesPerTick := tuning.Get().Controller.ReconcileSlotsPerTick
 	for _, name := range tables {
 		def, err := r.store.Load(ctx, name)
 		if err != nil || def == nil {
 			continue
 		}
-		for i := 0; i < slotsPerTick; i++ {
+		for i := 0; i < pagesPerTick; i++ {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if err := r.ReconcileSlot(ctx, def, uint16(r.rng.Intn(keycodec.NumSlots))); err != nil {
-				slog.Debug("kidb 对账 slot 失败（下轮再来）", "table", name, "err", err)
+			if err := r.ReconcilePage(ctx, def); err != nil {
+				slog.Debug("kidb 对账页失败（下轮再来）", "table", name, "err", err)
 			}
 		}
 	}
 	return nil
 }
 
-// ReconcileSlot 对账单 slot（导出供测试定点对账）。
+// liveRow 活行（含 _ver——版本戳 member 的期望构造源）。
+type liveRow struct {
+	pk     string
+	ver    uint64
+	fields map[string]string
+}
+
+// ReconcilePage 对账一页（导出供测试定点对账）。
 //
-// 流程：登记册取样 → 批量 HMGET 索引列 + 回执活性 → 正向成员/score 校验 →
-// 反向桶成员残留校验 → 唯一预约占有者活性校验。全部 pipeline 有界批。
-func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot uint16) error {
+// 流程：集中登记册随机分册随机页取样 → 批量 HGETALL + 回执活性 →
+// 正向成员/score 校验（版本戳精确 member）→ 反向桶成员校验（孤儿/版本漂移清理/
+// 登记册缺失补登）→ 唯一预约占有者活性校验。全部 pipeline 有界批。
+func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) error {
 	// 同步可见索引集合（异步/回填中跳过——合法滞后窗口）
 	var indexes []*meta.IndexDef
 	for i := range def.Indexes {
@@ -92,10 +104,11 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		return nil
 	}
 
-	// 1. 登记册取样（随机页——首页恒取最早到期批次，有系统偏倚：
-	// 无 TTL 行（+inf score）永远沉在尾部不被抽到。ZCARD + 随机 offset 修正）
+	// 1. 登记册取样（随机分册 + 随机页——首页恒取最早到期批次的偏倚已修正）
 	rowsPerSlot := tuning.Get().Controller.ReconcileRowsPerSlot
-	expKey := keycodec.ExpKeyN(def.Name, slot, 0, def.EffectiveExpShards())
+	shards := def.EffectiveExpShards()
+	shard := r.rng.Intn(shards)
+	expKey := keycodec.ExpKeyN(def.Name, shard, shards)
 	card, err := r.cli.Do(ctx, "ZCARD", expKey)
 	if err != nil {
 		return err
@@ -117,41 +130,37 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		return nil
 	}
 
-	// 2. 批量读行（HMGET 索引列）+ 回执存在性（死行分两态：回执在 = 清扫窗口
-	// 合法暂态；回执不在 = 已清扫——其桶成员仍存即残留）
+	// 2. 批量读行（HGETALL——_ver 与覆盖列是期望 member 的构造源）+ 回执存在性
 	var cmds []kv.Cmd
 	for _, pk := range pks {
-		args := []any{keycodec.RowKey(def.Name, pk)}
-		for _, idx := range indexes {
-			args = append(args, idx.Columns[0])
-		}
-		cmds = append(cmds, kv.Cmd{Name: "HMGET", Args: args})
-		cmds = append(cmds, kv.Cmd{Name: "EXISTS", Args: []any{keycodec.ReceiptKey(def.Name, pk)}})
+		cmds = append(cmds,
+			kv.Cmd{Name: "HGETALL", Args: []any{keycodec.RowKey(def.Name, pk)}},
+			kv.Cmd{Name: "EXISTS", Args: []any{keycodec.ReceiptKey(def.Name, pk)}})
 	}
 	results, err := r.cli.Pipeline(ctx, cmds)
 	if err != nil {
 		return err
 	}
 
-	type liveRow struct {
-		pk   string
-		vals []string // 与 indexes 对齐（编码形态；"" = NULL/列缺失）
-	}
 	var live []liveRow
 	deadSwept := utils.NewSet[string]() // 死且已清扫
 	for i, pk := range pks {
-		vals, allNil := hmgetStrings(results[2*i])
-		rowAlive := len(vals) > 0 && !allNil // HMGET 全 nil = 行不存在
-		if !rowAlive {
+		fields, _ := utils.StringMap(results[2*i])
+		if len(fields) == 0 { // 行不存在
 			if fmt.Sprint(results[2*i+1]) != "1" {
 				deadSwept.Add(pk)
 			}
 			continue
 		}
-		live = append(live, liveRow{pk: pk, vals: vals})
+		ver, _ := strconv.ParseUint(fields["_ver"], 10, 64)
+		live = append(live, liveRow{pk: pk, ver: ver, fields: fields})
+	}
+	liveVer := map[string]uint64{}
+	for _, row := range live {
+		liveVer[row.pk] = row.ver
 	}
 
-	// 3. 正向：活行的索引成员必须存在（同步索引无合法缺失窗口）。
+	// 3. 正向：活行的索引成员必须存在（同步索引无合法缺失窗口；版本戳精确 member）。
 	// 同 (pk,索引,值) 的检查跨桶展开（分裂窗口双读），任一桶命中即存在。
 	type fwdCheck struct {
 		pk, desc   string
@@ -161,25 +170,26 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 	var fcmds []kv.Cmd
 	var checks []fwdCheck
 	for _, row := range live {
-		for j, idx := range indexes {
-			encVal := row.vals[j]
+		for _, idx := range indexes {
+			encVal := row.fields[idx.Columns[0]]
 			if encVal == "" {
 				continue
 			}
-			sh, err := r.bm.Load(ctx, def.Name, idx.ID, slot)
+			d, err := r.bm.Load(ctx, def.Name, idx.ID)
 			if err != nil {
-				continue // bm 读失败不误报：本 slot 本轮跳过
+				continue // bm 读失败不误报：本索引本轮跳过
 			}
 			switch idx.Kind {
 			case meta.IndexEq, meta.IndexUnique:
-				for _, b := range sh.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
-					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, encVal, slot, b), row.pk}})
+				member := expectedMember(idx, row.pk, row.ver, row.fields)
+				for _, b := range d.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
+					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, encVal, b), member}})
 					checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID + "=" + encVal})
 				}
 				if idx.PrefixCopy {
-					member := rowcodec.LexMember(encVal, row.pk)
-					for _, b := range sh.ReadBucketsEq("l") { // "l" 伪条目承载副本分裂状态（写路径同一约定）
-						fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, b), member}})
+					lm := rowcodec.LexMember(encVal, row.pk, row.ver)
+					for _, b := range d.ReadBucketsEq("l") { // "l" 伪条目承载副本分裂状态（写路径同一约定）
+						fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, b), lm}})
 						checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID + "#lex=" + encVal})
 					}
 				}
@@ -189,8 +199,9 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 				if err != nil {
 					continue
 				}
-				for _, b := range sh.ReadBucketsRange(score, score) {
-					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, b), row.pk}})
+				member := expectedMember(idx, row.pk, row.ver, row.fields)
+				for _, b := range d.ReadBucketsRange(score, score) {
+					fcmds = append(fcmds, kv.Cmd{Name: "ZSCORE", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, b), member}})
 					checks = append(checks, fwdCheck{pk: row.pk, desc: idx.ID, wantScore: score, checkScore: true})
 				}
 			}
@@ -233,32 +244,39 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		}
 	}
 
-	// 4. 反向：等值/唯一桶成员 → 行状态（死且已清扫 = 残留泄漏）。
+	// 4. 反向：等值/唯一桶成员 → 行状态（死且已清扫 = 残留泄漏；
+	// 版本漂移 = 脏 member 自动清理（例外①）；登记册缺失 = 自动补登（例外②））。
 	// 范围桶反向由正向的 score 校验覆盖（桶级反查边际收益低，不重复扇出）。
 	var rcmds []kv.Cmd
-	var rchecks []struct{ covering bool }
+	var rchecks []struct {
+		bucket   string
+		covering bool
+	}
 	doneBucket := utils.NewSet[string]()
 	for _, row := range live {
-		for j, idx := range indexes {
+		for _, idx := range indexes {
 			if idx.Kind == meta.IndexRange {
 				continue
 			}
-			encVal := row.vals[j]
+			encVal := row.fields[idx.Columns[0]]
 			if encVal == "" {
 				continue
 			}
-			sh, err := r.bm.Load(ctx, def.Name, idx.ID, slot)
+			d, err := r.bm.Load(ctx, def.Name, idx.ID)
 			if err != nil {
 				continue
 			}
-			for _, b := range sh.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
-				bk := keycodec.EqBucketKey(def.Name, idx.ID, encVal, slot, b)
+			for _, b := range d.ReadBucketsEq(keycodec.EscapeValue(encVal)) {
+				bk := keycodec.EqBucketKey(def.Name, idx.ID, encVal, b)
 				if doneBucket.Has(bk) {
 					continue
 				}
 				doneBucket.Add(bk)
 				rcmds = append(rcmds, kv.Cmd{Name: "ZRANGE", Args: []any{bk, 0, 63}})
-				rchecks = append(rchecks, struct{ covering bool }{covering: len(idx.Covering) > 0})
+				rchecks = append(rchecks, struct {
+					bucket   string
+					covering bool
+				}{bucket: bk, covering: len(idx.Covering) > 0})
 			}
 		}
 	}
@@ -267,24 +285,36 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 		if err != nil {
 			return err
 		}
-		// 候选成员 pk（去重、排除活行）→ 直查行/回执活性：
-		// 行死且回执已清 = 残留泄漏（回执在 = 清扫窗口合法暂态）。
-		livePKs := utils.NewSet[string]()
-		for _, row := range live {
-			livePKs.Add(row.pk)
-		}
+		// 候选收集：孤儿方向（行死且回执清）/ 版本漂移方向（活行 ver 不符）/
+		// 登记册缺失方向（无 exp 登记）
 		cand := map[string]string{} // pk → bucket key（日志描述）
+		var driftClean []kv.Cmd   // 版本漂移清理（ZREM 精确脏 member，幂等）
+		expCheck := utils.NewSet[string]()
 		for i, cres := range rres {
 			for _, member := range utils.Strings(cres) {
 				pk := rowcodec.MemberPK(member, rchecks[i].covering)
-				if livePKs.Has(pk) || deadSwept.Has(pk) {
-					continue // 活行 / 已在取样面判定死且清扫
+				if deadSwept.Has(pk) {
+					if _, ok := cand[pk]; !ok {
+						cand[pk] = rchecks[i].bucket
+					}
+					continue
 				}
-				if _, ok := cand[pk]; !ok {
-					cand[pk] = pksDesc(rcmds[i])
+				rowVer, isLive := liveVer[pk]
+				mver, ok := rowcodec.MemberVer(member, rchecks[i].covering)
+				if isLive && ok && mver != rowVer {
+					// 例外①：member 版本漂移（两段写交错脏残留）→ 观测 + 幂等清理
+					r.drift("index_member_ver_stale", def.Name, rchecks[i].bucket, pk)
+					driftClean = append(driftClean, kv.Cmd{Name: "ZREM", Args: []any{rchecks[i].bucket, member}})
 				}
+				expCheck.Add(pk)
 			}
 		}
+		if len(driftClean) > 0 {
+			if _, err := r.cli.Pipeline(ctx, driftClean); err != nil {
+				return err
+			}
+		}
+		// 孤儿方向：直查行/回执活性（从未存在的 pk 无从判定）
 		var ocmds []kv.Cmd
 		var opks []string
 		for pk := range cand {
@@ -306,6 +336,53 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 				}
 			}
 		}
+		// 例外②：登记册缺失（桶成员无 exp 登记——主 pipeline 第三段崩溃窗口）
+		// → 观测 + 幂等补登（score 由行 PTTL 推导）
+		var ecmds []kv.Cmd
+		var epks []string
+		for pk := range expCheck {
+			ecmds = append(ecmds, kv.Cmd{Name: "ZSCORE", Args: []any{expKey, pk}})
+			epks = append(epks, pk)
+		}
+		if len(ecmds) > 0 {
+			eres, err := r.cli.Pipeline(ctx, ecmds)
+			if err != nil {
+				return err
+			}
+			var tcmds []kv.Cmd
+			var tpks []string
+			for i, er := range eres {
+				if er == nil {
+					tcmds = append(tcmds, kv.Cmd{Name: "PTTL", Args: []any{keycodec.RowKey(def.Name, epks[i])}})
+					tpks = append(tpks, epks[i])
+				}
+			}
+			if len(tcmds) > 0 {
+				tres, err := r.cli.Pipeline(ctx, tcmds)
+				if err != nil {
+					return err
+				}
+				now := time.Now().Unix()
+				var backfill []kv.Cmd
+				for i, tr := range tres {
+					pttl, _ := strconv.ParseInt(fmt.Sprint(tr), 10, 64)
+					if pttl == -2 { // 行已死（竞态窗口）——不补登，归孤儿/清扫面
+						continue
+					}
+					score := any("+inf")
+					if pttl > 0 {
+						score = now + pttl/1000
+					}
+					r.drift("exp_registry_missing", def.Name, expKey, tpks[i])
+					backfill = append(backfill, kv.Cmd{Name: "ZADD", Args: []any{expKey, score, tpks[i]}})
+				}
+				if len(backfill) > 0 {
+					if _, err := r.cli.Pipeline(ctx, backfill); err != nil {
+						return err
+					}
+				}
+			}
+		}
 	}
 
 	// 5. 唯一预约巡检（双向）：残留 = 预约在而占有行死；缺失 = 活行无预约
@@ -314,11 +391,15 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 	var ucmds []kv.Cmd
 	var ukeys []string
 	for _, row := range live {
-		for j, idx := range indexes {
-			if idx.Kind != meta.IndexUnique || row.vals[j] == "" {
+		for _, idx := range indexes {
+			if idx.Kind != meta.IndexUnique {
 				continue
 			}
-			uk := keycodec.UniqueKey(def.Name, idx.ID, row.vals[j])
+			encVal := row.fields[idx.Columns[0]]
+			if encVal == "" {
+				continue
+			}
+			uk := keycodec.UniqueKey(def.Name, idx.ID, encVal)
 			ucmds = append(ucmds, kv.Cmd{Name: "GET", Args: []any{uk}})
 			ukeys = append(ukeys, uk)
 		}
@@ -354,37 +435,22 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 	return nil
 }
 
-// drift 记录一次漂移（指标 + 告警；不自动修复——观测纪律）。
+// expectedMember 构造期望 member（版本戳精确，docs/05 §5.1）。
+func expectedMember(idx *meta.IndexDef, pk string, ver uint64, fields map[string]string) string {
+	if len(idx.Covering) == 0 {
+		return rowcodec.PlainMember(pk, ver)
+	}
+	covers := make([]string, 0, len(idx.Covering))
+	for _, c := range idx.Covering {
+		covers = append(covers, fields[c])
+	}
+	return rowcodec.EncodeMember(pk, ver, covers)
+}
+
+// drift 记录一次漂移（指标 + 告警；观测纪律，两个幂等例外见头注）。
 func (r *Reconciler) drift(kind, table, where, pk string) {
 	if r.m != nil {
 		r.m.ReconcileDrift.WithLabelValues(kind).Inc()
 	}
 	slog.Warn("kidb 对账漂移", "kind", kind, "table", table, "where", where, "pk", pk)
-}
-
-// hmgetStrings 归一 HMGET 回复（保留 NULL 语义：缺失字段 = ""，
-// 不是 "<nil>"——utils.Strings 的 fmt.Sprint(nil) 形态不适用此处）。
-func hmgetStrings(res any) (vals []string, allNil bool) {
-	arr := utils.AnySlice(res)
-	if len(arr) == 0 {
-		return nil, true
-	}
-	vals = make([]string, len(arr))
-	allNil = true
-	for i, e := range arr {
-		if e == nil {
-			continue
-		}
-		allNil = false
-		vals[i] = fmt.Sprint(e)
-	}
-	return vals, allNil
-}
-
-// pksDesc 调试描述（bucket key 原样透出）。
-func pksDesc(c kv.Cmd) string {
-	if len(c.Args) > 0 {
-		return fmt.Sprint(c.Args[0])
-	}
-	return c.Name
 }

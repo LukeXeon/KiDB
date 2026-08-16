@@ -21,6 +21,7 @@ import (
 	"kidb/script"
 	"kidb/tuning"
 	"kidb/txguard"
+	"kidb/utils"
 )
 
 // jobrunner.go：DDL 后台作业执行器（docs/06 §6.3）：
@@ -92,9 +93,17 @@ func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) er
 			return r.finish(ctx, def)
 		}
 		deadline := time.Now().Add(r.tickBudget)
-		for job.Cursor < keycodec.NumSlots {
-			hi := min(job.Cursor+r.slotsPerT, keycodec.NumSlots)
-			err := r.backfillSlots(ctx, def, idx, job.Cursor, hi)
+		shards := def.EffectiveExpShards()
+		// v7.0 游标语义：Cursor = shard×2^32 + 册内 offset（单册常态即 offset；
+		// offset 分页在回填期漂移无害——幂等 ZADD + 写路径覆盖，backfillShard 注）。
+		for {
+			shard := int(job.Cursor >> 32)
+			if shard >= shards {
+				return r.finish(ctx, def)
+			}
+			off := int(job.Cursor & 0xffffffff)
+			before := off
+			err := r.backfillShard(ctx, def, idx, shard, &off)
 			if errors.Is(err, errUniqueBackfillConflict) {
 				// 回填期预约冲突 = 查重后与并发写入交错产生了真实重复
 				// （MySQL 在线 DDL 同款收尾失败语义）——回滚索引定义，作业终止。
@@ -103,15 +112,18 @@ func (r *JobRunner) step(ctx context.Context, table string, job *meta.DDLJob) er
 			if err != nil {
 				return err
 			}
-			job.Cursor = hi
+			if off == before { // 本册扫完 → 下一册
+				job.Cursor = int(shard+1) << 32
+			} else {
+				job.Cursor = int(shard)<<32 | off
+			}
+			if err := r.store.SetJob(ctx, table, job); err != nil { // 游标落库（断点）
+				return err
+			}
 			if time.Now().After(deadline) {
-				break // 预算用尽，游标落库下轮续作
+				return nil // 预算用尽，下轮续作
 			}
 		}
-		if job.Cursor >= keycodec.NumSlots {
-			return r.finish(ctx, def)
-		}
-		return r.store.SetJob(ctx, table, job) // 游标落库（断点）
 	}
 	return nil
 }
@@ -173,16 +185,34 @@ func (r *JobRunner) finish(ctx context.Context, def *meta.TableDef) error {
 	return nil
 }
 
-// backfillSlots 回填 [lo,hi) slot 区间（幂等 ZADD；并发写入双写由
-// "索引先入 Catalog（Building）" 覆盖，docs/06 §6.3）。
-func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *meta.IndexDef, lo, hi int) error {
+// backfillShard 回填一个登记册分片（v7.0 集中册；offset 游标分页——
+// 幂等 ZADD + 写路径覆盖（索引先入 Catalog 带 Building）使 offset 漂移无害：
+// 回填期增删行全经两段写覆盖该索引，docs/06 §6.3）。
+func (r *JobRunner) backfillShard(ctx context.Context, def *meta.TableDef, idx *meta.IndexDef, shard int, cursor *int) error {
 	col := idx.Columns[0]
 	colDef, ok := def.Column(col)
 	if !ok {
 		return kidb.ErrContractViolation
 	}
-	s := r.exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, SlotLo: lo, SlotHi: hi})
-	defer func() { _ = s.Close() }() // 流收尾：错误无消费方，显式丢弃
+	batch := tuning.Get().Exec.Batch
+	expKey := keycodec.ExpKeyN(def.Name, shard, def.EffectiveExpShards())
+	res, err := r.cli.Do(ctx, "ZRANGE", expKey, *cursor, *cursor+batch-1)
+	if err != nil {
+		return err
+	}
+	pks := utils.Strings(res)
+	*cursor += len(pks)
+
+	// 取行原文（含 _ver——版本戳 member 的版本源，docs/05 §5.1）
+	var hcmds []kv.Cmd
+	for _, pk := range pks {
+		hcmds = append(hcmds, kv.Cmd{Name: "HGETALL", Args: []any{keycodec.RowKey(def.Name, pk)}})
+	}
+	rows, err := r.cli.Pipeline(ctx, hcmds)
+	if err != nil {
+		return err
+	}
+
 	var cmds []kv.Cmd
 	// 唯一索引回填建预约（review 实证缺失：不建预约 = 存量值对唯一约束不可见）。
 	// 先与 ZADD 同 pipeline SET NX；NX 失败的行经预约自愈复查，仍冲突 = 真实重复 → 中止作业。
@@ -210,24 +240,35 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		}
 		return nil
 	}
-	for {
-		row, err := s.Next()
-		if err != nil {
-			break
+	for i, pk := range pks {
+		fields, _ := utils.StringMap(rows[i])
+		if len(fields) == 0 {
+			continue // 死行（登记册暂态）
 		}
-		var pk string
+		ver, _ := strconv.ParseUint(fields["_ver"], 10, 64)
+		row := make([]any, len(def.Columns))
+		for j, c := range def.Columns {
+			if c.Name == def.PK {
+				row[j] = pk
+				continue
+			}
+			if raw, ok := fields[c.Name]; ok {
+				v, err := rowcodec.Decode(c.Type, raw)
+				if err != nil {
+					return err
+				}
+				row[j] = v
+			}
+		}
 		var ci int
 		coverIdx := make([]int, 0, len(idx.Covering))
-		for i, c := range def.Columns {
-			if c.Name == def.PK {
-				pk = sprintOf(row[i])
-			}
+		for j, c := range def.Columns {
 			if c.Name == col {
-				ci = i
+				ci = j
 			}
 			for _, cc := range idx.Covering {
 				if c.Name == cc {
-					coverIdx = append(coverIdx, i)
+					coverIdx = append(coverIdx, j)
 				}
 			}
 		}
@@ -251,8 +292,7 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 			}
 			covers = append(covers, cv)
 		}
-		member := rowcodec.EncodeMember(pk, covers)
-		slot := keycodec.Slot(keycodec.RowKey(def.Name, pk))
+		member := rowcodec.EncodeMember(pk, ver, covers)
 		rowsInFlight++
 		if idx.Kind == meta.IndexUnique {
 			resv = append(resv, uniqueResv{encVal: enc, pk: pk})
@@ -263,14 +303,14 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 			if err != nil {
 				return err
 			}
-			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, slot, 0), score, member}})
+			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.RangeBucketKey(def.Name, idx.ID, 0), score, member}})
 		default:
-			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, slot, 0), 0, member}})
+			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.EqBucketKey(def.Name, idx.ID, enc, 0), 0, member}})
 		}
 		// 字典序副本随等值索引回填（docs/04 §4.5 前缀搜索的数据面；
 		// 与 txguard 写路径同一编码——rowcodec.LexMember 单点）
 		if idx.PrefixCopy && idx.Kind != meta.IndexRange {
-			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, slot, 0), 0, rowcodec.LexMember(enc, pk)}})
+			cmds = append(cmds, kv.Cmd{Name: "ZADD", Args: []any{keycodec.LexBucketKey(def.Name, idx.ID, 0), 0, rowcodec.LexMember(enc, pk, ver)}})
 		}
 		// 基数统计采样（docs/04 §4.6：与增量写入同一按值采样规则）
 		if txguard.HLLSampledValue(idx.ID, enc) {

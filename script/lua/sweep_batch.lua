@@ -1,51 +1,35 @@
 -- @name sweep_batch
--- @version 2
--- @keys_desc KEYS[1]=exp(router); KEYS[2..]=per-entry: rcpt_key, bucket_keys...（v2：cnt 计数器移除）
+-- @version 3
+-- @keys_desc KEYS[1..N]=row_key(router); KEYS[N+1..2N]=rcpt_key
 -- @idempotent true
 --
--- Sweeper 单 slot 清扫批（docs/07 §7.3）。
--- 关键不变式（docs/05 写入路径跨脚本约定）：清扫前必须复查 exp 中 pk 的 score——
--- score > now 说明行已复活（写路径覆盖了登记项），跳过，否则会把活行的索引误清、
--- 把新回执误删。
+-- Sweeper 行 slot 清扫批（docs/07 §7.3，v7.0 收窄形态）。
+-- v7.0：索引桶/登记册移出（异 slot，按值/索引寻址）——本脚本只承担行 slot 原子面：
+-- 活性复查 + 回执删除。桶/登记册清理由调用方在本脚本确认死亡后于客户端段完成
+-- （版本戳精确 member，交错安全）。
+--
+-- 活性复查（v7 形态）：行 PTTL > 0 或 -1 = 行存活（复活/时钟偏斜）→ 跳过且
+-- **不动回执**（活行的回执由写入方维护）；PTTL == -2（行物理不存在）→ 删回执。
+-- 回执 DEL 与复查必须同脚本原子——非原子会在"复查后复活"窗口误删活行新回执。
 --
 -- ARGV 协议：
---   [1] now_sec
---   [2] N = 条目数
---   每条目：[pk, rcpt_key_idx, bucket_count, (bucket_key_idx, member) × bucket_count]
---   key_idx 是相对 KEYS[3..] 段的起 1 序号。
--- 返回：实际清扫条数。
+--   [1] N = 条目数
+--   每条目：[pk, rowkey_idx, rcptkey_idx]（idx 为相对各自段的起 1 序号）
+-- 返回：实际清扫（确认死亡并删回执）的 pk 列表。
 
-local expkey = KEYS[1]
-local now = tonumber(ARGV[1])
-local N   = tonumber(ARGV[2])
+local N = tonumber(ARGV[1])
 
-local p = 3
-local swept = 0
+local p = 2
+local cleaned = {}
 for e = 1, N do
-  local pk        = ARGV[p]
-  local rcptIdx   = tonumber(ARGV[p+1])
-  local nbuck     = tonumber(ARGV[p+2])
+  local pk       = ARGV[p]
+  local rowIdx   = tonumber(ARGV[p+1])
+  local rcptIdx  = tonumber(ARGV[p+2])
   p = p + 3
-  -- 复查：登记项 score（复活拦截 + 重复清扫幂等）
-  local score = redis.call('ZSCORE', expkey, pk)
-  local alive = false
-  if score then
-    if tonumber(score) > now then alive = true end -- 复活：score 在未来
-  else
-    alive = true -- 已被清扫/从未登记 → 幂等跳过
-  end
-  if alive then
-    p = p + nbuck * 2
-  else
-    for i = 1, nbuck do
-      local bIdx   = tonumber(ARGV[p])
-      local member = ARGV[p+1]
-      p = p + 2
-      redis.call('ZREM', KEYS[1 + bIdx], member)
-    end
-    redis.call('DEL', KEYS[1 + rcptIdx])
-    redis.call('ZREM', expkey, pk)
-    swept = swept + 1
+  local pttl = redis.call('PTTL', KEYS[rowIdx])
+  if pttl == -2 then -- 行物理不存在 → 回执可清
+    redis.call('DEL', KEYS[N + rcptIdx])
+    cleaned[#cleaned + 1] = pk
   end
 end
-return swept
+return cleaned

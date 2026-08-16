@@ -48,64 +48,60 @@ func (r *JobRunner) tickDropJobs(ctx context.Context) error {
 	return nil
 }
 
-// stepDrop 推进一个作业批次：游标起 slotsPerT 个 slot，每 slot 清扫+删行。
+// stepDrop 推进一个作业批次：每步处理一个登记册分片（v7.0 集中册——
+// 游标 = 分片序号，默认 1 册即一步完成主体清理）。
 func (r *JobRunner) stepDrop(ctx context.Context, job *meta.DropJob) error {
 	def := job.Def
 	sw := sweeper.New(r.cli, r.reg)
 	batch := tuning.Get().Exec.Batch
+	shards := def.EffectiveExpShards()
 
-	hi := job.Cursor + r.slotsPerT
-	if hi > keycodec.NumSlots {
-		hi = keycodec.NumSlots
-	}
-	for slot := job.Cursor; slot < hi; slot++ {
+	for shard := job.Cursor; shard < shards; shard++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		// 1. 过期残留清扫（孤儿成员/回执/唯一预约释放）
-		if _, err := sw.SweepSlot(ctx, def, uint16(slot)); err != nil {
-			return fmt.Errorf("dropjob %s slot %d sweep: %w", job.Table, slot, err)
+		if _, err := sw.SweepShard(ctx, def, shard); err != nil {
+			return fmt.Errorf("dropjob %s shard %d sweep: %w", job.Table, shard, err)
 		}
 		// 2. 登记册分页清空（恒读首页：处理即移除，终止由构造保证）：
 		// 活行 DeleteRow（写路径全清：行/索引/登记册/回执/预约）；
 		// 死行 DeleteRow 是 no-op（write_row D 分支不撤 exp）——
 		// 收集后立即强制清扫出登记册（SweepPksForced：按回执清桶成员 +
 		// 预约释放），否则分页循环在死行上空转（实现期实证死锁形态）。
-		for shard := 0; shard < def.EffectiveExpShards(); shard++ {
-			expKey := keycodec.ExpKeyN(def.Name, uint16(slot), shard, def.EffectiveExpShards())
-			for {
-				res, err := r.cli.Do(ctx, "ZRANGE", expKey, 0, batch-1)
+		expKey := keycodec.ExpKeyN(def.Name, shard, shards)
+		for {
+			res, err := r.cli.Do(ctx, "ZRANGE", expKey, 0, batch-1)
+			if err != nil {
+				return err
+			}
+			pks := utils.Strings(res)
+			if len(pks) == 0 {
+				break
+			}
+			var dead []string
+			for _, pk := range pks {
+				if err := r.bfLimit.Wait(ctx); err != nil {
+					return err
+				}
+				deleted, err := r.guard.DeleteRow(ctx, def, pk)
 				if err != nil {
 					return err
 				}
-				pks := utils.Strings(res)
-				if len(pks) == 0 {
-					break
-				}
-				var dead []string
-				for _, pk := range pks {
-					if err := r.bfLimit.Wait(ctx); err != nil {
-						return err
-					}
-					deleted, err := r.guard.DeleteRow(ctx, def, pk)
-					if err != nil {
-						return err
-					}
-					if !deleted {
-						dead = append(dead, pk)
-					}
-				}
-				if _, err := sw.SweepPksForced(ctx, def, uint16(slot), shard, dead); err != nil {
-					return err
+				if !deleted {
+					dead = append(dead, pk)
 				}
 			}
+			if _, err := sw.SweepPksForced(ctx, def, shard, dead); err != nil {
+				return err
+			}
 		}
-		job.Cursor = slot + 1
+		job.Cursor = shard + 1
+		if err := r.store.SetDropJob(ctx, job); err != nil { // 游标落库（断点）
+			return err
+		}
 	}
-	if err := r.store.SetDropJob(ctx, job); err != nil { // 游标落库（断点）
-		return err
-	}
-	if job.Cursor >= keycodec.NumSlots {
+	if job.Cursor >= shards {
 		return r.finishDrop(ctx, job)
 	}
 	return nil
@@ -131,16 +127,22 @@ func (r *JobRunner) finishDrop(ctx context.Context, job *meta.DropJob) error {
 		return nil
 	}
 
-	// exp 登记册（应为空，防御性 UNLINK）+ bm 分片（稀疏，盲删有界一次性）
-	for slot := 0; slot < keycodec.NumSlots; slot++ {
-		if err := push("UNLINK", keycodec.ExpKeyN(def.Name, uint16(slot), 0, def.EffectiveExpShards())); err != nil {
+	// exp 登记册（应为空，防御性 UNLINK）+ bm 文档（每索引单 key）+ 异步日志
+	// （保持行 slot 形态，16384 盲删一次性有界）
+	for shard := 0; shard < def.EffectiveExpShards(); shard++ {
+		if err := push("UNLINK", keycodec.ExpShardKey(def.Name, shard)); err != nil {
 			return err
 		}
+	}
+	for i := range def.Indexes {
+		idx := &def.Indexes[i]
+		if err := push("UNLINK", keycodec.BucketMapKey(def.Name, idx.ID)); err != nil {
+			return err
+		}
+	}
+	for slot := 0; slot < keycodec.NumSlots; slot++ {
 		for i := range def.Indexes {
 			idx := &def.Indexes[i]
-			if err := push("UNLINK", keycodec.BucketMapSlotKey(def.Name, idx.ID, uint16(slot))); err != nil {
-				return err
-			}
 			if idx.Async {
 				if err := push("UNLINK", keycodec.AsyncLogKey(def.Name, idx.ID, uint16(slot))); err != nil {
 					return err

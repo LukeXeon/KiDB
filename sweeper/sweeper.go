@@ -1,13 +1,13 @@
-// Package sweeper 是分布式过期清扫（docs/07 §7.3）：
-// 到期发现（exp 登记册 ZRANGEBYSCORE）→ 回执取撤销信息 → 唯一预约释放（异 slot）
-// → sweep_batch.lua 单 slot 原子清扫（含复活复查）。
+// Package sweeper 是分布式过期清扫（docs/07 §7.3，v7.0 集中登记册形态）：
+// 到期发现（exp 集中册 ZRANGEBYSCORE）→ 回执取撤销信息 → 行 slot 分组
+// sweep_batch.lua 活性复查+删回执 → 客户端段（异 slot）：桶/登记册/预约清理。
+// 版本戳精确 member 使"复查后复活"交错安全（新 member 不受旧撤销影响）。
 // 正确性不依赖 Sweeper 在线：全挂只会变慢，不会出错行（docs/01 §1.7）。
 package sweeper
 
 import (
 	"context"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +26,8 @@ type Sweeper struct {
 	m          *metrics.Metrics // 指标（nil = no-op）
 	cli        kv.Client
 	reg        *script.Registry
-	batch      int              // 每 tick 每 slot 到期批大小（docs/10 sweeper_batch）
-	maxBatches int              // 每 tick 每 slot 批数上限（sweeper_max_batches_per_tick）
+	batch      int              // 每 tick 每册到期批大小（docs/10 sweeper_batch）
+	maxBatches int              // 每 tick 每册批数上限（sweeper_max_batches_per_tick）
 	clock      func() time.Time // nil = 服务端 TIME/本地回退
 }
 
@@ -42,32 +42,29 @@ func (s *Sweeper) SetClock(c func() time.Time) { s.clock = c }
 // SetLimits 覆盖批参数（配置热更新挂点）。
 func (s *Sweeper) SetLimits(batch, maxBatches int) { s.batch, s.maxBatches = batch, maxBatches }
 
-// SweepSlot 清扫指定表指定 slot 一轮（含分片登记册），返回清扫行数。
-// 供生产循环与测试直接驱动。
-func (s *Sweeper) SweepSlot(ctx context.Context, t *meta.TableDef, slot uint16) (int, error) {
+// SweepShard 清扫指定表指定登记册分片一轮，返回清扫行数。供生产循环与测试直接驱动。
+func (s *Sweeper) SweepShard(ctx context.Context, t *meta.TableDef, shard int) (int, error) {
 	total := 0
-	for shard := 0; shard < t.EffectiveExpShards(); shard++ {
-		for b := 0; b < s.maxBatches; b++ {
-			n, err := s.sweepBatch(ctx, t, slot, shard)
-			if err != nil {
-				return total, err
-			}
-			total += n
-			if n < s.batch { // 不足一批 = 该分片已清完
-				break
-			}
+	for b := 0; b < s.maxBatches; b++ {
+		n, err := s.sweepBatch(ctx, t, shard)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < s.batch { // 不足一批 = 该分片已清完
+			break
 		}
 	}
 	return total, nil
 }
 
 // sweepBatch 清扫一批到期行。
-func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16, shard int) (int, error) {
+func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, shard int) (int, error) {
 	now, err := s.nowUnix(ctx)
 	if err != nil {
 		return 0, err
 	}
-	expKey := keycodec.ExpKeyN(t.Name, slot, shard, t.EffectiveExpShards())
+	expKey := keycodec.ExpKeyN(t.Name, shard, t.EffectiveExpShards())
 
 	// 1. 到期 pk 批（有界）
 	res, err := s.cli.Do(ctx, "ZRANGEBYSCORE", expKey, "-inf", "("+strconv.FormatInt(now, 10), "LIMIT", 0, s.batch)
@@ -78,25 +75,22 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 	if len(pks) == 0 {
 		return 0, nil
 	}
-	return s.sweepPks(ctx, t, slot, shard, pks, now)
+	return s.sweepPks(ctx, t, pks)
 }
 
-// SweepPksForced 强制清扫指定 pk 集（now=+∞，score 复查必过）——
-// DROP 清理车道专用：偏斜窗口死行（行已物理过期但登记册 score 在未来——
-// Redis TTL 钟与内核钟偏斜，docs/11 §11.1）的桶成员/回执/预约释放。
-// 生产清扫路径不走这里（score 复查是复活拦截的关键不变式）。
-func (s *Sweeper) SweepPksForced(ctx context.Context, t *meta.TableDef, slot uint16, shard int, pks []string) (int, error) {
+// SweepPksForced 强制清扫指定 pk 集（跳过活性复查——DROP 清理车道专用：
+// 表已删除，行/回执/桶/登记册全部清掉；偏斜窗口死行一并覆盖，docs/06 §6.3）。
+// 生产清扫路径不走这里（活性复查是复活拦截的关键不变式）。
+func (s *Sweeper) SweepPksForced(ctx context.Context, t *meta.TableDef, shard int, pks []string) (int, error) {
 	if len(pks) == 0 {
 		return 0, nil
 	}
-	return s.sweepPks(ctx, t, slot, shard, pks, math.MaxInt64)
+	return s.sweepPks(ctx, t, pks)
 }
 
-// sweepPks 清扫一批 pk（回执驱动的成员/回执/登记册清理 + 预约释放）。
-func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, shard int, pks []string, now int64) (int, error) {
-	expKey := keycodec.ExpKeyN(t.Name, slot, shard, t.EffectiveExpShards())
-
-	// 2. 取回执（同 slot pipeline）
+// sweepPks 清扫一批 pk（回执驱动：行 slot 复查删回执 → 客户端段清桶/登记册/预约）。
+func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, pks []string) (int, error) {
+	// 2. 取回执（行 slot，批）
 	cmds := make([]kv.Cmd, 0, len(pks))
 	for _, pk := range pks {
 		cmds = append(cmds, kv.Cmd{Name: "HGETALL", Args: []any{keycodec.ReceiptKey(t.Name, pk)}})
@@ -106,54 +100,78 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, s
 		return 0, err
 	}
 
-	// 3. 组装 sweep_batch 参数 + 收集唯一预约（异 slot，Lua 外释放，docs/07 §7.3）
-	var extraKeys []string // KEYS[3..] 段
-	keyIdx := map[string]int{}
-	ref := func(k string) int {
-		if i, ok := keyIdx[k]; ok {
-			return i
-		}
-		extraKeys = append(extraKeys, k)
-		keyIdx[k] = len(extraKeys)
-		return len(extraKeys)
+	// 3. 按行 slot 分组执行 sweep_batch.lua（活性复查 + 删回执，同 slot 原子）
+	type slotEntry struct{ pk string }
+	groups := map[uint16][]int{} // slot → pk 下标
+	for i, pk := range pks {
+		slot := keycodec.Slot(keycodec.RowKey(t.Name, pk))
+		groups[slot] = append(groups[slot], i)
 	}
-	// 预约收集为 (rkey, 期望占有者行 key) 对——释放时占有者比对
-	// （review 实证：无比对会在"清扫途中新写入同值"窗口误删活行预约）。
+	cleaned := map[int]bool{}
+	sb, ok := s.reg.Get("sweep_batch")
+	if !ok {
+		return 0, fmt.Errorf("sweeper: sweep_batch.lua not registered")
+	}
+	for _, idxs := range groups {
+		keys := make([]string, 0, 2*len(idxs))
+		for _, i := range idxs {
+			keys = append(keys, keycodec.RowKey(t.Name, pks[i]))
+		}
+		for _, i := range idxs {
+			keys = append(keys, keycodec.ReceiptKey(t.Name, pks[i]))
+		}
+		argv := []any{strconv.Itoa(len(idxs))}
+		for j, i := range idxs {
+			argv = append(argv, pks[i], strconv.Itoa(j+1), strconv.Itoa(j+1))
+		}
+		out, err := s.cli.Eval(ctx, sb, keys, argv...)
+		if err != nil {
+			return 0, err
+		}
+		for _, pk := range utils.Strings(out) {
+			for _, i := range idxs {
+				if pks[i] == pk {
+					cleaned[i] = true
+					break
+				}
+			}
+		}
+	}
+	if len(cleaned) == 0 {
+		return 0, nil
+	}
+
+	// 4. 客户端段（异 slot）：按回执 ZREM 桶（版本戳精确 member）+ ZREM 登记册 +
+	//    释放唯一预约（占有者比对——只删仍属于死行的预约，防误删窗口内同值新写入的活预约）
+	var zcmds []kv.Cmd
 	type resvT struct{ rkey, ownerRow string }
 	var reservations []resvT
-
-	argv := []any{strconv.FormatInt(now, 10), strconv.Itoa(len(pks))}
+	expKey := keycodec.ExpKeyN(t.Name, 0, t.EffectiveExpShards()) // 占位（逐 pk 取分片）
+	_ = expKey
 	for i, pk := range pks {
+		if !cleaned[i] {
+			continue
+		}
 		fields, _ := utils.StringMap(rcpts[i])
-		var buckets [][2]string
 		for f, v := range fields {
 			if strings.HasPrefix(f, "idx:") {
 				parts := strings.SplitN(v, "\x1f", 2)
 				if len(parts) == 2 {
-					buckets = append(buckets, [2]string{parts[0], parts[1]})
+					zcmds = append(zcmds, kv.Cmd{Name: "ZREM", Args: []any{parts[0], parts[1]}})
 				}
 			} else if strings.HasPrefix(f, "__uniq:") {
 				reservations = append(reservations, resvT{v, keycodec.RowKey(t.Name, pk)})
 			}
 		}
-		argv = append(argv, pk, strconv.Itoa(ref(keycodec.ReceiptKey(t.Name, pk))), strconv.Itoa(len(buckets)))
-		for _, b := range buckets {
-			argv = append(argv, strconv.Itoa(ref(b[0])), b[1])
+		shards := t.EffectiveExpShards()
+		zcmds = append(zcmds, kv.Cmd{Name: "ZREM", Args: []any{
+			keycodec.ExpKeyN(t.Name, keycodec.ExpShardFor(pk, shards), shards), pk}})
+	}
+	if len(zcmds) > 0 {
+		if _, err := s.cli.Pipeline(ctx, zcmds); err != nil {
+			return 0, err
 		}
 	}
-
-	keys := append([]string{expKey}, extraKeys...)
-	sb, ok := s.reg.Get("sweep_batch")
-	if !ok {
-		return 0, fmt.Errorf("sweeper: sweep_batch.lua not registered")
-	}
-	out, err := s.cli.Eval(ctx, sb, keys, argv...)
-	if err != nil {
-		return 0, err
-	}
-
-	// 4. 释放唯一预约（异 slot；占有者比对——只删仍属于死行的预约，
-	// 防误删"清扫窗口内同值新写入"的活预约；占有者变更 = 已自愈，不动）
 	for _, rv := range reservations {
 		cur, err := s.cli.Do(ctx, "GET", rv.rkey)
 		if err != nil || cur == nil {
@@ -165,7 +183,7 @@ func (s *Sweeper) sweepPks(ctx context.Context, t *meta.TableDef, slot uint16, s
 		_, _ = s.cli.Do(ctx, "DEL", rv.rkey)
 	}
 
-	n, _ := strconv.Atoi(fmt.Sprint(out))
+	n := len(cleaned)
 	if s.m != nil && n > 0 {
 		s.m.SweptTotal.Add(float64(n)) // swept_total
 	}

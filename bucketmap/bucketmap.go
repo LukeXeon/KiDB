@@ -2,10 +2,10 @@
 // 稀疏存储——默认 ACTIVE 单桶由规则推导不落盘，只有分裂/合并中间态与
 // 分裂后的子桶布局持久化。
 //
-// v5.0 修订（实现期发现）：bm key 按 slot 分片（`bm:{table}:{idx}:{stag}`）——
-// v4 文档的全局 `bm:{table}:{idx}` 与写 Lua 内版本 CAS 物理冲突（跨 slot
-// 不可达，与 v4.2 唯一约束同类问题）。分片后写路径 CAS 单 slot 可达；
-// 等值桶另有热值注册表（`bmh:{table}:{idx}`）避免读路径全 slot 加载分片。
+// v7.0 修订：bm 集中为每索引一文档（`bm:{table}:{idx}`）——16384 分片消除：
+// 桶不再按行 slot 散布，"全局单 key 与写 Lua 内版本 CAS 物理冲突"随之消失
+// （bm CAS 已移出行 Lua，集中 key 上 bucket_state_cas.lua 单 slot 可达）。
+// 热值注册表（`bmh:{table}:{idx}`）保留为读路径稀疏判定面。
 package bucketmap
 
 import (
@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"github.com/tinylib/msgp/msgp"
 
 	"kidb"
@@ -63,17 +62,17 @@ type RangeBucket struct {
 	Children []RangeBucket `json:"c,omitempty"` // 分裂中间态时的两个子桶 [lo,mid) [mid,hi)
 }
 
-// Shard 是一个 (表, 索引, slot) 的 BucketMap 分片。
-type Shard struct {
+// Doc 是一个 (表, 索引) 的 BucketMap 文档（v7.0 集中形态）。
+type Doc struct {
 	Version uint64
 	Next    int                 // 桶下标分配器
 	Eq      map[string]*EqEntry // 等值/字典序副本条目（"l" 为字典序副本）
 	Ranges  []RangeBucket       // 范围桶区间列表（默认单桶 [{0,-inf,+inf}]）
 }
 
-// DefaultShard 空分片（规则推导的默认形态）。
-func DefaultShard() *Shard {
-	return &Shard{
+// DefaultDoc 空文档（规则推导的默认形态）。
+func DefaultDoc() *Doc {
+	return &Doc{
 		Next:   1,
 		Eq:     map[string]*EqEntry{},
 		Ranges: []RangeBucket{{Idx: 0, Lo: "-inf", Hi: "+inf", State: Active}},
@@ -88,7 +87,7 @@ type Store struct {
 	reg *script.Registry
 
 	mu    sync.RWMutex
-	cache map[string]*Shard
+	cache map[string]*Doc
 	since time.Time
 	ttl   time.Duration
 
@@ -97,12 +96,12 @@ type Store struct {
 
 // New 构造（缓存 TTL 1s——分裂中间态读侧容忍见 docs/08 §8.3）。
 func New(cli kv.Client, reg *script.Registry) *Store {
-	return &Store{cli: cli, reg: reg, cache: map[string]*Shard{}, since: time.Now(), ttl: time.Second, regCache: map[string]utils.Set[string]{}}
+	return &Store{cli: cli, reg: reg, cache: map[string]*Doc{}, since: time.Now(), ttl: time.Second, regCache: map[string]utils.Set[string]{}}
 }
 
-// Load 读分片（短 TTL 缓存；强制刷新走 Invalidate）。
-func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shard, error) {
-	k := keycodec.BucketMapSlotKey(table, idx, slot)
+// Load 读文档（短 TTL 缓存；强制刷新走 Invalidate）。
+func (s *Store) Load(ctx context.Context, table, idx string) (*Doc, error) {
+	k := keycodec.BucketMapKey(table, idx)
 	s.mu.RLock()
 	if time.Since(s.since) < s.ttl {
 		if sh, ok := s.cache[k]; ok {
@@ -116,7 +115,7 @@ func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shar
 	if err != nil {
 		return nil, err
 	}
-	sh := DefaultShard()
+	sh := DefaultDoc()
 	fields, _ := utils.StringMap(res)
 	if len(fields) > 0 {
 		sh.Version = utils.ParseUint64(fields["version"])
@@ -140,7 +139,7 @@ func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shar
 	}
 	s.mu.Lock()
 	if time.Since(s.since) >= s.ttl {
-		s.cache = map[string]*Shard{}
+		s.cache = map[string]*Doc{}
 		s.since = time.Now()
 	}
 	s.cache[k] = sh
@@ -148,10 +147,10 @@ func (s *Store) Load(ctx context.Context, table, idx string, slot uint16) (*Shar
 	return sh, nil
 }
 
-// LoadFresh 绕过缓存读分片（控制器 CAS 重试循环用）。
-func (s *Store) LoadFresh(ctx context.Context, table, idx string, slot uint16) (*Shard, error) {
+// LoadFresh 绕过缓存读文档（控制器 CAS 重试循环用）。
+func (s *Store) LoadFresh(ctx context.Context, table, idx string) (*Doc, error) {
 	s.Invalidate()
-	return s.Load(ctx, table, idx, slot)
+	return s.Load(ctx, table, idx)
 }
 
 // Registry 读热值注册表（等值值名 → 是否有分裂状态；范围索引用哨兵 "@range"）。
@@ -179,7 +178,7 @@ func (s *Store) Registry(ctx context.Context, table, idx string) (utils.Set[stri
 	}
 	s.mu.Lock()
 	if time.Since(s.since) >= s.ttl {
-		s.cache = map[string]*Shard{}
+		s.cache = map[string]*Doc{}
 		s.regCache = map[string]utils.Set[string]{}
 		s.since = time.Now()
 	}
@@ -197,7 +196,7 @@ func (s *Store) RegisterHot(ctx context.Context, table, idx, field string) error
 // Invalidate 清缓存（写路径 stale / 控制器步进后调用）。
 func (s *Store) Invalidate() {
 	s.mu.Lock()
-	s.cache = map[string]*Shard{}
+	s.cache = map[string]*Doc{}
 	s.regCache = map[string]utils.Set[string]{}
 	s.since = time.Now()
 	s.mu.Unlock()
@@ -234,14 +233,14 @@ func (s *Store) CAS(ctx context.Context, key string, expectVer uint64, field str
 // WriteTargetsEq 等值桶写入目标（双写规则，docs/08 §8.3）：
 // ACTIVE → 哈希取模单桶；SPLITTING → 父+子双写；DRAINING → 仅子桶；
 // MERGING → 目标+旧桶双写；MERGE_DRAIN → 仅合并目标桶。
-func (sh *Shard) WriteTargetsEq(encVal, pk string) []int {
-	e := sh.Eq[encVal]
+func (d *Doc) WriteTargetsEq(encVal, pk string) []int {
+	e := d.Eq[encVal]
 	if e == nil {
 		return []int{0}
 	}
 	if e.Split != nil {
-		parent := e.Split.Parents[subIdx(pk, len(e.Split.Parents))]
-		child := e.Split.Children[subIdx(pk, len(e.Split.Children))]
+		parent := e.Split.Parents[keycodec.EqSubFor(pk, len(e.Split.Parents))]
+		child := e.Split.Children[keycodec.EqSubFor(pk, len(e.Split.Children))]
 		switch e.Split.State {
 		case Splitting, Merging:
 			return []int{parent, child}
@@ -251,13 +250,13 @@ func (sh *Shard) WriteTargetsEq(encVal, pk string) []int {
 			return []int{parent}
 		}
 	}
-	return []int{e.Buckets[subIdx(pk, len(e.Buckets))]}
+	return []int{e.Buckets[keycodec.EqSubFor(pk, len(e.Buckets))]}
 }
 
 // ReadBucketsEq 等值桶读取集合（搬迁窗口双读，成员去重在 exec）：
 // SPLITTING/MERGING → 父+子全集；DRAINING → 子桶；MERGE_DRAIN → 目标桶。
-func (sh *Shard) ReadBucketsEq(encVal string) []int {
-	e := sh.Eq[encVal]
+func (d *Doc) ReadBucketsEq(encVal string) []int {
+	e := d.Eq[encVal]
 	if e == nil {
 		return []int{0}
 	}
@@ -275,8 +274,8 @@ func (sh *Shard) ReadBucketsEq(encVal string) []int {
 }
 
 // WriteTargetsRange 范围桶写入目标（按 score 选区间；分裂选边按子桶区间边界）。
-func (sh *Shard) WriteTargetsRange(score float64) []int {
-	for _, rb := range sh.Ranges {
+func (d *Doc) WriteTargetsRange(score float64) []int {
+	for _, rb := range d.Ranges {
 		if !rangeContains(rb, score) {
 			continue
 		}
@@ -299,13 +298,13 @@ func (sh *Shard) WriteTargetsRange(score float64) []int {
 		}
 		return []int{rb.Idx}
 	}
-	return []int{sh.Ranges[0].Idx} // 兜底（不应到达）
+	return []int{d.Ranges[0].Idx} // 兜底（不应到达）
 }
 
 // ReadBucketsRange 范围谓词覆盖的桶集合。
-func (sh *Shard) ReadBucketsRange(lo, hi float64) []int {
+func (d *Doc) ReadBucketsRange(lo, hi float64) []int {
 	var out []int
-	for _, rb := range sh.Ranges {
+	for _, rb := range d.Ranges {
 		if !rangeOverlaps(rb, lo, hi) {
 			continue
 		}
@@ -328,11 +327,6 @@ func (sh *Shard) ReadBucketsRange(lo, hi float64) []int {
 		}
 	}
 	return out
-}
-
-// subIdx 等值子桶放置：xxhash64(pk) 高位取模（docs/03 §3.3）。
-func subIdx(pk string, n int) int {
-	return int(xxhash.Sum64String(pk) % uint64(n))
 }
 
 // rangeContains 区间 [lo,hi) 包含判定。
