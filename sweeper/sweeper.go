@@ -121,7 +121,7 @@ func (s *Sweeper) sweepBatch(ctx context.Context, t *meta.TableDef, slot uint16,
 		}
 	}
 
-	keys := append([]string{expKey, keycodec.CntKey(t.Name, slot)}, extraKeys...)
+	keys := append([]string{expKey}, extraKeys...)
 	sb, ok := s.reg.Get("sweep_batch")
 	if !ok {
 		return 0, fmt.Errorf("sweeper: sweep_batch.lua not registered")

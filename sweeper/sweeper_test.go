@@ -62,7 +62,6 @@ func TestSweepExpired(t *testing.T) {
 	// 全清断言（docs/12 §12.2 清扫不变式）
 	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0), "1"), "索引桶")
 	require.Empty(t, p.ZScore(keycodec.ExpKeyN(tbl.Name, slot, keycodec.ExpShardFor("1", 1), 1), "1"), "登记册")
-	require.Equal(t, "0", p.Get(keycodec.CntKey(tbl.Name, slot)), "计数")
 	require.False(t, p.Exists(keycodec.ReceiptKey(tbl.Name, "1")), "回执")
 	require.False(t, p.Exists(keycodec.UniqueKey(tbl.Name, "uk_email", "a@x.com")), "唯一预约")
 
@@ -112,7 +111,6 @@ func TestSweepSkipsResurrected(t *testing.T) {
 
 	require.True(t, p.Exists(keycodec.RowKey(tbl.Name, "2")))
 	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "2"))
-	require.Equal(t, "1", p.Get(keycodec.CntKey(tbl.Name, slot)))
 }
 
 func sprint(v any) string {

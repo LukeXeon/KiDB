@@ -29,6 +29,10 @@
 - **忠实类型重建**走白名单文本解析（columnTypeFromText，往返恒等测试钉死）而非 gms ParseColumnTypeString（每次全量 vitess 解析，过重）；列级 DEFAULT/ON UPDATE/COLLATE 一并显式拒绝（静默丢弃 = 与用户声明不符的行为，设计原点红线）；
 - **metrics 系列同步摘除**（plan_cache_*/slow_queries_total），tuning.toml 摘除 slow_query_threshold_ms/plan_cache_capacity 死参数。
 
+## v6.x（持续交付）
+
+- **cnt 行计数器移除**：`cnt:{table}:{stag}` 只写不读（write_row/sweep_batch 维护、零消费方——COUNT(*) 任意时刻精确由 exp 登记册 Σ ZCOUNT 承接）。write_row.lua v4 / sweep_batch.lua v2 KEYS 布局收缩（exp=n-1、rcpt=n）；docs/12 §12.8 的"cnt 校准"项以移除方式闭环（校准一个没人读的计数器是纯放大）。
+
 ## v5.1（实现期，进行中）
 
 ### 落地（docs 全册对应的可运行系统）

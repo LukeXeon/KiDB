@@ -18,7 +18,6 @@ func TestRowColocation(t *testing.T) {
 	for _, k := range []string{
 		ExpKey(table, rowSlot),
 		ExpShardKey(table, rowSlot, 3),
-		CntKey(table, rowSlot),
 		AsyncLogKey(table, "idx_a", rowSlot),
 	} {
 		if !strings.Contains(k, tag) {

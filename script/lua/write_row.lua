@@ -1,11 +1,12 @@
 -- @name write_row
--- @version 3
--- @keys_desc KEYS[1]=row_key(router); KEYS[2..n-3]=bucket/bm_keys; KEYS[n-2]=exp; KEYS[n-1]=cnt; KEYS[n]=rcpt
+-- @version 4
+-- @keys_desc KEYS[1]=row_key(router); KEYS[2..n-2]=bucket/bm_keys; KEYS[n-1]=exp; KEYS[n]=rcpt
 -- @idempotent true
 --
 -- 单行写入（INSERT/UPDATE/DELETE/UPSERT 全分支，docs/05 §5.1）。
 -- 原子完成：读旧行 → 版本/状态 CAS 预检 → 撤旧索引 → 写新行 → 建新索引 →
--- 登记过期 → 维护回执与计数。
+-- 登记过期 → 维护回执。（v4：cnt 行计数器移除——COUNT(*) 由 exp 登记册
+-- Σ ZCOUNT 精确承接，cnt 只写不读纯放大，docs/03 §3.1）
 --
 -- ARGV 协议（v3：描述符 8 字段；桶段 KEYS[2..n-3] 相对序号 1 起；0 = 无）：
 --   [1] op: "W"=写入（含 upsert 分支） / "D"=删除
@@ -27,17 +28,16 @@
 -- 返回：{"ok", old_ver, new_ver} / {"stale", old_ver} / {"log_full", old_ver}
 --
 -- 跨脚本不变式（docs/05 §5.6、docs/07 §7.3、docs/08 §8.3）：
---   - 复活语义：旧行空但 rcpt 存在 = 主键复活，cnt 不 INCR（原 INCR 仍成立，
---     exp 已被本次覆盖，sweeper 不会再 DECR）——平衡由 sweep_batch.lua 的
---     "ZSCORE exp > now 则跳过" 复查保证。
+--   - 复活语义：旧行空但 rcpt 存在 = 主键复活——exp 已被本次覆盖，
+--     sweeper 侧由 sweep_batch.lua 的 "ZSCORE exp > now 则跳过" 复查保证
+--     不清理活行索引。
 --   - ZSet member 去重天然幂等：重复应用同一写入不产生重复索引条目。
 --   - bm 版本 CAS 必须在一切写操作之前（Lua 无回滚，中途返回即部分提交）；
 --     分裂窗口的双写规则由调用方按 SPLITTING/DRAINING 展开 redo 描述符。
 
 local rowkey  = KEYS[1]
 local nkeys   = #KEYS
-local expkey  = KEYS[nkeys-2]
-local cntkey  = KEYS[nkeys-1]
+local expkey  = KEYS[nkeys-1]
 local rcptkey = KEYS[nkeys]
 
 local op        = ARGV[1]
@@ -116,7 +116,6 @@ if op == 'D' then
     end
     redis.call('DEL', rowkey)
     redis.call('ZREM', expkey, pk)
-    redis.call('DECR', cntkey)
     redis.call('DEL', rcptkey)
   end
   return {'ok', tostring(oldVer), ''}
@@ -155,12 +154,6 @@ for i = 1, M do
   if d.kind == 'A' and d.redoKey > 0 then
     redis.call('RPUSH', KEYS[1 + d.redoKey], d.redoMember .. string.char(31) .. tostring(newVer))
   end
-end
-
--- 计数：仅"全新插入"（旧行空且无回执）INCR；复活不 INCR（见头部不变式）
-local rcptExists = redis.call('EXISTS', rcptkey) == 1
-if (not oldExists) and (not rcptExists) then
-  redis.call('INCR', cntkey)
 end
 
 -- 过期登记册 + 行 TTL + 回执

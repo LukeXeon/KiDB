@@ -178,7 +178,6 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 	expShards := t.EffectiveExpShards()
 	keys = append(keys,
 		keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(req.PK, expShards), expShards),
-		keycodec.CntKey(t.Name, slot),
 		rcptkey,
 	)
 
@@ -279,7 +278,6 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 		expShards := t.EffectiveExpShards()
 		keys = append(keys,
 			keycodec.ExpKeyN(t.Name, slot, keycodec.ExpShardFor(pk, expShards), expShards),
-			keycodec.CntKey(t.Name, slot),
 			keycodec.ReceiptKey(t.Name, pk),
 		)
 		argv := []any{

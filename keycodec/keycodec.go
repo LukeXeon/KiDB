@@ -88,11 +88,6 @@ func UniqueKey(table, idx, encVal string) string {
 	return "u:" + table + ":" + idx + "=" + EscapeValue(encVal)
 }
 
-// CntKey 行计数器：`cnt:{table}:{stag}`。
-func CntKey(table string, slot uint16) string {
-	return "cnt:" + table + ":" + SlotTag(slot)
-}
-
 // AsyncLogKey 异步索引日志：`log:idx:{table}:{idx}:{stag}`。
 func AsyncLogKey(table, idx string, slot uint16) string {
 	return "log:idx:" + table + ":" + idx + ":" + SlotTag(slot)

@@ -41,7 +41,7 @@ func slotOf(tbl *meta.TableDef, pk string) uint16 {
 }
 
 // TestWriteRowInvariants 覆盖 docs/12 §12.2 的七项一致性断言主路径：
-// 行、等值桶、范围桶、字典序副本、exp、cnt、rcpt（+唯一预约）。
+// 行、等值桶、范围桶、字典序副本、exp、rcpt（+唯一预约）。
 func TestWriteRowInvariants(t *testing.T) {
 	cli, reg, _ := testutil.New(t)
 	g := New(cli, reg, nil)
@@ -54,7 +54,6 @@ func TestWriteRowInvariants(t *testing.T) {
 	rg := keycodec.RangeBucketKey(tbl.Name, "idx_age", slot, 0)
 	lex := keycodec.LexBucketKey(tbl.Name, "idx_city", slot, 0)
 	exp := keycodec.ExpKey(tbl.Name, slot)
-	cnt := keycodec.CntKey(tbl.Name, slot)
 	rcpt := keycodec.ReceiptKey(tbl.Name, "1")
 	row := keycodec.RowKey(tbl.Name, "1")
 	resv := keycodec.UniqueKey(tbl.Name, "uk_email", "a@x.com")
@@ -72,7 +71,6 @@ func TestWriteRowInvariants(t *testing.T) {
 	require.Equal(t, "30", p.ZScore(rg, "1"), "范围桶 score")
 	require.Equal(t, "0", p.ZScore(lex, "shanghai\x001"), "字典序副本 member")
 	require.NotEmpty(t, p.ZScore(exp, "1"), "exp 登记")
-	require.Equal(t, "1", p.Get(cnt), "cnt")
 	require.True(t, p.Exists(rcpt), "TTL 行必须有回执")
 	require.Contains(t, p.Get(resv), row, "唯一预约指向行")
 	require.Greater(t, p.PTTL(row), int64(0), "行 TTL")
@@ -89,7 +87,6 @@ func TestWriteRowInvariants(t *testing.T) {
 	require.Equal(t, "31", p.ZScore(rg, "1"))
 	require.Empty(t, p.ZScore(lex, "shanghai\x001"))
 	require.Equal(t, "0", p.ZScore(lex, "beijing\x001"))
-	require.Equal(t, "1", p.Get(cnt), "更新不动计数")
 	require.Equal(t, "2", p.HGet(row, "_ver"))
 	require.Empty(t, p.Get(resv), "旧预约应释放")
 	require.Contains(t, p.Get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), row)
@@ -121,7 +118,6 @@ func TestWriteRowInvariants(t *testing.T) {
 	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "1"))
 	require.Empty(t, p.ZScore(rg, "1"))
 	require.Empty(t, p.ZScore(exp, "1"))
-	require.Equal(t, "0", p.Get(cnt))
 	require.Empty(t, p.Get(keycodec.UniqueKey(tbl.Name, "uk_email", "b@x.com")), "删除释放预约")
 
 	// 6. 删除不存在/已过期行 → false，无副作用
@@ -131,7 +127,7 @@ func TestWriteRowInvariants(t *testing.T) {
 }
 
 // TestResurrection 主键复活：旧行已过期、回执仍在 → 按回执撤销旧索引、
-// cnt 不重复 INCR（跨脚本不变式见 write_row.lua 头部）。
+// （跨脚本不变式见 write_row.lua 头部）。
 func TestResurrection(t *testing.T) {
 	cli, reg, m := testutil.New(t)
 	g := New(cli, reg, nil)
@@ -161,7 +157,6 @@ func TestResurrection(t *testing.T) {
 	require.Empty(t, p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "shanghai", slot, 0), "9"),
 		"复活必须按旧回执撤销旧索引")
 	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "hangzhou", slot, 0), "9"))
-	require.Equal(t, "1", p.Get(keycodec.CntKey(tbl.Name, slot)), "复活不重复 INCR（docs/05 跨脚本不变式）")
 }
 
 // TestCASWriteGuard 调用方 CAS 写语义：期望版本与预读不符 → fail-fast 不重试

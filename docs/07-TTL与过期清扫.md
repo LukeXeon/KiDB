@@ -44,7 +44,7 @@
   → pipeline HGETALL rcpt:{table}:{pk}                      -- 取回执
   → 先按回执 DEL 唯一预约 key（异 slot，独立执行，自愈兜底）
   → 按 slot 分组执行 sweep_batch.lua（同 slot 原子）：
-      按回执 ZREM 各索引桶条目 → ZREM exp → DECR cnt → DEL rcpt
+      按回执 ZREM 各索引桶条目 → ZREM exp → DEL rcpt
   ```
 - **背压**：单 slot 每周期批数可配（默认 4）；积压指标 `sweeper_lag_rows` 超阈值告警并提速；
 - **正确性不依赖 Sweeper 在线**：全挂时查询结果仍正确（回表空 Hash 拦截），仅内存回收延迟；恢复后积压自动追平；
