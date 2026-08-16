@@ -70,10 +70,7 @@ func Encode(ct meta.ColumnType, v any) (string, error) {
 			return t, nil
 		}
 	case meta.ColJSON:
-		if s, ok := v.(string); ok {
-			return s, nil // v1 文本形态
-		}
-		return fmt.Sprint(v), nil
+		return EncodeJSON(v) // msgpack 二进制形态（docs/03 §3.4）
 	}
 	return "", fmt.Errorf("rowcodec: cannot encode %T into %v", v, ct)
 }
@@ -104,7 +101,7 @@ func Decode(ct meta.ColumnType, s string) (any, error) {
 		}
 		return time.Unix(n, 0).UTC(), nil
 	case meta.ColJSON:
-		return s, nil
+		return DecodeJSON(s)
 	}
 	return nil, fmt.Errorf("rowcodec: unknown type %v", ct)
 }

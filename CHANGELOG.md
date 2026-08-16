@@ -31,6 +31,7 @@
 
 ## v6.x（持续交付）
 
+- **JSON 列 msgpack 二进制形态**：rowcodec/json.go 手卷 JSON↔msgpack 遍历器（文本→解析→msgpack 写入；读侧还原 JSON 文本，key 序归一 + 数字 float64 归一——与 MySQL 二进制 JSON 同族纪律，>2^53 整数精度不担保，docs/03 §3.4）；典型文档实测 248B→210B（~85%）；非法 JSON 写入报错（gms Convert 层）与 NULL 形态端到端钉死。
 - **`_ttl` 伪列 SQL 面**（docs/07 §7.1 落地）：schema 挂尾虚拟列——写入 >0 设行 TTL / 0 显式无 TTL（覆盖表级默认）/ NULL 承 default_ttl / <0 软删除；读出 = 剩余 TTL 秒（PTTL 自省搭同一 pipeline；含 _ttl 投影绕过行级近缓存——条目不携带行剩余 TTL，默认关闭的行缓存取舍可控）。**UPDATE 不提 _ttl 保留行当前 TTL**（write_row.lua v5 `ttlms=-2` keep 分支：行 TTL/登记册照旧、回执按新成员重写且宽限=行剩余 PTTL+300s；新行无可保则登记不过期）。SELECT * 含 _ttl 列（gms 无隐藏列机制、`*` 展开为显式投影——与原稿"SELECT * 不含伪列"的诚实偏差）。实现期实证：miniredis 物理过期纯由 FastForward 驱动（真实 1ms TTL 不会自行过期——TTL 测试必须 FastForward）。
 - **DROP TABLE 大表清理作业化**：超阈值（`drop_sync_max_rows` 默认 4096）→ Catalog 立即删除 + `c:dropjobs` 登记（def 快照自包含），JobRunner 按 slot 游标清理（SweepSlot 清过期残留 → 登记册分页"处理即移出"——活行 DeleteRow 全清、偏斜死行 SweepPksForced 强扫）；崩溃安全 = 作业先登记后删 Catalog + 在途防护跳过 + 换实例接管（测试钉死）。**实现期发现并修复死锁形态**：DeleteRow 对物理过期行是 no-op（write_row D 分支不撤 exp），若按"删到空为止"分页会在死行上无限空转；同页恒读首页 + 死行即批强扫，终止由构造保证。附带纪律修复：bucketmap 的 Key/RegistryKey 手拼 key 回收进 keycodec（BucketMapSlotKey/BucketMapHotKey），删除形态错误的死函数 BucketMapKey。
 - **对账角色落地**（docs/12 §12.8）：`controller.Reconciler`——每 tick 每表抽样 slot 做"数据侧推导 vs 索引实际"比对（正向成员/score 校验 + 反向孤儿成员 + 唯一预约占有者活性），漂移进 `reconcile_drift_total{kind}` + 告警，**只观测不自动修复**（漂移=内核 bug 信号）；TTL 清扫暂态（回执在）不误报，异步/回填中索引跳过合法窗口；采样参数入 tuning.toml（reconcile_slots_per_tick/reconcile_rows_per_slot）。反向孤儿判定实现期修正：桶成员 pk 不在登记册取样面时直查行/回执活性（从未存在的 pk 无从判定——测试钉死）。
