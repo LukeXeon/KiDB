@@ -126,16 +126,11 @@ cmd/kidb-server：进程入口（DI 装配，wire）
 - **v6.0 新纪律**：网关/装配层不做 SQL 文本解析；分析面与执行面同一语法树（gms）。
   独立进程非库——不使用 `internal/` 可见性约束（包即边界，tuning/testutil 平铺）。
 
-内核只暴露：
+内核对外暴露 = **gms 引擎**（装配层直挂 `sqle.Engine`，DI 图唯一入口）。
 
-```go
-type Querier interface {
-    Query(ctx context.Context, query string) (sql.RowIter, error)
-    Exec(ctx context.Context, query string) (sql.OkResult, error)
-}
-```
-
-产品形态只有网关一种；`Querier` 同时作为测试与带外工具的程序化入口（工程接缝，非第二产品形态——正如 TiDB 可用 mockstore 进程内起实例跑测试，但那不是产品形态）。
+产品形态只有网关一种。~~`Querier` 程序化接口~~（v6.x review 删除：零实现零消费的
+文档时代遗骸——v6.0 后 SQL 入口就是 gms 引擎，内核不再设第二 SQL 接口；
+测试与带外工具同样经引擎或经 engine.Deps 直接装配）。
 
 ## 1.7 正确性与性能的总原则
 

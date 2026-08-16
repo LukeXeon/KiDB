@@ -1,12 +1,12 @@
 // Package rowcodec 负责 gms 类型值 ↔ Redis 字符串编码的转换
-// （docs/03 §3.4：标量字段 Hash 平铺零序列化；JSON 列保留文本形态——
-// 文本即 JSON 标准格式，msgp 压缩收益在列内文档场景，经 _fmtv 演进）。
+// （docs/03 §3.4：标量字段 Hash 平铺零序列化；JSON 列归一化文本直存——
+// 写入时解析归一（key 排序/数字 float64 归一），存储形态即可直读文本）。
 package rowcodec
 
 import (
-	"strings"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tinylib/msgp/msgp"
@@ -70,7 +70,7 @@ func Encode(ct meta.ColumnType, v any) (string, error) {
 			return t, nil
 		}
 	case meta.ColJSON:
-		return EncodeJSON(v) // msgpack 二进制形态（docs/03 §3.4）
+		return EncodeJSON(v) // 归一化文本直存（docs/03 §3.4）
 	}
 	return "", fmt.Errorf("rowcodec: cannot encode %T into %v", v, ct)
 }
