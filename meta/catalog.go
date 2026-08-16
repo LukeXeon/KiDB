@@ -15,7 +15,6 @@ import (
 // 字段 def=编码后的 TableDef、_ver=表级版本、_job=进行中的 DDL 作业）。
 //
 // def/_job 编码为 msgp 代码生成版（docs/03 §3.4；_fmtv 版本号内嵌，演进走 docs/06 §6.4）。
-// TODO(impl): Save 的 CAS 当前为读-改-写，实现期改 config_set 风格 Lua 原子 CAS。
 type CatalogStore struct {
 	cli kidb.KvClient
 	reg *script.Registry
@@ -72,7 +71,7 @@ func (s *CatalogStore) Save(ctx context.Context, def *TableDef, expectVer uint64
 	}
 	switch fmt.Sprint(arr[0]) {
 	case "ok":
-		// 全局 schema 版本递增（docs/06 §6.2：plan cache 与 lease 的失效锚点）。
+		// 全局 schema 版本递增（docs/06 §6.2：schema lease 的失效锚点）。
 		_, err = s.cli.Do(ctx, "INCR", keycodec.SchemaVerKey())
 		return err
 	case "stale":
