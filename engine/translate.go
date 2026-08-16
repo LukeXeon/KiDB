@@ -120,13 +120,8 @@ func (t *Table) coveringOK(idx *meta.IndexDef, predCol string) bool {
 		return false
 	}
 	if !t.projected {
-		// 未投影 = 全列（SELECT * 或裁剪未触发）：全部列都须被覆盖
-		for _, c := range t.def.Columns {
-			if need(c.Name) {
-				return false
-			}
-		}
-		return true
+		// 未投影 = 全列（SELECT *）：含 _ttl 伪列（member 无 TTL 信息）→ 不覆盖
+		return false
 	}
 	for _, c := range t.proj {
 		if need(c) {

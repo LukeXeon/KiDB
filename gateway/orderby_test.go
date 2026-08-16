@@ -19,7 +19,7 @@ import (
 // 等价于约定"索引扫描必须按索引列升序产出"。KiDB 的范围桶按 slot 散布，
 // 若按 slot 组顺序流式产出则全局无序——本测试钉死该契约。
 func TestOrderByRangeColOrderedStreaming(t *testing.T) {
-	dsn, _, cleanup := newTestServer(t)
+	dsn, _, _, cleanup := newTestServer(t)
 	defer cleanup()
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
@@ -128,7 +128,7 @@ func TestOrderByRangeColOrderedStreaming(t *testing.T) {
 // TestOrderByPKPointSet 主键点集 ORDER BY pk：gms Case A 对 PRIMARY 点查同样删 Sort
 // （点范围互不重叠），exec 必须按 pk 值序产出。
 func TestOrderByPKPointSet(t *testing.T) {
-	dsn, _, cleanup := newTestServer(t)
+	dsn, _, _, cleanup := newTestServer(t)
 	defer cleanup()
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)

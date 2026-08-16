@@ -149,6 +149,11 @@ func (t *TableDef) EffectiveExpShards() int {
 	return 1
 }
 
+// TTLPseudoColumn 行级 TTL 伪列（docs/07 §7.1）：写入 >0 秒设行 TTL /
+// 0 或 NULL 承表级 default_ttl / <0 软删除；读出 = 剩余 TTL 秒（-1 无 TTL）。
+// 引擎元数据列（`_` 前缀命名空间），用户 DDL 不可声明（ValidateReserved 拒绝）。
+const TTLPseudoColumn = "_ttl"
+
 // ValidateReserved 拒绝保留列命名（docs/07 §7.1：`_` 前缀是引擎命名空间）。
 func ValidateReserved(name string) error {
 	if strings.HasPrefix(name, "_") {

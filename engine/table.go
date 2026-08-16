@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 
 	"kidb"
 	"kidb/exec"
@@ -86,6 +87,14 @@ func (t *Table) fullSchema() sql.Schema {
 			AutoIncrement: t.def.AutoIncrColumn == c.Name,
 		})
 	}
+	// _ttl 伪列（docs/07 §7.1）：挂 schema 尾部，写=设行 TTL，读=剩余 TTL 秒。
+	// gms 无隐藏列机制——SELECT * 会返回它（docs 诚实声明的取舍）。
+	sch = append(sch, &sql.Column{
+		Name:     meta.TTLPseudoColumn,
+		Type:     types.Int64,
+		Nullable: true,
+		Source:   t.def.Name,
+	})
 	return sch
 }
 

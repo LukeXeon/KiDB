@@ -747,7 +747,23 @@ func (s *RowStream) fetchItems(items []candItem) error {
 	return s.fetchRows(pks)
 }
 
+// needsTTL 报告本请求是否需要行剩余 TTL（仅 _ttl 伪列被**显式投影**时）。
+// SELECT *（nil 投影）不物化——剩余 TTL 只在显式 `SELECT _ttl` 时经 PTTL
+// 自省（docs/07 §7.1：SELECT * 的 _ttl 列呈 NULL，行缓存不受 PTTL 拖累）。
+func (r *Request) needsTTL() bool {
+	if r.Projection == nil {
+		return false
+	}
+	for _, c := range r.Projection {
+		if strings.EqualFold(c, meta.TTLPseudoColumn) {
+			return true
+		}
+	}
+	return false
+}
+
 // fetchColumns 回表取列集合：投影 ∪ 谓词列（谓词重校验不可省，docs/04 §4.3）。
+// _ttl 伪列不在 Hash 字段里（PTTL 自省），从取列集合剔除。
 // nil = 全列（HGETALL）；空非 nil = 零投影且无谓词（EXISTS 活性判定即可）。
 func (s *RowStream) fetchColumns() []string {
 	if s.req.Projection == nil {
@@ -762,6 +778,9 @@ func (s *RowStream) fetchColumns() []string {
 		}
 	}
 	for _, c := range s.req.Projection {
+		if strings.EqualFold(c, meta.TTLPseudoColumn) {
+			continue // 伪列无 Hash 字段（PTTL 自省，fetchRows 内同 pipeline 取）
+		}
 		add(c)
 	}
 	if s.req.Pred != nil {
@@ -846,12 +865,16 @@ func (s *RowStream) fetchCovered(items []candItem) error {
 // 行级近缓存开启时：命中行零 RTT；未命中行 HGETALL+PTTL 同 pipeline 取回并填充
 // （条目 TTL ≤ 行剩余 TTL——过期行绝不返回；更新陈旧窗口语义见 docs/08 §8.4）。
 func (s *RowStream) fetchRows(pks []string) error {
-	if s.req.Pushdown && s.req.Pred != nil && s.req.Pred.pushdownable() && s.exec.reg != nil {
+	if s.req.Pushdown && s.req.Pred != nil && s.req.Pred.pushdownable() && s.exec.reg != nil && !s.req.needsTTL() {
 		return s.fetchRowsPushdown(s.ctx, pks)
 	}
 	t := s.req.Table
 	cols := s.fetchColumns()
+	needTTL := s.req.needsTTL()
 	rc := s.exec.rowCache
+	if needTTL {
+		rc = nil // 缓存条目不携带行剩余 TTL（填充时点的 min 值会漂移）——绕过
+	}
 	for i := 0; i < len(pks); i += s.exec.batch {
 		batch := pks[i:min(i+s.exec.batch, len(pks))]
 		raws := make([]map[string]string, len(batch))
@@ -872,9 +895,11 @@ func (s *RowStream) fetchRows(pks []string) error {
 			var cmds []kidb.Cmd
 			for _, j := range miss {
 				rk := keycodec.RowKey(t.Name, batch[j])
+				// 需要剩余 TTL 时同行附 PTTL（同 pipeline 零额外 RTT）
+				withPTTL := rc != nil || needTTL
 				switch {
 				case rc != nil:
-					// 行缓存开启：取全行 + PTTL（同 pipeline 零额外 RTT）用于填充
+					// 行缓存开启：取全行 + PTTL（填充寿命 = min(条目默认, 行剩余)）
 					cmds = append(cmds, kidb.Cmd{Name: "HGETALL", Args: []any{rk}},
 						kidb.Cmd{Name: "PTTL", Args: []any{rk}})
 				case cols == nil:
@@ -889,6 +914,9 @@ func (s *RowStream) fetchRows(pks []string) error {
 					}
 					cmds = append(cmds, kidb.Cmd{Name: "HMGET", Args: args})
 				}
+				if withPTTL && rc == nil {
+					cmds = append(cmds, kidb.Cmd{Name: "PTTL", Args: []any{rk}})
+				}
 			}
 			results, err := s.exec.readPipeline(s.ctx, cmds)
 			if err != nil {
@@ -896,15 +924,30 @@ func (s *RowStream) fetchRows(pks []string) error {
 			}
 			ri := 0
 			for _, j := range miss {
+				withPTTL := rc != nil || needTTL
+				readTTL := func(raw map[string]string) int64 {
+					if !withPTTL {
+						return -1
+					}
+					pttlMs, _ := strconv.ParseInt(fmt.Sprint(results[ri]), 10, 64)
+					ri++
+					// 剩余秒（上取整：亚秒 TTL 不呈 0 混淆"无 TTL"语义；-1 永不过期原样）
+					if raw != nil && pttlMs > 0 {
+						raw[meta.TTLPseudoColumn] = strconv.FormatInt((pttlMs+999)/1000, 10)
+					} else if raw != nil {
+						raw[meta.TTLPseudoColumn] = "-1"
+					}
+					return pttlMs
+				}
 				switch {
 				case rc != nil:
 					raw, _ := utils.StringMap(results[ri])
-					pttlMs, _ := strconv.ParseInt(fmt.Sprint(results[ri+1]), 10, 64)
-					ri += 2
+					ri++
 					if len(raw) == 0 {
 						continue // 空 Hash = 行过期/不存在
 					}
-					rc.Add(keycodec.RowKey(t.Name, batch[j]), raw, time.Duration(pttlMs)*time.Millisecond)
+					pttlMs := readTTL(raw)
+					rc.Add(keycodec.RowKey(t.Name, batch[j]), raw, time.Duration(pttlMs)*time.Millisecond) // 条目寿命 ≤ 行剩余 TTL（过期行绝不返回）
 					raws[j] = raw
 				case cols == nil:
 					raw, _ := utils.StringMap(results[ri])
@@ -912,15 +955,20 @@ func (s *RowStream) fetchRows(pks []string) error {
 					if len(raw) == 0 {
 						continue
 					}
+					readTTL(raw)
 					raws[j] = raw
 				case len(cols) == 0:
 					if fmt.Sprint(results[ri]) == "1" {
 						raws[j] = map[string]string{}
 					}
 					ri++
+					if raws[j] != nil {
+						readTTL(raws[j])
+					}
 				default:
 					raws[j] = hmgetMap(cols, results[ri])
 					ri++
+					readTTL(raws[j])
 				}
 			}
 		}

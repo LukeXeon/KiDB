@@ -4,6 +4,7 @@
 package rowcodec
 
 import (
+	"strings"
 	"fmt"
 	"strconv"
 	"time"
@@ -161,6 +162,17 @@ func DecodeRow(t *meta.TableDef, pk string, raw map[string]string) []any {
 		}
 		row = append(row, v)
 	}
+	// _ttl 伪列恒挂 schema 尾部（docs/07 §7.1；SELECT * 含它——gms 无隐藏列
+	// 机制的诚实取舍）。raw 无该键 = 非 PTTL 感知路径（如编辑器预读）→ NULL。
+	if v := raw[meta.TTLPseudoColumn]; v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			row = append(row, n)
+		} else {
+			row = append(row, nil)
+		}
+	} else {
+		row = append(row, nil)
+	}
 	return row
 }
 
@@ -173,6 +185,17 @@ func DecodeRowCols(t *meta.TableDef, pk string, raw map[string]string, cols []st
 	}
 	row := make([]any, 0, len(cols))
 	for _, name := range cols {
+		if strings.EqualFold(name, meta.TTLPseudoColumn) {
+			// _ttl 伪列：exec 读路径把行剩余 TTL 秒写入 raw["_ttl"]（PTTL 自省）
+			v := raw[meta.TTLPseudoColumn]
+			n, err := strconv.ParseInt(v, 10, 64)
+			if v == "" || err != nil {
+				row = append(row, nil)
+				continue
+			}
+			row = append(row, n)
+			continue
+		}
 		col, ok := t.Column(name)
 		if !ok {
 			row = append(row, nil)

@@ -6,13 +6,20 @@
 
 ## 7.1 SQL 表达
 
-`_ttl` 保留列（秒）：
+`_ttl` 保留列（秒，BIGINT）：
 
 - `>0`：行级 TTL；
-- `0`/`NULL`：不过期；
-- `<0`：软删除（立即过期走清扫）。
+- `0`：显式无 TTL（覆盖表级 `default_ttl`）；
+- `NULL`（不提及）：承表级 `default_ttl`；
+- `<0`：软删除（立即过期走清扫）；
+- UPDATE 不提 `_ttl`：**保留行当前 TTL**（write_row.lua `ttlms=-2` 分支——
+  行 TTL 与登记册照旧，回执按新成员重写；新行无可保则登记不过期）。
 
-表级 `default_ttl` 在 Catalog 声明，行未指定时继承。`SELECT *` 不含 `_ttl`；显式 `SELECT _ttl` 或 `TTL(pk)` 函数走 `TTL d:{table}:{pk}` 自省。
+表级 `default_ttl` 在 Catalog 声明。读出 = **剩余 TTL 秒**（PTTL 自省，-1 = 无 TTL）：
+`SELECT _ttl FROM t WHERE ...` 显式投影即得；`SELECT *` 也含 `_ttl` 列
+（gms 无隐藏列机制，`*` 展开为显式投影——这是与"SELECT * 不含伪列"初衷的
+诚实偏差；代价：含 `_ttl` 的投影逐行 PTTL 搭同一 pipeline、行级近缓存对该
+投影形态自动绕过——hotkey_row_cache 默认关闭，取舍可控）。
 
 **保留列纪律**：`_` 前缀是引擎元数据列的命名空间（生态惯例：MongoDB `_id`、ES `_source`、TiDB `_tidb_rowid`）——**DDL 拒绝用户定义 `_` 开头的列**（[02](02-SQL服务器.md) §2.4 校验），伪列冲突从规则上消失。SQL 面只暴露 `_ttl`；`_ver` 为纯内部列（幂等校验/维表刷新用），不可 SELECT，不出现在任何文档化的 SQL 面。
 

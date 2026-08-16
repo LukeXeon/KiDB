@@ -15,7 +15,7 @@ import (
 // 带过滤 COUNT / MIN / MAX 由引擎算子承载（结果精确）；
 // 端点加速写法 ORDER BY col LIMIT 1 与 MIN/MAX 结果一致。
 func TestAggregatesNative(t *testing.T) {
-	dsn, _, cleanup := newTestServer(t)
+	dsn, _, _, cleanup := newTestServer(t)
 	defer cleanup()
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
@@ -29,7 +29,7 @@ func TestAggregatesNative(t *testing.T) {
 		require.NoError(t, err, q)
 	}
 	execSQL("CREATE TABLE agg (id BIGINT NOT NULL, v INT, PRIMARY KEY (id)) COMMENT 'kidb:{}'")
-	execSQL("INSERT INTO agg VALUES (1, 10), (2, 20), (3, 30)")
+	execSQL("INSERT INTO agg (id, v) VALUES (1, 10), (2, 20), (3, 30)")
 
 	// COUNT(*) 无过滤：replaceCountStar → StatisticsTable（不经 PartitionRows）
 	var n int

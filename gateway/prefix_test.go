@@ -17,7 +17,7 @@ import (
 // `col LIKE 'abc%'` -> lex copy ZRANGEBYLEX merge path; results globally lex-ordered
 // and consistent with full scan; non-const-prefix LIKE keeps the no-index discipline.
 func TestPrefixSearchWire(t *testing.T) {
-	dsn, _, cleanup := newTestServer(t)
+	dsn, _, _, cleanup := newTestServer(t)
 	defer cleanup()
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)

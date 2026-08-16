@@ -50,6 +50,7 @@ type WriteReq struct {
 	PK             string
 	Fields         map[string]string
 	TTL            time.Duration // 0 = 无 TTL；<0 = 软删除（立即过期走清扫，docs/07 §7.1）
+	KeepTTL        bool          // UPDATE 不提 _ttl：行 TTL/登记册照旧（write_row.lua ttlms=-2）
 	ExpectedOldVer *int64        // nil = 不校验；非 nil = CAS 写语义（docs/05 §5.6）
 }
 
@@ -192,7 +193,9 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string, s
 			kidb.ErrStaleMetadata, i18n.T("tx.ver_mismatch", rowkey, *req.ExpectedOldVer, observed))
 	}
 	ttlms := int64(req.TTL / time.Millisecond)
-	if req.TTL < 0 {
+	if req.KeepTTL {
+		ttlms = -2 // UPDATE 保留语义（docs/07 §7.1）
+	} else if req.TTL < 0 {
 		ttlms = 1 // 软删除：立即过期走清扫
 	}
 	argv := []any{

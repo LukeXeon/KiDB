@@ -71,7 +71,7 @@ func (e *editor) insert(ctx *sql.Context, row sql.Row) error {
 	if err := RejectRO(ctx); err != nil {
 		return err
 	}
-	pk, fields, err := e.splitRow(row)
+	pk, fields, ttlSec, err := e.splitRow(row)
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func (e *editor) insert(ctx *sql.Context, row sql.Row) error {
 		Table:  e.t.def,
 		PK:     pk,
 		Fields: fields,
-		TTL:    e.t.rowTTL(),
+		TTL:    e.t.rowTTL(ttlSec),
 	})
 	if err != nil {
 		return e.withProgress(translateWriteErr(err))
@@ -122,11 +122,11 @@ func (e *editor) update(ctx *sql.Context, old, new sql.Row) error {
 	if err := RejectRO(ctx); err != nil {
 		return err
 	}
-	oldPK, _, err := e.splitRow(old)
+	oldPK, _, _, err := e.splitRow(old)
 	if err != nil {
 		return err
 	}
-	newPK, fields, err := e.splitRow(new)
+	newPK, fields, ttlSec, err := e.splitRow(new)
 	if err != nil {
 		return err
 	}
@@ -139,10 +139,11 @@ func (e *editor) update(ctx *sql.Context, old, new sql.Row) error {
 		return e.withProgress(err)
 	}
 	_, err = e.t.deps.Guard.WriteRow(ctx, txguard.WriteReq{
-		Table:  e.t.def,
-		PK:     newPK,
-		Fields: fields,
-		TTL:    e.t.rowTTL(),
+		Table:   e.t.def,
+		PK:      newPK,
+		Fields:  fields,
+		TTL:     e.t.rowTTL(ttlSec),
+		KeepTTL: ttlSec == nil, // UPDATE 不提 _ttl → 保留行当前 TTL（docs/07 §7.1）
 	})
 	if err != nil {
 		return e.withProgress(translateWriteErr(err))
@@ -160,7 +161,7 @@ func (e *editor) delete(ctx *sql.Context, row sql.Row) error {
 	if err := RejectRO(ctx); err != nil {
 		return err
 	}
-	pk, _, err := e.splitRow(row)
+	pk, _, _, err := e.splitRow(row)
 	if err != nil {
 		return err
 	}
@@ -191,10 +192,13 @@ func (e *editor) readExisting(ctx *sql.Context, pk string) (sql.Row, error) {
 func rowKeyOf(table, pk string) string { return "d:" + table + ":{" + pk + "}" }
 
 // splitRow 把 gms 行拆为 pk 与编码字段（nil → NULL = 字段缺失）。
-func (e *editor) splitRow(row sql.Row) (pk string, fields map[string]string, err error) {
+// 末位 _ttl 伪列（docs/07 §7.1）：>0 行 TTL 秒 / 0 显式无 TTL（覆盖表级
+// default_ttl）/ <0 软删除（立即过期走清扫）/ nil 承默认。
+func (e *editor) splitRow(row sql.Row) (pk string, fields map[string]string, ttlSec *int64, err error) {
 	fields = map[string]string{}
-	if len(row) != len(e.t.def.Columns) {
-		return "", nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.row_width", len(row), len(e.t.def.Columns)))
+	ncol := len(e.t.def.Columns)
+	if len(row) != ncol && len(row) != ncol+1 {
+		return "", nil, nil, fmt.Errorf("%w: %s", kidb.ErrContractViolation, i18n.T("err.row_width", len(row), ncol))
 	}
 	for i, col := range e.t.def.Columns {
 		v := row[i]
@@ -204,7 +208,7 @@ func (e *editor) splitRow(row sql.Row) (pk string, fields map[string]string, err
 			}
 			pk, err = rowcodec.Encode(col.Type, v)
 			if err != nil {
-				return "", nil, err
+				return "", nil, nil, err
 			}
 			continue
 		}
@@ -213,16 +217,29 @@ func (e *editor) splitRow(row sql.Row) (pk string, fields map[string]string, err
 		}
 		enc, err := rowcodec.Encode(col.Type, v)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		fields[col.Name] = enc
 	}
-	return pk, fields, nil
+	if len(row) == ncol+1 && row[ncol] != nil { // _ttl 伪列（schema 恒挂尾）
+		ttl, ok := row[ncol].(int64)
+		if !ok {
+			return "", nil, nil, fmt.Errorf("%w: _ttl 需为整数秒", kidb.ErrUnsupported)
+		}
+		ttlSec = &ttl
+	}
+	return pk, fields, ttlSec, nil
 }
 
-// rowTTL 行级 TTL：v1 走表级 default_ttl（行内 _ttl 伪列通道见 docs/07 §7.1，
-// 随会话/伪列支持落地）。
-func (t *Table) rowTTL() time.Duration {
+// rowTTL 行级 TTL：_ttl 伪列显式值优先（>0 秒；0=显式无 TTL 覆盖表级默认；
+// <0 软删除=立即过期走清扫），否则表级 default_ttl。
+func (t *Table) rowTTL(ttlSec *int64) time.Duration {
+	if ttlSec != nil {
+		if *ttlSec < 0 {
+			return time.Millisecond // 软删除：1ms 后立即过期
+		}
+		return time.Duration(*ttlSec) * time.Second
+	}
 	if t.def.DefaultTTL > 0 {
 		return time.Duration(t.def.DefaultTTL) * time.Second
 	}

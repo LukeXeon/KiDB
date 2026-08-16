@@ -1,5 +1,5 @@
 -- @name write_row
--- @version 4
+-- @version 5
 -- @keys_desc KEYS[1]=row_key(router); KEYS[2..n-2]=bucket/bm_keys; KEYS[n-1]=exp; KEYS[n]=rcpt
 -- @idempotent true
 --
@@ -11,7 +11,8 @@
 -- ARGV 协议（v3：描述符 8 字段；桶段 KEYS[2..n-3] 相对序号 1 起；0 = 无）：
 --   [1] op: "W"=写入（含 upsert 分支） / "D"=删除
 --   [2] pk
---   [3] ttl_ms（"0"=无 TTL）
+--   [3] ttl_ms（"0"=无 TTL；"-2"=保留现状（UPDATE 不提 _ttl 时——行 TTL 与
+--        exp 登记照旧，回执按新成员重写、宽限=行剩余 PTTL+300s））
 --   [4] now_sec（过期登记册 score 基准，秒）
 --   [5] expected_old_ver（"-1"=不校验；与行内 _ver 不符返回 stale）
 --   [6] M = 索引描述符个数
@@ -157,7 +158,30 @@ for i = 1, M do
 end
 
 -- 过期登记册 + 行 TTL + 回执
-if ttlms > 0 then
+if ttlms == -2 then
+  -- UPDATE 保留语义：行 TTL 不动（Redis HSET 本就不清 TTL），exp 已登记照旧；
+  -- 新行（旧不存在/已过期）无 TTL 可保 → 登记 +inf；回执按新成员重写
+  redis.call('DEL', rcptkey)
+  if not oldExists then
+    redis.call('ZADD', expkey, '+inf', pk)
+  end
+  for i = 1, M do
+    local d = descs[i]
+    if d.redoKey > 0 and d.kind ~= 'A' then
+      redis.call('HSET', rcptkey, 'idx:' .. i,
+        KEYS[1 + d.redoKey] .. string.char(31) .. d.redoMember)
+    end
+  end
+  local U = tonumber(ARGV[p]); p = p + 1
+  for i = 1, U do
+    redis.call('HSET', rcptkey, '__uniq:' .. ARGV[p], ARGV[p+1])
+    p = p + 2
+  end
+  local remain = redis.call('PTTL', rowkey)
+  if remain > 0 then
+    redis.call('PEXPIRE', rcptkey, remain + 300000) -- receipt_grace_period
+  end
+elseif ttlms > 0 then
   redis.call('ZADD', expkey, now + ttlms / 1000, pk)
   redis.call('PEXPIRE', rowkey, ttlms)
   redis.call('DEL', rcptkey)

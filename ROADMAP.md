@@ -78,7 +78,7 @@
 | 性能基准门禁（k6/自研压测，1 亿行数据集） | docs/12 §12.7 指标在案；内核侧基线基准已落地（exec/bench_test.go + shape_test.go 命令形状不变式），缺真实集群门禁 |
 | exp 登记册自动细分（体积超阈自动重散列，docs/07 §7.2 容量账） | 分片键机制保留在 keycodec；当前恒 1 分片，10 亿行+ 表触碰 8MB 红线（文档已声明） |
 | ~~DROP TABLE 大表后台清理作业~~ ✅ | v6.x 落地：阈值内同步、超阈值作业化（c:dropjobs + slot 游标 + 巡检接管 + 残留 key 清理），docs/06 §6.3 |
-| `_ttl` 伪列 SQL 面（行级 TTL 显式读写） | docs/07 §7.1；当前表级 default_ttl 已生效 |
+| ~~`_ttl` 伪列 SQL 面~~ ✅ | v6.x 落地：schema 挂尾虚拟列（写：>0 设 TTL/0 覆盖默认/NULL 承默认/<0 软删除；读=剩余 TTL 秒 PTTL 自省；UPDATE 不提则保留——write_row.lua v5 keep 分支；SELECT * 含该列，gms 无隐藏列机制的诚实取舍，docs/07 §7.1） |
 | JSON 列 msgp 压缩 | 文本形态正确无虞；压缩为体积优化（`_fmtv` 演进路径在案） |
 
 ## D. 有意不做（红线，docs/14）

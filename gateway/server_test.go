@@ -11,6 +11,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 
+	miniredis "github.com/alicebob/miniredis/v2"
 	"kidb"
 	"kidb/engine"
 	"kidb/exec"
@@ -20,9 +21,9 @@ import (
 )
 
 // newTestServer 在 miniredis 上起完整网关（随机端口），返回 DSN 与内核依赖（测试断言用）。
-func newTestServer(t *testing.T) (string, engine.Deps, func()) {
+func newTestServer(t *testing.T) (string, engine.Deps, *miniredis.Miniredis, func()) {
 	t.Helper()
-	cli, reg, _ := testutil.New(t)
+	cli, reg, m := testutil.New(t)
 
 	store := meta.NewCatalogStore(cli, reg)
 	deps := engine.Deps{
@@ -49,13 +50,13 @@ func newTestServer(t *testing.T) (string, engine.Deps, func()) {
 	time.Sleep(50 * time.Millisecond) // 等监听就绪
 
 	dsn := fmt.Sprintf("root:@tcp(%s)/kidb", l.Addr().String())
-	return dsn, deps, func() { srv.Close() }
+	return dsn, deps, m, func() { srv.Close() }
 }
 
 // TestGatewaySmoke 端到端冒烟：真实 MySQL 驱动 → DDL → CRUD → 预处理。
 // 覆盖 docs/02 §2.10 的最小客户端路径（go-sql-driver）。
 func TestGatewaySmoke(t *testing.T) {
-	dsn, deps, cleanup := newTestServer(t)
+	dsn, deps, _, cleanup := newTestServer(t)
 	defer cleanup()
 
 	db, err := sql.Open("mysql", dsn)

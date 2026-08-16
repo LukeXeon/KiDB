@@ -16,8 +16,8 @@ import (
 	"kidb/nearcache"
 	"kidb/script"
 	"kidb/sweeper"
-	"kidb/txguard"
 	"kidb/tuning"
+	"kidb/txguard"
 	"kidb/utils"
 )
 
