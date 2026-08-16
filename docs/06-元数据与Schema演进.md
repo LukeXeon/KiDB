@@ -10,7 +10,7 @@
 |---|---|---|
 | `c:table:{table}` | Hash | 表定义：列（名/类型/默认值）、主键、索引定义（含 COMMENT 载体解析出的 KiDB 选项）、`default_ttl`、`max_row_bytes`、`expected_rows`、`exp_shards`、`dimension` 标记；`_ver`（表级版本，INCR）、`_job`（进行中的 DDL 作业，无则空） |
 | `ver:schema` | String | 全局 schema 版本：任何 DDL 完成一步即 INCR——lease 刷新信号 |
-| `bm:{table}:{idx}:{stag}` | Hash | BucketMap 分片（稀疏 + 每 slot 分片，[03](03-数据模型与编码.md) §3.1 注记）+ `version` 字段 |
+| `bm:{table}:{idx}` | Hash | BucketMap 文档（**v7.0 集中每索引一文档**——16384 分片消除：桶不再按行 slot 散布，跨 slot CAS 物理冲突随之消失）：热值子桶表 + 范围子桶区间表 + `version` 字段 |
 | `cfg:global` | Hash | 集群配置（[10](10-配置与可观测.md) §10.2）——与元数据共用同一套版本校验刷新循环 |
 
 表级 DDL payload 字段全集（CREATE TABLE COMMENT `kidb:{...}`）：**仅 `default_ttl`**（秒，0=无）。索引级 payload：**仅 `covering`（数组，列必须 NOT NULL）与 `async`（bool，唯一索引互斥）**。设计原点纪律（[01](01-定位架构与TiDB对齐.md) §1.0）：调优/容量类不设 payload 字段——行体积上限固定 1MB（tuning.toml `txguard.max_row_bytes`）；exp 登记册细分恒 1（自动细分为自治后续项）；维表判定按实时行数；字典序副本对字符串等值/唯一索引自动开启。
@@ -24,8 +24,8 @@
 1. **全局锚点**：`ver:schema` 单调递增；每个实例内存记录本地快照版本；
 2. **租约窗口**：`schema_lease_ms`（默认 1000ms）内实例**信任本地快照**直接使用——这是热路径零额外 RTT 的关键；
 3. **越界必检**：距上次校验超过 lease 的实例，下一次元数据使用前必须先比对 `ver:schema`（一次 `GET`，经逻辑 pipeline 与业务命令合流，不占独立连接）；版本不变 → 重置租约计时；版本变 → 全量刷新 Catalog/BucketMap 快照；
-4. **写路径独立兜底**：写 Lua 内对 BucketMap version 做 CAS（[05](05-写入路径.md) §5.1 第 4 步）——即使 lease 窗口内写者拿到旧桶布局，脚本内 CAS 也会返回 stale 强制刷新重试。**正确性从不依赖 lease 守约，lease 只是性能优化**（对齐 TiDB：lease 是优化，schema 版本校验才是正确性）；
-5. **读路径容忍窗口**：lease 窗口内读到旧布局（如桶刚分裂），后果只是多扫一个父桶/旧桶——回表校验兜底中间态（[04](04-查询路径.md) §4.3），不会出错行；
+4. **写路径独立兜底（v7.0 形态）**：bm CAS 已移出行 Lua（bm 集中后跨 slot 不可行内）——lease 窗口内写者拿到旧桶布局时，迟到写由分裂 DRAINING 排干循环收容迁移（父桶不排空不得 DELETED；版本戳 member 使迁移幂等，[05](05-写入路径.md) §5.1）。**正确性从不依赖 lease 守约，lease 只是性能优化**（对齐 TiDB：lease 是优化，schema 版本校验才是正确性）；
+5. **读路径容忍窗口**：lease 窗口内读到旧布局（如桶刚分裂），后果只是多读一个父桶/旧桶——回表校验兜底中间态（[04](04-查询路径.md) §4.3），不会出错行；
 
 与 TiDB 的差异（有意为之）：TiDB lease 违约会阻塞/失败 SQL（强 schema 一致）；KiDB lease 违约最坏走旧桶布局多扫一点、写路径 stale 重试——**缓存定位下"短暂性能退化"优于"可用性阻断"**。
 
@@ -52,12 +52,12 @@ DDL 语句经 [02](02-SQL服务器.md) §2.4 解析校验后，不是同步完�
 2. 作业落库：Catalog HSET `_job` = {type, 目标定义, 状态, 进度游标, 起始时间}（带表级 _ver CAS）
 3. 执行（按类型）：
    - CREATE TABLE：立即生效（空表无回填）
-   - CREATE INDEX：表标记 index_building → 后台回填：exp 登记册遍历分批取 pk（[07](07-TTL与过期清扫.md) §7.4）
-     → pipeline 回表取字段 → 按批 ZADD 进新桶（批 ≤512，限流通道，默认 1 万行/s/实例）
-     → 回填期间的新写入：写 Lua 发现 `_job` 存在该索引 → 双写（新桶已入 Catalog 索引集，状态机按 DRAINING 语义只写新桶）
+   - CREATE INDEX：表标记 index_building → 后台回填：exp 集中登记册遍历分批取 pk（[07](07-TTL与过期清扫.md) §7.4）
+     → pipeline 回表取字段 → **按行值 ZADD 值寻址新桶**（v7.0：不再按 slot 分 16384 组；版本戳 member 幂等重放，批 ≤512，限流通道，默认 1 万行/s/实例）
+     → 回填期间的新写入：索引已在 Catalog（index_building 标记）→ 正常两段写命令组覆盖该索引（DRAINING 语义），与回填幂等重叠
      → 追平校验：回填游标到尾 + 增量日志（如有 async）清空 → 作业完成
    - DROP INDEX：Catalog 移除定义（读路径即时停用）→ 后台按桶 key 规则逐批 UNLINK 清理
-   - DROP TABLE：表标记 dropped（拒绝新读写，报错表不存在）→ 后台经 exp 登记册遍历逐批清理行/索引/回执 → 删除 Catalog
+   - DROP TABLE：表标记 dropped（拒绝新读写，报错表不存在）→ 后台清理：**驱动源 = 登记册 ∪ 全部索引桶成员并集**（v7.0——集中桶持有全量成员，比单靠登记册更能兜住登记漏登的孤儿行；行 slot 清理 + 异 slot 桶清理）→ 删除 Catalog
 4. 完成：`ver:schema` INCR + `_job` 清空 + 表 `_ver` INCR → 全实例经 lease 机制秒级收敛
 ```
 
