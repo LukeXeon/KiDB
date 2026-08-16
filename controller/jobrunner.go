@@ -182,7 +182,7 @@ func (r *JobRunner) backfillSlots(ctx context.Context, def *meta.TableDef, idx *
 		return kidb.ErrContractViolation
 	}
 	s := r.exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, SlotLo: lo, SlotHi: hi})
-	defer s.Close()
+	defer func() { _ = s.Close() }() // 流收尾：错误无消费方，显式丢弃
 	var cmds []kv.Cmd
 	// 唯一索引回填建预约（review 实证缺失：不建预约 = 存量值对唯一约束不可见）。
 	// 先与 ZADD 同 pipeline SET NX；NX 失败的行经预约自愈复查，仍冲突 = 真实重复 → 中止作业。

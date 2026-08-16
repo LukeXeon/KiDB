@@ -87,7 +87,7 @@ func (e *Elector) Campaign(ctx context.Context, role func(ctx context.Context) e
 		roleCtx, cancel := context.WithCancel(ctx)
 		watchDone := make(chan struct{})
 		go func() {
-			e.runWatchdog(roleCtx, cancel) // 续约失败 → cancel roleCtx
+			_ = e.runWatchdog(roleCtx, cancel) // 续约失败 → cancel roleCtx（返回即结束，错误无消费方）
 			close(watchDone)
 		}()
 		roleErr := runRole(roleCtx, role)

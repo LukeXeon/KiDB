@@ -1,5 +1,5 @@
-// Package kidb 是 KiDB 内核的根包：内核组装（Kernel）、后端可替换契约
-// （KvClient）、引导配置（Bootstrap）与错误码。SQL 入口 = gms 引擎
+// Package kidb 是 KiDB 内核的根包：内核组装（Kernel）、引导配置（Bootstrap）
+// 与错误码。SQL 入口 = gms 引擎
 // （v6.0 单引擎纪律：网关直挂引擎，内核不设第二 SQL 接口——Querier 已删，
 // review 实证其零实现零消费，文档面见 docs/01 §1.6 修订）。
 //
@@ -35,7 +35,7 @@ func WithLogger(h slog.Handler) Option {
 	return func(k *Kernel) { k.logger = slog.New(h) }
 }
 
-// NewKernel 注入 KvClient 与进程级引导配置，组装内核。
+// NewKernel 注入 kv.Client 与进程级引导配置，组装内核。
 //
 // 启动期执行（docs/09 §9.4、docs/05 §5.7）：
 //  1. Lua 资产加载与静态校验（script.Load，fail-fast）；

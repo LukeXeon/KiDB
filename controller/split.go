@@ -198,7 +198,7 @@ func (s *Splitter) SplitRange(ctx context.Context, table, idxID string, slot uin
 		if err != nil {
 			return err
 		}
-		var rbPos int = -1
+		rbPos := -1
 		for i, rb := range sh.Ranges {
 			if rb.Idx == bucketIdx {
 				rbPos = i

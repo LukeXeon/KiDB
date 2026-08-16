@@ -55,7 +55,6 @@ type orderedMerger struct {
 	ways   []mergeWay
 	desc   bool
 	seeded bool
-	empty  bool // 本区间确定无更多成员（堆空且无待补页）
 }
 
 // newOrderedMerger 构造（不发起 IO；首个 fill 时种子）。

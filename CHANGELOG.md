@@ -145,3 +145,9 @@
 
 - 客户端面全收 `kidb/kv` 包：`KvClient` → `kv.Client`（Kv 前缀移除），retry/退避装饰器、SyncClock、参考适配器（`kv/goredis`）同迁；根包收敛为 Bootstrap/错误码/Kernel 组装面；Querier 死接口删除。
 - 文件名修订：`controller/autosplit.go` → `manager.go`（Manager 驱动 L4/分裂决策，不止 split）；`engine/starprobe_test.go` → `star_projection_test.go`。
+
+### 静态检查门禁（2026-08-16）
+
+- **golangci-lint v2.12 经 go tool 指令入库**（`tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint`，与构建同 Go 版本编译——v1 路径已冻结于 1.64.x，故取 v2 模块路径）。配置 `.golangci.yml` 克制原则：默认集（errcheck/govet/ineffassign/staticcheck/unused）+ misspell/unconvert + gofmt/goimports 格式化门禁，不做风格警察；唯一豁免 = 测试清理面不查 errcheck（`defer Close`/`go Start` 的错误无行动方，测试的错误探测由断言承担）。执行入口 `make lint`（Makefile 新设 build/test/vet/lint/wire 五个快捷目标，wire 目标钉死"先删旧产物再经 module graph 运行"的实证纪律）。
+- **首跑 44 项全修**：生产面 errcheck 7 处——keycodec 桶 key 尾缀解析改严格 `strconv.Atoi`（`fmt.Sscanf` 静默零值是自家生成格式的隐性宽容，畸形尾缀现在显式 ok=false，与函数其余 malformed 分支同纪律）、选举 watchdog/角色竞选 goroutine 返回值显式 `_ =`、DDL 三处流式扫描收尾 `_ =` 化；死代码 3 处——bucketmap `Shard.loaded`、topk `orderedMerger.empty`（耗尽判定由内联条件承担，字段是早期迭代残留）、sweeper_test `sprint`；staticcheck 4 处（De Morgan 展开 / 冗余类型声明 / `fmt.Sprintf("%s",…)` / Yoda 条件）；dropjob 分片循环无效首赋值 1 处。测试清理面 32 处由豁免规则承接。**修复期自伤实证**：尾缀严格化首版把 `'}'` 含进后缀段（`rest[end:]` off-by-one），ParseEqBucketKey 对全部合法 key 拒解析 → Manager 分裂复核静默全灭——`TestAutoSplitViaTelemetry` 当场抓获，补 keycodec 生成→反解往返单测（含畸形尾缀/负子桶拒绝）钉死契约。
+- **连带漂移修正**（f14ee47 改名残留，本批 lint 巡检发现）：README/docs/代码注释的 `KvClient` → `kv.Client`（README 契约方法数 5→6 同步——PipelineReplica 扩面时的漏改）；docs/README 摘除"DDL 解析直接依赖 TiDB pkg/parser"声明（v6.0 已零 TiDB 依赖）。CHANGELOG/ROADMAP 历史版本条目按"历史记录不改写"纪律保留原名。

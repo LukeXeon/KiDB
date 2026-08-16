@@ -71,9 +71,8 @@ func (r *JobRunner) stepDrop(ctx context.Context, job *meta.DropJob) error {
 		// 死行 DeleteRow 是 no-op（write_row D 分支不撤 exp）——
 		// 收集后立即强制清扫出登记册（SweepPksForced：按回执清桶成员 +
 		// 预约释放），否则分页循环在死行上空转（实现期实证死锁形态）。
-		expKey := keycodec.ExpKeyN(def.Name, uint16(slot), 0, def.EffectiveExpShards())
 		for shard := 0; shard < def.EffectiveExpShards(); shard++ {
-			expKey = keycodec.ExpKeyN(def.Name, uint16(slot), shard, def.EffectiveExpShards())
+			expKey := keycodec.ExpKeyN(def.Name, uint16(slot), shard, def.EffectiveExpShards())
 			for {
 				res, err := r.cli.Do(ctx, "ZRANGE", expKey, 0, batch-1)
 				if err != nil {

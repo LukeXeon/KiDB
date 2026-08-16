@@ -141,7 +141,7 @@ func (r *Reconciler) ReconcileSlot(ctx context.Context, def *meta.TableDef, slot
 	deadSwept := map[string]bool{} // 死且已清扫
 	for i, pk := range pks {
 		vals, allNil := hmgetStrings(results[2*i])
-		rowAlive := !(len(vals) == 0 || allNil) // HMGET 全 nil = 行不存在
+		rowAlive := len(vals) > 0 && !allNil // HMGET 全 nil = 行不存在
 		if !rowAlive {
 			if fmt.Sprint(results[2*i+1]) != "1" {
 				deadSwept[pk] = true

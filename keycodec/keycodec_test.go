@@ -84,3 +84,34 @@ func TestEscapeValueDigest(t *testing.T) {
 		t.Fatal("同值必须同摘要")
 	}
 }
+
+// 桶 key 生成→反解往返（契约钉死：manager 复核经 ParseEqBucketKey 还原候选——
+// 尾缀解析边界（'}' 含入后缀段）曾静默拒解析导致分裂复核全灭）。
+func TestBucketKeyParseRoundTrip(t *testing.T) {
+	for _, sub := range []int{0, 3, 17} {
+		eq := EqBucketKey("users", "idx_city", "hot", 321, sub)
+		table, idx, encVal, slot, n, ok := ParseEqBucketKey(eq)
+		if !ok || table != "users" || idx != "idx_city" || encVal != "hot" || slot != 321 || n != sub {
+			t.Fatalf("eq 往返错位: %q → %v %v %v %v %v %v", eq, table, idx, encVal, slot, n, ok)
+		}
+		rg := RangeBucketKey("users", "idx_age", 321, sub)
+		table, idx, slot, n, ok = ParseRangeBucketKey(rg)
+		if !ok || table != "users" || idx != "idx_age" || slot != 321 || n != sub {
+			t.Fatalf("range 往返错位: %q → %v %v %v %v %v", rg, table, idx, slot, n, ok)
+		}
+	}
+	// 畸形尾缀显式拒绝（与其余 malformed 分支同纪律）
+	if _, _, _, _, _, ok := ParseEqBucketKey("i:users:idx_city=hot:" + SlotTag(321) + "#x7"); ok {
+		t.Fatal("非法尾缀必须 ok=false")
+	}
+	if _, _, _, _, ok := ParseRangeBucketKey("i:users:idx_age:" + SlotTag(321) + "#r-1"); ok {
+		t.Fatal("负数子桶必须 ok=false")
+	}
+	// 含结构字符的值经转义后仍可往返
+	v := "has:colon{and}brace"
+	eq := EqBucketKey("users", "idx_city", v, 7, 2)
+	_, _, encVal, _, n, ok := ParseEqBucketKey(eq)
+	if !ok || encVal != EscapeValue(v) || n != 2 {
+		t.Fatalf("转义值往返错位: %q → %q n=%d ok=%v", eq, encVal, n, ok)
+	}
+}

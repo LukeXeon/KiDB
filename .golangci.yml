@@ -1,0 +1,21 @@
+version: "2"
+
+# golangci-lint v2 配置（纪律：配置面膨胀即事故——默认集 + 低成本增量，不做风格警察）。
+# 默认集（errcheck/govet/ineffassign/staticcheck/unused）之上仅加：
+#   misspell 拼写、unconvert 冗余转换；格式化门禁 gofmt/goimports。
+# 生成代码（wire_gen.go 等带 DO NOT EDIT 头）由默认 generated=lax 自动豁免。
+linters:
+  enable:
+    - misspell
+    - unconvert
+  exclusions:
+    rules:
+      # 测试清理面（defer Close / go Start）不查 errcheck：测试的错误探测由断言承担，
+      # 清理路径错误从不可行动。生产代码 errcheck 全量生效。
+      - path: _test\.go
+        linters:
+          - errcheck
+formatters:
+  enable:
+    - gofmt
+    - goimports

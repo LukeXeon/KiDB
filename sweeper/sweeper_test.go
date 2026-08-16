@@ -2,7 +2,6 @@ package sweeper
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -111,15 +110,4 @@ func TestSweepSkipsResurrected(t *testing.T) {
 
 	require.True(t, p.Exists(keycodec.RowKey(tbl.Name, "2")))
 	require.Equal(t, "0", p.ZScore(keycodec.EqBucketKey(tbl.Name, "idx_city", "beijing", slot, 0), "2"))
-}
-
-func sprint(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case []byte:
-		return string(x)
-	default:
-		return fmt.Sprint(v)
-	}
 }

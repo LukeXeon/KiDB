@@ -69,7 +69,6 @@ type Shard struct {
 	Next    int                 // 桶下标分配器
 	Eq      map[string]*EqEntry // 等值/字典序副本条目（"l" 为字典序副本）
 	Ranges  []RangeBucket       // 范围桶区间列表（默认单桶 [{0,-inf,+inf}]）
-	loaded  bool
 }
 
 // DefaultShard 空分片（规则推导的默认形态）。

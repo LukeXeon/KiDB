@@ -1,7 +1,7 @@
 # KiDB：Redis 集群 SQL 查询层 · 详细设计
 
 > 项目代号：**KiDB**（开源项目）
-> 定位：以 **MySQL 协议网关（server 单形态）** 交付的分布式 SQL 缓存查询层——基于可替换的 Redis 集群客户端抽象（`KvClient` 接口），SQL 引擎采用 go-mysql-server，DDL 解析直接依赖 TiDB `pkg/parser`。
+> 定位：以 **MySQL 协议网关（server 单形态）** 交付的分布式 SQL 缓存查询层——基于可替换的 Redis 集群客户端抽象（`kv.Client` 接口），SQL 引擎采用 go-mysql-server（v6.0 起零 TiDB 依赖，DDL 经 gms 扩展点承接）。
 > 变更历史见根目录 [CHANGELOG.md](../CHANGELOG.md)；本目录只含当前技术设计。
 
 ## 文档索引

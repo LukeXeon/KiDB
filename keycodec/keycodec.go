@@ -180,11 +180,27 @@ func ParseRangeBucketKey(key string) (table, idx string, slot uint16, sub int, o
 		return "", "", 0, 0, false
 	}
 	slot = Slot(rest[tagPos : end+1])
-	sub = 0
-	if h := strings.Index(rest[end:], "#r"); h >= 0 {
-		fmt.Sscanf(rest[end+h:], "#r%d", &sub)
+	n, sok := parseSub(rest[end+1:], "#r")
+	if !sok {
+		return "", "", 0, 0, false
 	}
-	return table, idx, slot, sub, true
+	return table, idx, slot, n, true
+}
+
+// parseSub 反解桶 key 尾缀 "#r{n}"/"#b{n}"（无尾缀 = 0 号子桶）。
+// 尾缀只由 keycodec 自身生成；形态不符 = key 非法（与其余 malformed 分支同纪律）。
+func parseSub(suffix, prefix string) (int, bool) {
+	if suffix == "" {
+		return 0, true
+	}
+	if !strings.HasPrefix(suffix, prefix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(suffix[len(prefix):])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // ParseEqBucketKey 反解等值桶 key（`i:{table}:{idx}={value}:{stag}#b{n}`）：
@@ -214,9 +230,9 @@ func ParseEqBucketKey(key string) (table, idx, encVal string, slot uint16, sub i
 	}
 	tag := rest[tagPos : end+1]
 	slot = Slot(tag)
-	sub = 0
-	if h := strings.Index(rest[end:], "#b"); h >= 0 {
-		fmt.Sscanf(rest[end+h:], "#b%d", &sub)
+	n, sok := parseSub(rest[end+1:], "#b")
+	if !sok {
+		return "", "", "", 0, 0, false
 	}
-	return table, idx, encVal, slot, sub, true
+	return table, idx, encVal, slot, n, true
 }

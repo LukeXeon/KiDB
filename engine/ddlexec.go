@@ -124,7 +124,7 @@ func (d *Database) dropTable(ctx *sql.Context, name string) error {
 	}
 
 	s := deps.Exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan})
-	defer s.Close()
+	defer func() { _ = s.Close() }() // 流收尾：错误无消费方，显式丢弃
 	for {
 		row, err := s.Next()
 		if err != nil {
@@ -246,7 +246,7 @@ func (t *Table) checkUniqueNoDup(ctx *sql.Context, def *meta.TableDef, idx *meta
 		return fmt.Errorf("%s", i18n.T("err.column_missing", col))
 	}
 	s := t.deps.Exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan, Projection: []string{col}})
-	defer s.Close()
+	defer func() { _ = s.Close() }() // 流收尾：错误无消费方，显式丢弃
 	seen := make(map[string]struct{}, 1024)
 	cap_ := tuning.Get().Exec.L2MaxCollect
 	for {
@@ -335,7 +335,7 @@ func (t *Table) dropIndex(ctx *sql.Context, indexName string) error {
 	}
 	// 等值/唯一桶：按行值回推
 	s := deps.Exec.Run(ctx, &exec.Request{Table: def, Kind: exec.FullScan})
-	defer s.Close()
+	defer func() { _ = s.Close() }() // 流收尾：错误无消费方，显式丢弃
 	colDef, _ := def.Column(idxCopy.Columns[0])
 	for {
 		row, err := s.Next()

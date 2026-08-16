@@ -24,7 +24,7 @@ SELECT COUNT(*) FROM sessions;                          -- exp 登记册汇总�
 - **大 key/热 key 自治**：索引桶在线分裂/合并（无停写、无读空洞），热桶副本多 slot 摊开读，进程内近缓存；
 - **零 SCAN 依赖**：全链路 ZSet 分页（适配禁用 keyspace SCAN 的生产平台）；
 - **正确性纪律**：结果必须精确（回表校验兜底一切异步路径），统计可以近似；
-- **后端可替换**：内核只面向 `KvClient` 窄接口（5 个方法），go-redis/v9 参考适配器内置；任何满足[契约](docs/09-后端契约与适配器.md)的客户端均可接入。
+- **后端可替换**：内核只面向 `kv.Client` 窄接口（6 个方法），go-redis/v9 参考适配器内置；任何满足[契约](docs/09-后端契约与适配器.md)的客户端均可接入。
 
 ## 快速开始
 
@@ -41,7 +41,7 @@ mysql -h 127.0.0.1 -P 3306 -u root   # 连上即用
 
 ```
 MySQL 客户端 → kidb-server（协议层/分类器/双解析器）→ 内核（planner/exec/txguard）
-             → KvClient 适配器 → Redis Cluster
+             → kv.Client 适配器 → Redis Cluster
 ```
 
 ## 文档
@@ -53,6 +53,14 @@ MySQL 客户端 → kidb-server（协议层/分类器/双解析器）→ 内核�
 ```bash
 go test ./...          # 单测 + PBT（miniredis，真实 Lua 执行）
 go test ./contract/    # 适配器一致性套件（需 docker，真实 Redis Cluster）
+```
+
+## 开发门禁
+
+```bash
+make lint              # 静态检查（golangci-lint 经 go tool 指令入库，配置 .golangci.yml）
+make test              # = go test ./...
+make wire              # wire 重新生成（di/wire_gen.go）
 ```
 
 ## 状态与边界

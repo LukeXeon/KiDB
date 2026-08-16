@@ -76,7 +76,7 @@ func (t *Table) fullSchema() sql.Schema {
 	for _, c := range t.def.Columns {
 		gt, err := columnTypeFromText(c.TypeText)
 		if err != nil {
-			panic(fmt.Sprintf("%s", i18n.T("engine.bad_typetext", t.def.Name, c.Name, err)))
+			panic(i18n.T("engine.bad_typetext", t.def.Name, c.Name, err))
 		}
 		sch = append(sch, &sql.Column{
 			Name:          c.Name,

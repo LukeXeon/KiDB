@@ -69,7 +69,7 @@ func (s *Server) startRoles(ctx context.Context) {
 	// 语义开关轮询装配（L3 副本读 / 行级近缓存；值读 gms 注册表）
 	s.attachSemanticSwitches(ctx)
 
-	go s.roles.Elector.Campaign(ctx, s.controllerRole)
+	go func() { _ = s.roles.Elector.Campaign(ctx, s.controllerRole) }() // Campaign 内部无限竞选，仅随 ctx 结束返回
 	go s.sweeperLoop(ctx)
 	go s.indexerLoop(ctx)
 }

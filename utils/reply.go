@@ -7,7 +7,7 @@ import (
 	"kidb/i18n"
 )
 
-// reply.go：KvClient 泛化 Do/Pipeline 回复的形态归一（契约 docs/09 §9.3：
+// reply.go：kv.Client 泛化 Do/Pipeline 回复的形态归一（契约 docs/09 §9.3：
 // 适配器对 Hash 类回复可返回 map[string]string 或 map[any]any，
 // 数组类可返回 []string 或 []any——归一是全内核共享的小工具）。
 

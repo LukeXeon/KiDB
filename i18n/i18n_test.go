@@ -38,7 +38,7 @@ func TestTranslate(t *testing.T) {
 
 	// 未知语言回退 en
 	SetLang("fr")
-	require.Equal(t, "必须显式主键" != T("ddl.pk_required"), true)
+	require.NotEqual(t, "必须显式主键", T("ddl.pk_required"))
 
 	// 缺键可见（不静默）
 	require.True(t, strings.HasPrefix(T("no.such.key", 1), "!no.such.key!"))
