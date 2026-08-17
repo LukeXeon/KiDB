@@ -41,7 +41,7 @@ func WithLogger(h slog.Handler) Option {
 //  1. Lua 资产加载与静态校验（script.Load，fail-fast）；
 //  2. 能力探测：EVAL 必须，缺失返回 ErrCapability。
 //
-// 后台角色循环由 gateway 装配（startRoles，ReadWriteOnly 豁免，docs/08 §8.5）。
+// 后台角色循环由 gateway 装配（startRoles，v7.0 起无豁免，docs/08 §8.5）。
 func NewKernel(cli kv.Client, boot Bootstrap, opts ...Option) (*Kernel, error) {
 	if cli == nil {
 		return nil, errors.New("kidb: nil kv.Client")

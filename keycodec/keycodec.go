@@ -117,6 +117,10 @@ func AsyncLogKey(table, idx string, slot uint16) string {
 	return "log:idx:" + table + ":" + idx + ":" + SlotTag(slot)
 }
 
+// DLQKey 异步补写死信队列：`dlq:idx:{table}:{idx}`（v7.0 触发四③——
+// 补写硬失败（桶被 DROP/日志畸形）条目的最终落点，docs/12 §12.8）。
+func DLQKey(table, idx string) string { return "dlq:idx:" + table + ":" + idx }
+
 // BucketMapKey 桶路由表文档：`bm:{table}:{idx}`（v7.0 集中每索引一文档——
 // 16384 分片消除：桶不再按行 slot 散布，跨 slot CAS 物理冲突随之消失）。
 func BucketMapKey(table, idx string) string {

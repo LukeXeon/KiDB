@@ -1,9 +1,9 @@
 // Package controller 是自治控制循环：锁选举（含 watchdog 闭环，
 // docs/08 §8.5——移植 TiDB pkg/owner 语义）+ 桶分裂/合并决策。
 //
-// v1 落地：选举与故障迁移闭环（抢锁→watchdog 续约→失约立即退出→重新竞选）。
-// 分裂/合并状态机（bucket_state_cas/split_migrate 协议，docs/08 §8.3）
-// 与写路径双写联动是下一批。
+// v7.0：忙闲退避式竞选（触发二/四）——竞选前按本实例 inflight 分档退避
+// （忙节点自然让闲节点先拿锁）；任职中变忙主动卸任；锁空窗超内置上界
+// （300s，不设开关）所有节点无视退避强制竞选（兜底"全员忙自治死透"）。
 package controller
 
 import (
@@ -34,6 +34,11 @@ type Elector struct {
 	ttl     time.Duration
 	isOwner atomic.Bool
 	m       *metrics.Metrics // 指标（nil = no-op；owner_role_transitions_total）
+
+	busy        func() int64  // 忙闲信号（本实例在跑查询数；nil = 恒 0，docs/08 §8.5）
+	maxVacancy  time.Duration // 空窗上界（默认 300s；超时无视退避强制竞选）
+	firstEmpty  atomic.Int64  // 连续空窗起点（unix 纳秒；0 = 锁有人在）
+	backoffUnit time.Duration // 退避档长（默认 ttl/3；测试可注入）
 }
 
 // NewElector 构造。ttl 默认 10s（锁即选举，docs/08 §8.5）。
@@ -43,11 +48,47 @@ func NewElector(cli kv.Client, reg *script.Registry, lockKey, token string, ttl 
 	}
 	return &Elector{
 		cli: cli, reg: reg, lockKey: lockKey, token: token, ttl: ttl,
+		maxVacancy: 300 * time.Second,
 	}
 }
 
 // SetMetrics 接入指标。
 func (e *Elector) SetMetrics(m *metrics.Metrics) { e.m = m }
+
+// SetBusyFunc 注入忙闲信号（DI 单点：在跑查询数，docs/08 §8.5 角色负载自适应）。
+func (e *Elector) SetBusyFunc(f func() int64) { e.busy = f }
+
+// SetMaxVacancy 覆盖空窗上界（测试注入小值；生产恒 300s 内置，不设开关）。
+func (e *Elector) SetMaxVacancy(d time.Duration) { e.maxVacancy = d }
+
+// backoff 竞选退避：inflight 每 64 个一档（上限 3 档），每档一个 ttl/3——
+// 连续谱无阈值开关（v7.0 触发二纪律）；空窗超上界 → 0（无视退避强制竞选）。
+func (e *Elector) backoff() time.Duration {
+	if e.vacancy() > e.maxVacancy {
+		return 0
+	}
+	if e.busy == nil {
+		return 0
+	}
+	tier := e.busy() / 64
+	if tier > 3 {
+		tier = 3
+	}
+	unit := e.backoffUnit
+	if unit <= 0 {
+		unit = e.ttl / 3
+	}
+	return time.Duration(tier) * unit
+}
+
+// vacancy 当前连续空窗时长（0 = 锁有人在）。
+func (e *Elector) vacancy() time.Duration {
+	fe := e.firstEmpty.Load()
+	if fe == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, fe))
+}
 
 // CtrlLock 返回全局控制锁选举器（lk:ctrl）。
 func CtrlLock(cli kv.Client, reg *script.Registry, instanceID string) *Elector {
@@ -64,6 +105,12 @@ func (e *Elector) Campaign(ctx context.Context, role func(ctx context.Context) e
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// 忙闲退避（v7.0：忙节点让闲节点先拿锁；空窗超上界者豁免退避）
+		if bo := e.backoff(); bo > 0 {
+			if !utils.SleepCtx(ctx, bo+jitter()) {
+				return ctx.Err()
+			}
+		}
 		ok, err := e.tryAcquire(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			// 瞬时错误退避后重竞选
@@ -72,6 +119,8 @@ func (e *Elector) Campaign(ctx context.Context, role func(ctx context.Context) e
 			}
 			continue
 		}
+		// 空窗追踪（抢锁失败说明锁在或竞争失败——GET 分辨）
+		e.trackVacancy(ctx, ok)
 		if !ok {
 			if !utils.SleepCtx(ctx, e.ttl/3+jitter()) {
 				return ctx.Err()
@@ -109,6 +158,29 @@ func (e *Elector) tryAcquire(ctx context.Context) (bool, error) {
 	return res != nil && fmt.Sprint(res) == "OK", nil
 }
 
+// trackVacancy 空窗追踪：抢到/锁存在 → 清零；锁不存在（竞争失败）→ 累计。
+// 空窗时长写指标（role_vacancy_seconds——"注册即接线"纪律）。
+func (e *Elector) trackVacancy(ctx context.Context, acquired bool) {
+	if acquired {
+		e.firstEmpty.Store(0)
+		if e.m != nil {
+			e.m.RoleVacancy.Set(0)
+		}
+		return
+	}
+	res, err := e.cli.Do(ctx, "GET", e.lockKey)
+	if err == nil && res == nil { // 锁不存在：空窗
+		if e.firstEmpty.Load() == 0 {
+			e.firstEmpty.Store(time.Now().UnixNano())
+		}
+	} else {
+		e.firstEmpty.Store(0)
+	}
+	if e.m != nil {
+		e.m.RoleVacancy.Set(e.vacancy().Seconds())
+	}
+}
+
 // runWatchdog 续约循环：续约失败【立即】cancel 角色 ctx（锁已丢，杜绝脑裂窗口）。
 func (e *Elector) runWatchdog(roleCtx context.Context, cancel context.CancelFunc) error {
 	renew, ok := e.reg.Get("lock_renew")
@@ -126,6 +198,15 @@ func (e *Elector) runWatchdog(roleCtx context.Context, cancel context.CancelFunc
 			case <-roleCtx.Done():
 				return
 			case <-t.C:
+				// 任职退让（v7.0 触发二）：在跑查询超阈（128 内置）→ 主动卸任
+				// cancel 角色，锁待到期后由闲节点接走（role_concede_total{reason=busy}）
+				if e.busy != nil && e.busy() >= 128 {
+					if e.m != nil {
+						e.m.RoleConcede.WithLabelValues("busy").Inc()
+					}
+					cancel()
+					return
+				}
 				ctx, cancelT := context.WithTimeout(context.Background(), e.ttl/3)
 				res, err := e.cli.Eval(ctx, renew, []string{e.lockKey}, e.token, fmt.Sprint(e.ttl.Milliseconds()))
 				cancelT()

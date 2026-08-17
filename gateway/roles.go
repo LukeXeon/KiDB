@@ -22,8 +22,9 @@ import (
 )
 
 // roles.go：后台角色（docs/08 §8.5）的组件装配与循环驱动。
-// 所有节点默认参与；ReadWriteOnly 节点豁免（DI 层不构造 Roles）。
-// 锁即选举 + watchdog 续约；全部角色故障安全（全挂只会变慢，不出错行）。
+// v7.0 起无豁免：所有节点必须参与竞选（忙闲退避式竞选——忙退让、闲接管、
+// 空窗 300s 上界强制竞选）。锁即选举 + watchdog 续约；全部角色故障安全
+// （全挂只会变慢，不出错行）。
 
 // Roles 后台角色组件集（DI 图节点：wire provider 与测试共用 AssembleRoles）。
 type Roles struct {
@@ -46,13 +47,15 @@ func AssembleRoles(cli kv.Client, reg *script.Registry, store *meta.CatalogStore
 	l4.SetMetrics(ex.Metrics())
 	el := controller.CtrlLock(cli, reg, fmt.Sprintf("kidb@%d", time.Now().UnixNano()))
 	el.SetMetrics(ex.Metrics())
+	idxr := indexer.New(cli)
+	idxr.SetMetrics(ex.Metrics())
 	return &Roles{
 		Elector:    el,
 		Manager:    controller.NewManager(cli, bm, sp, l4, store, ex.Metrics()),
 		JobRunner:  controller.NewJobRunner(cli, reg, store, cache, ex, bm, guard),
 		Reconciler: controller.NewReconciler(cli, store, bm, ex.Metrics()),
 		Sweeper:    sweeper.New(cli, reg),
-		Indexer:    indexer.New(cli),
+		Indexer:    idxr,
 	}
 }
 

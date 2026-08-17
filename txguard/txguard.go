@@ -166,7 +166,7 @@ func (g *Guard) writeAttempt(ctx context.Context, req WriteReq, rowkey string,
 			continue
 		}
 		rkey := keycodec.UniqueKey(t.Name, idx.ID, newVal)
-		ok2, err := g.reserveUnique(ctx, rkey, rowkey, now)
+		ok2, err := g.reserveUnique(ctx, t.Name, idx.ID, newVal, rowkey, now)
 		if err != nil {
 			return false, err
 		}
@@ -403,9 +403,8 @@ func (g *Guard) DeleteRow(ctx context.Context, t *meta.TableDef, pk string) (del
 // 与写路径同一预约纪律（SET NX PX + 占有者活检查 + 死占有者自愈）；
 // ok=false = 真实冲突（占有者活行存在）——调用方据此中止建索引作业。
 func (g *Guard) ReserveUniqueForBackfill(ctx context.Context, t *meta.TableDef, idxID, encVal, pk string) (bool, error) {
-	rkey := keycodec.UniqueKey(t.Name, idxID, encVal)
 	rowkey := keycodec.RowKey(t.Name, pk)
-	return g.reserveUnique(ctx, rkey, rowkey, g.clock())
+	return g.reserveUnique(ctx, t.Name, idxID, encVal, rowkey, g.clock())
 }
 
 // NextAutoID 取 AUTO_INCREMENT 序列值（docs/05 §5.4：
@@ -425,14 +424,20 @@ func (g *Guard) NextAutoID(ctx context.Context, table string) (uint64, error) {
 // reserveUnique 执行唯一预约两阶段（docs/05 §5.3，v7.0 触发四②带 PX 自愈）：
 // SET NX PX → 失败则读占有者 → EXISTS 判活：活=false 返回；死=自愈重占。
 // 占有者就是本行（重试场景）视为成功。
-func (g *Guard) reserveUnique(ctx context.Context, rkey, rowkey string, now time.Time) (bool, error) {
+//
+// PX 24h 的正确性补丁：预约到期而占有行仍活（>24h 未重写）时，NX 会成功——
+// 此时必须经唯一桶复核"是否有活行持值"（预约是互斥闸，桶成员是长期事实源）；
+// 否则长命行的唯一约束会被时间戳破（实现期实证推演抓获）。
+func (g *Guard) reserveUnique(ctx context.Context, table, idxID, val, rowkey string, now time.Time) (bool, error) {
+	encVal := keycodec.EscapeValue(val) // 桶寻址用；rkey 由 UniqueKey 内部同规则
+	rkey := keycodec.UniqueKey(table, idxID, val)
 	owner := rowkey + "|" + strconv.FormatInt(now.Unix(), 10)
 	res, err := g.cli.Do(ctx, "SET", rkey, owner, "NX", "PX", uniqueResvTTL.Milliseconds())
 	if err != nil {
 		return false, err
 	}
 	if res != nil && fmt.Sprint(res) == "OK" {
-		return true, nil
+		return g.verifyBucketExclusive(ctx, table, idxID, encVal, rowkey)
 	}
 	// NX 失败：读占有者
 	cur, err := g.cli.Do(ctx, "GET", rkey)
@@ -440,11 +445,14 @@ func (g *Guard) reserveUnique(ctx context.Context, rkey, rowkey string, now time
 		return false, err
 	}
 	if cur == nil {
-		return true, g.retryReserve(ctx, rkey, owner) // 刚好被释放/到期
+		if err := g.retryReserve(ctx, rkey, owner); err != nil {
+			return false, err
+		}
+		return g.verifyBucketExclusive(ctx, table, idxID, encVal, rowkey) // 到期空窗重占 → 桶复核
 	}
 	ownerRow := strings.SplitN(fmt.Sprint(cur), "|", 2)[0]
 	if ownerRow == rowkey {
-		return true, nil // 我方已持有（stale 重试）
+		return true, nil // 我方已持有（stale 重试；首占时已复核）
 	}
 	exists, err := g.cli.Do(ctx, "EXISTS", ownerRow)
 	if err != nil {
@@ -457,7 +465,57 @@ func (g *Guard) reserveUnique(ctx context.Context, rkey, rowkey string, now time
 	if _, err := g.cli.Do(ctx, "DEL", rkey); err != nil {
 		return false, err
 	}
-	return true, g.retryReserve(ctx, rkey, owner)
+	if err := g.retryReserve(ctx, rkey, owner); err != nil {
+		return false, err
+	}
+	return g.verifyBucketExclusive(ctx, table, idxID, encVal, rowkey)
+}
+
+// verifyBucketExclusive 唯一桶复核：预约拿到后确认无他行活持同值
+// （PX 到期/自愈窗口的兜底，docs/05 §5.3）。覆盖全部可读子桶（分裂窗口）；
+// 逐 member 取 pk 判活；活行即真冲突：回滚预约返回 false。
+func (g *Guard) verifyBucketExclusive(ctx context.Context, table, idxID, encVal, rowkey string) (bool, error) {
+	var buckets []int
+	if g.bm != nil {
+		if d, err := g.bm.Load(ctx, table, idxID); err == nil {
+			buckets = d.ReadBucketsEq(encVal)
+		}
+	}
+	if len(buckets) == 0 {
+		buckets = []int{0}
+	}
+	var members []string
+	for _, b := range buckets {
+		res, err := g.cli.Do(ctx, "ZRANGE", keycodec.EqBucketKeyEsc(table, idxID, encVal, b), 0, 63)
+		if err != nil {
+			return false, err
+		}
+		members = append(members, utils.Strings(res)...)
+	}
+	if len(members) == 0 {
+		return true, nil
+	}
+	var existCmds []kv.Cmd
+	for _, m := range members {
+		existCmds = append(existCmds, kv.Cmd{Name: "EXISTS", Args: []any{keycodec.RowKey(table, rowcodec.MemberPK(m, false))}})
+	}
+	alives, err := g.cli.Pipeline(ctx, existCmds)
+	if err != nil {
+		return false, err
+	}
+	myPK := rowkey[strings.IndexByte(rowkey, '{')+1 : len(rowkey)-1]
+	for i, m := range members {
+		if fmt.Sprint(alives[i]) != "1" {
+			continue
+		}
+		if rowcodec.MemberPK(m, false) == myPK {
+			continue // 我方自己的 member（崩溃重试窗口）
+		}
+		// 真冲突：回滚预约（占有者比对防误删）
+		_ = g.releaseUnique(ctx, keycodec.UniqueKey(table, idxID, encVal), rowkey)
+		return false, nil
+	}
+	return true, nil
 }
 
 func (g *Guard) retryReserve(ctx context.Context, rkey, owner string) error {

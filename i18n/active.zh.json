@@ -13,7 +13,6 @@
   "cli.flag_read_timeout": "读超时（scatter 预算 = 读超时 × headroom）",
   "cli.flag_redis": "Redis Cluster 地址，逗号分隔",
   "cli.flag_replica_read": "声明副本读能力（适配器构造 ReadOnly 副本客户端；运行时还需 SET GLOBAL replica_read=true 才进读路径）",
-  "cli.flag_rw_only": "纯读写节点：不启动后台角色循环",
   "cli.flag_write_timeout": "写超时",
   "cli.metrics_exit": "metrics 端点退出",
   "cli.start_failed": "kidb-server 启动失败",

@@ -26,7 +26,7 @@ type Server struct {
 	srv   *server.Server
 	deps  engine.Deps
 	cfg   *config.Store // 配置存储（SET GLOBAL 持久化桥 + 远端变更轮询，docs/10 §10.2）
-	roles *Roles        // 后台角色（nil = ReadWriteOnly 豁免，docs/08 §8.5）
+	roles *Roles        // 后台角色（v7.0 起必有——所有节点参与竞选，docs/08 §8.5）
 
 	lifeCancel context.CancelFunc // 进程级生命周期：角色循环与配置轮询同归
 }
@@ -45,8 +45,8 @@ func NewServer(deps engine.Deps, boot kidb.Bootstrap, roles *Roles, cfgStore *co
 	if cfgStore == nil {
 		return nil, fmt.Errorf("gateway: config.Store 未装配")
 	}
-	if roles == nil && !boot.ReadWriteOnly {
-		return nil, fmt.Errorf("gateway: 后台角色未装配且非 ReadWriteOnly")
+	if roles == nil {
+		return nil, fmt.Errorf("gateway: 后台角色未装配")
 	}
 	return newServerWithListener(deps, boot, nil, roles, cfgStore)
 }
@@ -61,7 +61,7 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 	if cfgStore == nil {
 		cfgStore = config.New(deps.Client, deps.Reg, ConfigActor)
 	}
-	if roles == nil && !boot.ReadWriteOnly {
+	if roles == nil {
 		roles = AssembleRoles(deps.Client, deps.Reg, deps.Store, deps.Cache, deps.Exec,
 			bucketmap.New(deps.Client, deps.Reg), deps.Guard)
 	}
@@ -136,7 +136,20 @@ func newServerWithListener(deps engine.Deps, boot kidb.Bootstrap, l net.Listener
 	}
 	go s.pollSysvars(lifeCtx)
 
-	// 后台角色自动选举（docs/08 §8.5：默认参与，ReadWriteOnly 显式豁免）
+	// 忙闲信号注入（v7.0 触发二：本实例在跑查询数——gms ProcessList 零管线化）
+	if eng != nil {
+		eng2 := eng
+		s.roles.Elector.SetBusyFunc(func() int64 {
+			var n int64
+			for _, pr := range eng2.ProcessList.Processes() {
+				if pr.Command == sql.ProcessCommandQuery {
+					n++
+				}
+			}
+			return n
+		})
+	}
+	// 后台角色自动选举（docs/08 §8.5：所有节点参与竞选；忙闲退避自适应）
 	if s.roles != nil {
 		s.startRoles(lifeCtx)
 	}

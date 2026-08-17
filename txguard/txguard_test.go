@@ -183,3 +183,32 @@ func TestCASWriteGuard(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), res.NewVer)
 }
+
+// TestUniqueReservationTTL24h 预约 24h PX 自愈（v7.0 触发四②）：
+// 过期预约可被同值重写（死行）；**活行预约到期后同值仍 1062**（唯一桶复核兜底——
+// 无此复核，>24h 未重写的行会被时间戳破唯一约束，实现期推演抓获）。
+func TestUniqueReservationTTL24h(t *testing.T) {
+	cli, reg, m := testutil.New(t)
+	g := New(cli, reg, nil)
+	tbl := testTable()
+	ctx := context.Background()
+
+	// 活行长存（无 TTL）：预约 24h 后到期
+	_, err := g.WriteRow(ctx, WriteReq{Table: tbl, PK: "1", Fields: map[string]string{"email": "long@x.com"}})
+	require.NoError(t, err)
+	m.FastForward(25 * time.Hour) // 预约 PX 到期
+
+	// 活行仍在：同值新行必须 1062（桶复核拦截，而非预约——预约已过期消失）
+	_, err = g.WriteRow(ctx, WriteReq{Table: tbl, PK: "2", Fields: map[string]string{"email": "long@x.com"}})
+	require.ErrorIs(t, err, kidb.ErrDuplicateKey, "活行持值：预约到期不得放行同值")
+
+	// 死行场景：行删除后预约残留（跳过清扫），24h 到期 → 同值可复用
+	_, err = g.WriteRow(ctx, WriteReq{Table: tbl, PK: "3", Fields: map[string]string{"email": "dead@x.com"}})
+	require.NoError(t, err)
+	ok, err := g.DeleteRow(ctx, tbl, "3")
+	require.NoError(t, err)
+	require.True(t, ok)
+	m.FastForward(25 * time.Hour)
+	_, err = g.WriteRow(ctx, WriteReq{Table: tbl, PK: "4", Fields: map[string]string{"email": "dead@x.com"}})
+	require.NoError(t, err, "死行预约到期后同值必须可复用（时间自愈）")
+}

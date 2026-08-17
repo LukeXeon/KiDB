@@ -13,7 +13,6 @@
   "cli.flag_read_timeout": "read timeout (scatter budget = read timeout x headroom)",
   "cli.flag_redis": "Redis Cluster addresses, comma-separated",
   "cli.flag_replica_read": "declare replica-read capability (adapter builds a ReadOnly replica client; at runtime SET GLOBAL replica_read=true is still required)",
-  "cli.flag_rw_only": "read-write-only node: no background role loops",
   "cli.flag_write_timeout": "write timeout",
   "cli.metrics_exit": "metrics endpoint exited",
   "cli.start_failed": "kidb-server startup failed",

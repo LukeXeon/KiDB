@@ -28,7 +28,6 @@ func main() {
 		poolSize     = flag.Int("pool", 128, i18n.T("cli.flag_pool"))
 		readTimeout  = flag.Duration("read-timeout", 3*time.Second, i18n.T("cli.flag_read_timeout"))
 		writeTimeout = flag.Duration("write-timeout", 3*time.Second, i18n.T("cli.flag_write_timeout"))
-		rwOnly       = flag.Bool("read-write-only", false, i18n.T("cli.flag_rw_only"))
 		replicaRead  = flag.Bool("replica-read", false, i18n.T("cli.flag_replica_read"))
 		metricsAddr  = flag.String("metrics-addr", "", i18n.T("cli.flag_metrics_addr"))
 		accounts     = flag.String("accounts", "root:127.0.0.1:kidb:rw", i18n.T("cli.flag_accounts"))
@@ -47,14 +46,13 @@ func main() {
 	}
 
 	boot := kidb.Bootstrap{
-		Lang:          langVal,
-		Addrs:         strings.Split(*addrs, ","),
-		PoolSize:      *poolSize,
-		ReadTimeout:   *readTimeout,
-		WriteTimeout:  *writeTimeout,
-		ReplicaRead:   *replicaRead,
-		ReadWriteOnly: *rwOnly,
-		ListenAddr:    *listen,
+		Lang:         langVal,
+		Addrs:        strings.Split(*addrs, ","),
+		PoolSize:     *poolSize,
+		ReadTimeout:  *readTimeout,
+		WriteTimeout: *writeTimeout,
+		ReplicaRead:  *replicaRead,
+		ListenAddr:   *listen,
 	}
 	if !isFlagSet("accounts") {
 		slog.Warn(i18n.T("cli.default_account_warn")) // 出厂默认账号仅本机可达；生产必须显式配置
@@ -87,7 +85,7 @@ func main() {
 		}()
 	}
 
-	slog.Info(i18n.T("cli.started"), "listen", boot.ListenAddr, "redis", boot.Addrs, "rwOnly", boot.ReadWriteOnly)
+	slog.Info(i18n.T("cli.started"), "listen", boot.ListenAddr, "redis", boot.Addrs)
 	if err := srv.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

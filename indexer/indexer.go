@@ -13,6 +13,7 @@ import (
 	"kidb/keycodec"
 	"kidb/kv"
 	"kidb/meta"
+	"kidb/metrics"
 	"kidb/rowcodec"
 	"kidb/utils"
 )
@@ -21,10 +22,14 @@ import (
 type Indexer struct {
 	cli   kv.Client
 	batch int
+	m     *metrics.Metrics // 指标（nil = no-op；index_dlq_total）
 }
 
 // New 构造。
 func New(cli kv.Client) *Indexer { return &Indexer{cli: cli, batch: 500} }
+
+// SetMetrics 接入指标（"注册即接线"纪律）。
+func (i *Indexer) SetMetrics(m *metrics.Metrics) { i.m = m }
 
 // ConsumeLog 消费一批日志条目（LTRIM 截断已消费前缀），返回消费条数。
 // 消费语义：条目 pk\x1f旧值\x1f新值\x1fver；旧值非空 → ZREM 旧桶，新值非空 → ZADD 新桶。
@@ -41,12 +46,14 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 	}
 
 	var cmds []kv.Cmd
+	var dlq []string // 死信（畸形/硬失败条目——v7.0 触发四③落点）
 	col := idx.Columns[0]
 	colDef, colOK := t.Column(col)
 	for _, e := range entries {
 		parts := strings.SplitN(e, "\x1f", 5)
 		if len(parts) != 5 {
-			continue // 畸形条目跳过（对账兜底，docs/12 §12.8）
+			dlq = append(dlq, e) // 畸形条目落死信（不再静默丢弃）
+			continue
 		}
 		pk := parts[0]
 		// 日志字段是 url.QueryEscape 可逆形态（txguard escLogField）——
@@ -56,7 +63,8 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 		oldIV, err3 := strconv.ParseUint(parts[3], 10, 64)
 		ver, err4 := strconv.ParseUint(parts[4], 10, 64)
 		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || ver == 0 {
-			continue // 畸形条目跳过（对账兜底，docs/12 §12.8）
+			dlq = append(dlq, e)
+			continue
 		}
 		// v7.0 版本戳：撤销用 oldIV（member 创建版本，行内 _iv 纪律——值最后一次
 		// 写入时的版本，docs/05 §5.1）；重建用 ver（本次写入版本）。墓碑（newV 空）
@@ -98,7 +106,22 @@ func (i *Indexer) ConsumeLog(ctx context.Context, t *meta.TableDef, idx *meta.In
 	}
 	if len(cmds) > 0 {
 		if _, err := i.cli.Pipeline(ctx, cmds); err != nil {
-			return 0, err
+			// 应用失败重试一次（ZADD/ZREM 幂等可重放）；仍失败 = 硬失败
+			// （桶被 DROP/节点持续故障）→ 整批落死信，不死循环（v7.0 触发四③）
+			if _, err2 := i.cli.Pipeline(ctx, cmds); err2 != nil {
+				dlq = append(dlq, entries...)
+			}
+		}
+	}
+	// 死信落点：dlq:idx:{table}:{idx} + 指标（对账巡检扩一项，docs/12 §12.8）
+	if len(dlq) > 0 {
+		args := []any{keycodec.DLQKey(t.Name, idx.ID)}
+		for _, e := range dlq {
+			args = append(args, e)
+		}
+		_, _ = i.cli.Do(ctx, "RPUSH", args...)
+		if i.m != nil {
+			i.m.IndexDLQ.Add(float64(len(dlq))) // index_dlq_total
 		}
 	}
 

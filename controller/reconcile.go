@@ -100,6 +100,20 @@ func (r *Reconciler) ReconcilePage(ctx context.Context, def *meta.TableDef) erro
 		}
 		indexes = append(indexes, idx)
 	}
+	// DLQ 深度巡检（触发四③：异步补写硬失败的最终观测面——非零即漂移）
+	for i := range def.Indexes {
+		idx := &def.Indexes[i]
+		if !idx.Async {
+			continue
+		}
+		depth, err := r.cli.Do(ctx, "LLEN", keycodec.DLQKey(def.Name, idx.ID))
+		if err != nil {
+			continue
+		}
+		if n, _ := strconv.ParseInt(fmt.Sprint(depth), 10, 64); n > 0 {
+			r.drift("index_dlq_nonempty", def.Name, idx.ID, strconv.FormatInt(n, 10))
+		}
+	}
 	if len(indexes) == 0 {
 		return nil
 	}

@@ -6,10 +6,13 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"kidb/keycodec"
 	"kidb/meta"
+	"kidb/metrics"
 	"kidb/testutil"
 	"kidb/txguard"
 )
@@ -87,4 +90,38 @@ func TestAsyncIndexFlow(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "0", fmt.Sprint(res))
 	}
+}
+
+// TestIndexDLQ 补写死信（v7.0 触发四③）：畸形条目不再静默丢弃——
+// 落 dlq:idx:{table}:{idx} + index_dlq_total 指标，消费继续推进。
+func TestIndexDLQ(t *testing.T) {
+	cli, reg, _ := testutil.New(t)
+	m := metrics.New(prometheus.NewRegistry())
+	tbl := asyncTable()
+	ctx := context.Background()
+	idx := tbl.Index("idx_tag")
+	slot := keycodec.Slot(keycodec.RowKey(tbl.Name, "1"))
+
+	// 塞一条畸形日志（字段数不对）
+	_, err := cli.Do(ctx, "RPUSH", keycodec.AsyncLogKey(tbl.Name, idx.ID, slot), "bad-entry-no-fields")
+	require.NoError(t, err)
+	// 塞一条正常日志（经写入路径）
+	g := txguard.New(cli, reg, nil)
+	_, err = g.WriteRow(ctx, txguard.WriteReq{Table: tbl, PK: "1", Fields: map[string]string{"tag": "go"}})
+	require.NoError(t, err)
+
+	ix := New(cli)
+	ix.SetMetrics(m)
+	n, err := ix.ConsumeLog(ctx, tbl, idx, slot)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+
+	// 畸形条目落死信；正常条目已应用
+	depth, err := cli.Do(ctx, "LLEN", keycodec.DLQKey(tbl.Name, idx.ID))
+	require.NoError(t, err)
+	require.Equal(t, "1", fmt.Sprint(depth), "畸形条目必须落死信队列")
+	require.Equal(t, 1.0, promtest.ToFloat64(m.IndexDLQ), "index_dlq_total 接线")
+	res, err := cli.Do(ctx, "ZCARD", keycodec.EqBucketKey(tbl.Name, idx.ID, "go", 0))
+	require.NoError(t, err)
+	require.Equal(t, "1", fmt.Sprint(res), "正常条目不受影响")
 }

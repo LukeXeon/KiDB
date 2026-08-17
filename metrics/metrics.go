@@ -26,6 +26,9 @@ type Metrics struct {
 	DDLJobDuration  *prometheus.HistogramVec // ddl_job_duration_seconds{type}
 	OwnerTransition prometheus.Counter       // owner_role_transitions_total
 	ReconcileDrift  *prometheus.CounterVec   // reconcile_drift_total{kind}（对账漂移，docs/12 §12.8；正常=0）
+	RoleConcede     *prometheus.CounterVec   // role_concede_total{reason}（任职退让，docs/08 §8.5）
+	RoleVacancy     prometheus.Gauge         // role_vacancy_seconds（锁连续空窗时长；>0 即无人接管）
+	IndexDLQ        prometheus.Counter       // index_dlq_total（异步补写死信条目，docs/12 §12.8）
 }
 
 // New 注册全部系列；reg 为 nil 时用默认注册表。
@@ -63,13 +66,18 @@ func New(reg prometheus.Registerer) *Metrics {
 		ReconcileDrift: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "kidb", Name: "reconcile_drift_total",
 		}, []string{"kind"}),
+		RoleConcede: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "kidb", Name: "role_concede_total",
+		}, []string{"reason"}),
+		RoleVacancy: prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "kidb", Name: "role_vacancy_seconds"}),
+		IndexDLQ:    prometheus.NewCounter(prometheus.CounterOpts{Namespace: "kidb", Name: "index_dlq_total"}),
 	}
 	reg.MustRegister(
 		m.QueryDuration, m.ScatterFanout, m.BucketMembers, m.Splits, m.Merges,
 		m.HotReplicas, m.SweptTotal, m.NearcacheHits, m.NearcacheMiss,
 		m.RowsFiltered, m.FullscanTotal, m.LuaStaleRetry,
 		m.ConfigSet, m.LeaseRefresh, m.DDLJobDuration,
-		m.OwnerTransition, m.ReconcileDrift,
+		m.OwnerTransition, m.ReconcileDrift, m.RoleConcede, m.RoleVacancy, m.IndexDLQ,
 	)
 	return m
 }
